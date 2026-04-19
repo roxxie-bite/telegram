@@ -17,7 +17,7 @@ MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 BASE_URL = "https://lynther.sytes.net/?p=lora&t=loonie"
 SITE_BASE = "https://lynther.sytes.net"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 25
-CHECK_INTERVAL_HOURS = 6
+CHECK_INTERVAL_HOURS = 24
 MAX_PAGES = 20
 # =============================================
 
@@ -61,7 +61,7 @@ def parse_loras_from_html(html, min_days):
         results = []
         
         lora_heads = soup.find_all("p", class_="lora_head")
-        logger.info("Найдено lora_head: " + str(len(lora_heads)))
+        logger.info("Найдено : " + str(len(lora_heads)))
         
         for head in lora_heads:
             try:
@@ -137,13 +137,17 @@ def find_inactive_loonies_all_pages(base_url, min_days):
             all_results.extend(loras)
             logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
         else:
-            logger.info("Стр. " + str(page) + ": лор не найдено")
+            # === НОВАЯ ЛОГИКА: если лор нет — завершаем поиск ===
+            logger.info("Стр. " + str(page) + ": лор не найдено → завершаю поиск")
+            break  # ← Выходим из цикла, дальше страниц нет
         
+        # Пауза между страницами (чтобы не забанили)
         if page < MAX_PAGES:
             time.sleep(1.5)
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results
+
 
 def format_message(lora):
     """Формирует сообщение с кликабельным названием лоры"""
