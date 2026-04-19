@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import requests
+import time
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -14,9 +15,10 @@ from aiohttp import web
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
-TARGET_URL = "https://lynther.sytes.net/?p=lora&q=Loonie"
+BASE_URL = "https://lynther.sytes.net/?p=lora&q=Loonie"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 25
 CHECK_INTERVAL_HOURS = 6
+MAX_PAGES = 20  # Максимум страниц для проверки
 # =============================================
 
 logging.basicConfig(
@@ -32,10 +34,10 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === СОСТОЯНИЕ В ПАМЯТИ (без файла) ===
+# === СОСТОЯНИЕ В ПАМЯТИ ===
 bot_state = {"min_days": DEFAULT_MIN_DAYS}
 
-# ================= ЗАЩИЩЁННЫЙ ПАРСЕР =================
+# ================= ЗАЩИЩЁННЫЙ ЗАПРОС =================
 def fetch_with_retry(url, max_retries=3):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     for attempt in range(1, max_retries + 1):
@@ -47,15 +49,13 @@ def fetch_with_retry(url, max_retries=3):
             logger.warning("Попытка " + str(attempt) + "/" + str(max_retries) + " упала: " + str(e))
             if attempt == max_retries:
                 return None
-            import time
             time.sleep(2 ** attempt)
 
-def find_inactive_loonies(url, min_days):
-    html = fetch_with_retry(url)
+# ================= ПАРСЕР ОДНОЙ СТРАНИЦЫ =================
+def parse_loras_from_html(html, min_days):
     if html is None:
-        logger.error("Не удалось загрузить сайт после всех попыток")
         return []
-
+    
     try:
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text()
@@ -114,6 +114,41 @@ def find_inactive_loonies(url, min_days):
         logger.error("Ошибка парсинга: " + str(e))
         return []
 
+# ================= ПАРСЕР ВСЕХ СТРАНИЦ =================
+def find_inactive_loonies_all_pages(base_url, min_days):
+    all_results = []
+    pages_scanned = 0
+    
+    for page in range(1, MAX_PAGES + 1):
+        if page == 1:
+            url = base_url
+        else:
+            url = base_url + "&c=" + str(page)
+        
+        logger.info("Сканирую страницу: " + str(page) + " | URL: " + url)
+        html = fetch_with_retry(url)
+        
+        if html is None:
+            logger.warning("Страница " + str(page) + " не загрузилась")
+            break
+        
+        loras = parse_loras_from_html(html, min_days)
+        pages_scanned += 1
+        
+        if loras:
+            all_results.extend(loras)
+            logger.info("Страница " + str(page) + ": найдено " + str(len(loras)) + " лор")
+        else:
+            logger.info("Страница " + str(page) + ": лор не найдено, завершаю")
+            break
+        
+        # Пауза между страницами (чтобы не забанили)
+        if page < MAX_PAGES:
+            time.sleep(1.5)
+    
+    logger.info("=== ВСЕГО === Страниц: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
+    return all_results
+
 def format_message(lora):
     msg = []
     msg.append("🧠 <b>" + str(lora["name"]) + "</b>")
@@ -128,15 +163,22 @@ def format_message(lora):
 async def cmd_check(message: Message):
     try:
         logger.info("=== ПРОВЕРКА === Порог: " + str(bot_state["min_days"]))
-        await message.answer("🔍 Начинаю сканирование (порог: " + str(bot_state["min_days"]) + " дней)...")
-        loras = find_inactive_loonies(TARGET_URL, bot_state["min_days"])
+        await message.answer("🔍 Сканирую все страницы (порог: " + str(bot_state["min_days"]) + " дней)...")
+        
+        loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
+        
         logger.info("Найдено лор: " + str(len(loras)))
+        
         if not loras:
             await message.answer("✅ Лоры, соответствующие критериям, не найдены.")
             return
+        
+        await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
+        
         for lora in loras:
             await message.answer(format_message(lora), parse_mode="HTML")
             await asyncio.sleep(0.3)
+            
     except Exception as e:
         logger.error("Ошибка в /check: " + str(e))
         await message.answer("❌ Произошла ошибка при проверке. Попробуй позже.")
@@ -153,19 +195,18 @@ async def cmd_setdays(message: Message):
             await message.answer("⚠️ Число должно быть больше 0")
             return
         
-        # === ОБНОВЛЯЕМ ТОЛЬКО ПАМЯТЬ ===
         bot_state["min_days"] = new_days
         logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: " + str(new_days))
         
-        await message.answer("✅ Порог установлен на <b>" + str(new_days) + "</b> дней. (действует до перезагрузки)", parse_mode="HTML")
+        await message.answer("✅ Порог установлен на <b>" + str(new_days) + "</b> дней.", parse_mode="HTML")
         
-        # Сразу покажем результат
         await message.answer("🔍 Проверяю с новым порогом...")
-        loras = find_inactive_loonies(TARGET_URL, bot_state["min_days"])
+        loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
         if loras:
             await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
         else:
-            await message.answer("✅ Лоры не найдены (возможно, все активнее " + str(new_days) + " дней)")
+            await message.answer("✅ Лоры не найдены")
+            
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
         await message.answer("❌ Не удалось изменить настройку.")
@@ -176,7 +217,7 @@ async def cmd_status(message: Message):
         txt = "⚙️ <b>Настройки бота:</b>\n"
         txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней\n"
         txt += "🔄 Автопроверка: каждые <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
-        txt += "💾 Хранение: в памяти (сброс при рестарте)"
+        txt += "📄 Макс. страниц: <b>" + str(MAX_PAGES) + "</b>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
@@ -187,6 +228,7 @@ async def cmd_debug(message: Message):
         txt = "🔍 <b>Отладка:</b>\n"
         txt += "Порог в памяти: " + str(bot_state["min_days"]) + "\n"
         txt += "Порог из env (MIN_DAYS): " + str(DEFAULT_MIN_DAYS) + "\n"
+        txt += "Базовый URL: " + BASE_URL
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /debug: " + str(e))
@@ -194,25 +236,6 @@ async def cmd_debug(message: Message):
 @dp.message()
 async def silent_ignore(message: Message):
     pass
-
-
-@dp.message(Command("raw"), F.from_user.id == OWNER_ID_INT)
-async def cmd_raw(message: Message):
-    try:
-        html = fetch_with_retry(TARGET_URL)
-        if html:
-            soup = BeautifulSoup(html, "html.parser")
-            text = soup.get_text()[:1000]  # Первые 1000 символов
-            await message.answer(
-                "📄 <b>Сырой текст (первые 1000 символов):</b>\n"
-                "<code>" + text.replace("`", "\\`") + "</code>",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Не удалось загрузить сайт")
-    except Exception as e:
-        logger.error("Ошибка в /raw: " + str(e))
-        await message.answer("❌ Ошибка: " + str(e))
 
 # ================= ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК =================
 @dp.errors()
@@ -230,7 +253,7 @@ async def periodic_check():
     while True:
         try:
             logger.info("=== АВТОПРОВЕРКА === Порог: " + str(bot_state["min_days"]))
-            loras = find_inactive_loonies(TARGET_URL, bot_state["min_days"])
+            loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
             if loras:
                 logger.info("Найдено лор: " + str(len(loras)))
                 for lora in loras:
@@ -254,7 +277,7 @@ async def periodic_check():
 
 async def on_startup():
     logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
-    logger.info("🔒 Private mode | Порог: " + str(bot_state["min_days"]))
+    logger.info("🔒 Private mode | Порог: " + str(bot_state["min_days"]) + " | Страниц: до " + str(MAX_PAGES))
     asyncio.create_task(periodic_check())
 
 # ================= WEB SERVER (RENDER) =================
