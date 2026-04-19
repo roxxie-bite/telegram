@@ -15,6 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 BASE_URL = "https://lynther.sytes.net/?p=lora&t=loonie"
+SITE_BASE = "https://lynther.sytes.net"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 25
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 20
@@ -59,7 +60,6 @@ def parse_loras_from_html(html, min_days):
         soup = BeautifulSoup(html, "html.parser")
         results = []
         
-        # === ИЩЕМ ВСЕ <p class="lora_head"> ===
         lora_heads = soup.find_all("p", class_="lora_head")
         logger.info("Найдено lora_head: " + str(len(lora_heads)))
         
@@ -79,11 +79,24 @@ def parse_loras_from_html(html, min_days):
                     continue
                 lora_days = int(days_match.group(1))
                 
+                # === ИЗВЛЕКАЕМ НАЗВАНИЕ (до "||") ===
+                # Формат: "3. Uniro (style) [Illustrious] || ..."
+                name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
+                if name_match:
+                    lora_name = name_match.group(1).strip()
+                else:
+                    lora_name = "Loonie"
+                
+                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
+                lora_url = SITE_BASE + "/?p=lora&id=" + lora_id
+                
                 # === ПРОВЕРКА: >= min_days ===
                 if lora_days >= min_days:
                     results.append({
                         "id": lora_id,
-                        "days": lora_days
+                        "days": lora_days,
+                        "name": lora_name,
+                        "url": lora_url
                     })
                     logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ВКЛЮЧЕНО")
                 else:
@@ -126,7 +139,6 @@ def find_inactive_loonies_all_pages(base_url, min_days):
             logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
         else:
             logger.info("Стр. " + str(page) + ": лор не найдено")
-            # Не прерываем — на других страницах могут быть
         
         if page < MAX_PAGES:
             time.sleep(1.5)
@@ -135,8 +147,10 @@ def find_inactive_loonies_all_pages(base_url, min_days):
     return all_results
 
 def format_message(lora):
+    """Формирует сообщение с кликабельным названием лоры"""
     msg = []
-    msg.append("🧠 <b>Loonie</b>")
+    # Кликабельное название: <a href="URL">Name</a>
+    msg.append("🧠 <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>")
     msg.append("🆔 <code>ID: " + str(lora["id"]) + "</code>")
     msg.append("🕸️ <b>" + str(lora["days"]) + " дней</b> без использования")
     msg.append("🗑️ <code>/dellora " + str(lora["id"]) + "</code>")
@@ -168,6 +182,7 @@ async def cmd_check(message: Message):
 
 @dp.message(Command("setdays"), F.from_user.id == OWNER_ID_INT)
 async def cmd_setdays(message: Message):
+    """Только сохраняет порог, без автоматической проверки"""
     try:
         parts = message.text.split()
         if len(parts) != 2 or not parts[1].isdigit():
@@ -181,13 +196,8 @@ async def cmd_setdays(message: Message):
         bot_state["min_days"] = new_days
         logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
-        await message.answer("✅ Порог: <b>" + str(new_days) + "</b> дней (>=). Проверяю...", parse_mode="HTML")
-        
-        loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
-        if loras:
-            await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
-        else:
-            await message.answer("⚠️ Лоры не найдены.")
+        # ✅ Только подтверждаем, без проверки
+        await message.answer("✅ Порог установлен на <b>" + str(new_days) + "</b> дней (>=). Используй /check для поиска.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
@@ -200,7 +210,6 @@ async def cmd_status(message: Message):
         txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней (>=)\n"
         txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
         txt += "📄 Страниц: до <b>" + str(MAX_PAGES) + "</b>\n"
-        txt += "🏷️ Поиск: по &lt;p class='lora_head'&gt;"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
