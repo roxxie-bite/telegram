@@ -14,10 +14,11 @@ from aiohttp import web
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
-BASE_URL = "https://lynther.sytes.net/?p=lora&t=loonie"
+TAG_ENV = os.getenv("TAG", "loonie")
 SITE_BASE = "https://lynther.sytes.net"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 25
-CHECK_INTERVAL_HOURS = 24
+DEFAULT_TAG = TAG_ENV if TAG_ENV else "loonie"
+CHECK_INTERVAL_HOURS = 48
 MAX_PAGES = 20
 # =============================================
 
@@ -35,7 +36,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # === СОСТОЯНИЕ В ПАМЯТИ ===
-bot_state = {"min_days": DEFAULT_MIN_DAYS}
+bot_state = {
+    "min_days": DEFAULT_MIN_DAYS,
+    "tag": DEFAULT_TAG
+}
 
 # ================= ЗАЩИЩЁННЫЙ ЗАПРОС =================
 def fetch_with_retry(url, max_retries=3):
@@ -61,7 +65,7 @@ def parse_loras_from_html(html, min_days):
         results = []
         
         lora_heads = soup.find_all("p", class_="lora_head")
-        logger.info("Найдено : " + str(len(lora_heads)))
+        logger.info("Найдено lora_head: " + str(len(lora_heads)))
         
         for head in lora_heads:
             try:
@@ -86,7 +90,7 @@ def parse_loras_from_html(html, min_days):
                 else:
                     lora_name = "Loonie"
                 
-                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ (ИСПРАВЛЕНО) ===
+                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
                 # === ПРОВЕРКА: >= min_days ===
@@ -137,22 +141,18 @@ def find_inactive_loonies_all_pages(base_url, min_days):
             all_results.extend(loras)
             logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
         else:
-            # === НОВАЯ ЛОГИКА: если лор нет — завершаем поиск ===
             logger.info("Стр. " + str(page) + ": лор не найдено → завершаю поиск")
-            break  # ← Выходим из цикла, дальше страниц нет
+            break
         
-        # Пауза между страницами (чтобы не забанили)
         if page < MAX_PAGES:
             time.sleep(1.5)
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results
 
-
 def format_message(lora):
     """Формирует сообщение с кликабельным названием лоры"""
     msg = []
-    # Кликабельное название: <a href="URL">Name</a>
     msg.append("🧠 <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>")
     msg.append("🆔 <code>ID: " + str(lora["id"]) + "</code>")
     msg.append("🕸️ <b>" + str(lora["days"]) + " дней</b> без использования")
@@ -164,20 +164,39 @@ def format_message(lora):
 @dp.message(Command("check"), F.from_user.id == OWNER_ID_INT)
 async def cmd_check(message: Message):
     try:
-        logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]))
-        await message.answer("🔍 Сканирую тег Loonie (порог: >= " + str(bot_state["min_days"]) + " дней)...")
+        logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Тег: " + bot_state["tag"])
+        await message.answer("🔍 Сканирую тег <b>" + bot_state["tag"] + "</b> (порог: >= " + str(bot_state["min_days"]) + " дней)...", parse_mode="HTML")
         
-        loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
+        base_url = SITE_BASE + "/?p=lora&t=" + bot_state["tag"]
+        loras = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
         
         if not loras:
             await message.answer("✅ Лоры не найдены.")
             return
+        
+        # Сортировка: сначала самые старые (больше дней)
+        loras.sort(key=lambda x: x["days"], reverse=True)
         
         await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
         
         for lora in loras:
             await message.answer(format_message(lora), parse_mode="HTML")
             await asyncio.sleep(0.3)
+        
+        # === СТАТИСТИКА ===
+        if loras:
+            avg_days = sum(l["days"] for l in loras) // len(loras)
+            max_lora = max(loras, key=lambda x: x["days"])
+            min_lora = min(loras, key=lambda x: x["days"])
+            
+            stats = "\n📊 <b>Статистика:</b>\n"
+            stats += "• Страниц просканировано: " + str(MAX_PAGES) + " (макс)\n"
+            stats += "• Лор найдено: <b>" + str(len(loras)) + "</b>\n"
+            stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
+            stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
+            stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
+            
+            await message.answer(stats, parse_mode="HTML")
             
     except Exception as e:
         logger.error("Ошибка в /check: " + str(e))
@@ -199,20 +218,44 @@ async def cmd_setdays(message: Message):
         bot_state["min_days"] = new_days
         logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
-        # ✅ Только подтверждаем, без проверки
         await message.answer("✅ Порог установлен на <b>" + str(new_days) + "</b> дней (>=). Используй /check для поиска.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
         await message.answer("❌ Не удалось изменить.")
 
+@dp.message(Command("settag"), F.from_user.id == OWNER_ID_INT)
+async def cmd_settag(message: Message):
+    """Меняет тег для поиска на лету"""
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.answer("⚠️ Используй: <code>/settag &lt;название&gt;</code>\nПример: <code>/settag anime</code>", parse_mode="HTML")
+            return
+        
+        new_tag = parts[1].strip().lower()
+        if not new_tag.isalnum():
+            await message.answer("⚠️ Тег должен содержать только буквы и цифры", parse_mode="HTML")
+            return
+        
+        bot_state["tag"] = new_tag
+        logger.info("=== ТЕГ ИЗМЕНЁН === Новый: " + new_tag)
+        
+        await message.answer("✅ Тег установлен на <b>" + new_tag + "</b>. Используй /check для поиска.", parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error("Ошибка в /settag: " + str(e))
+        await message.answer("❌ Не удалось изменить тег.")
+
 @dp.message(Command("status"), F.from_user.id == OWNER_ID_INT)
 async def cmd_status(message: Message):
     try:
         txt = "⚙️ <b>Настройки:</b>\n"
         txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней (>=)\n"
+        txt += "🏷️ Тег: <b>" + bot_state["tag"] + "</b>\n"
         txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
         txt += "📄 Страниц: до <b>" + str(MAX_PAGES) + "</b>\n"
+        txt += "🏷️ Поиск: по &lt;p class='lora_head'&gt;"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
@@ -226,9 +269,12 @@ async def periodic_check():
     await asyncio.sleep(60)
     while True:
         try:
-            logger.info("=== АВТОПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]))
-            loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
+            logger.info("=== АВТОПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Тег: " + bot_state["tag"])
+            base_url = SITE_BASE + "/?p=lora&t=" + bot_state["tag"]
+            loras = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
             if loras:
+                # Сортировка: сначала самые старые
+                loras.sort(key=lambda x: x["days"], reverse=True)
                 for lora in loras:
                     try:
                         await bot.send_message(
@@ -245,7 +291,7 @@ async def periodic_check():
 
 async def on_startup():
     logger.info("🚀 Bot started (WEBHOOK). Owner: " + str(OWNER_ID_INT))
-    logger.info("📊 Порог: >= " + str(bot_state["min_days"]) + " дней | Парсер: lora_head")
+    logger.info("📊 Порог: >= " + str(bot_state["min_days"]) + " дней | Тег: " + bot_state["tag"])
     asyncio.create_task(periodic_check())
 
 async def on_shutdown():
