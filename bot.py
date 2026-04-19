@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
@@ -18,7 +18,7 @@ MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 BASE_URL = "https://lynther.sytes.net/?p=lora&q=Loonie"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 25
 CHECK_INTERVAL_HOURS = 6
-MAX_PAGES = 20  # Максимум страниц для проверки
+MAX_PAGES = 20
 # =============================================
 
 logging.basicConfig(
@@ -125,7 +125,7 @@ def find_inactive_loonies_all_pages(base_url, min_days):
         else:
             url = base_url + "&c=" + str(page)
         
-        logger.info("Сканирую страницу: " + str(page) + " | URL: " + url)
+        logger.info("Страница: " + str(page))
         html = fetch_with_retry(url)
         
         if html is None:
@@ -137,16 +137,15 @@ def find_inactive_loonies_all_pages(base_url, min_days):
         
         if loras:
             all_results.extend(loras)
-            logger.info("Страница " + str(page) + ": найдено " + str(len(loras)) + " лор")
+            logger.info("Стр. " + str(page) + ": " + str(len(loras)) + " лор")
         else:
-            logger.info("Страница " + str(page) + ": лор не найдено, завершаю")
+            logger.info("Стр. " + str(page) + ": пусто, завершаю")
             break
         
-        # Пауза между страницами (чтобы не забанили)
         if page < MAX_PAGES:
             time.sleep(1.5)
     
-    logger.info("=== ВСЕГО === Страниц: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
+    logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results
 
 def format_message(lora):
@@ -163,14 +162,12 @@ def format_message(lora):
 async def cmd_check(message: Message):
     try:
         logger.info("=== ПРОВЕРКА === Порог: " + str(bot_state["min_days"]))
-        await message.answer("🔍 Сканирую все страницы (порог: " + str(bot_state["min_days"]) + " дней)...")
+        await message.answer("🔍 Сканирую все страницы...")
         
         loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
         
-        logger.info("Найдено лор: " + str(len(loras)))
-        
         if not loras:
-            await message.answer("✅ Лоры, соответствующие критериям, не найдены.")
+            await message.answer("✅ Лоры не найдены.")
             return
         
         await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
@@ -181,81 +178,52 @@ async def cmd_check(message: Message):
             
     except Exception as e:
         logger.error("Ошибка в /check: " + str(e))
-        await message.answer("❌ Произошла ошибка при проверке. Попробуй позже.")
+        await message.answer("❌ Ошибка при проверке.")
 
 @dp.message(Command("setdays"), F.from_user.id == OWNER_ID_INT)
 async def cmd_setdays(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2 or not parts[1].isdigit():
-            await message.answer("⚠️ Использование: <code>/setdays &lt;число&gt;</code>", parse_mode="HTML")
+            await message.answer("⚠️ Используй: <code>/setdays &lt;число&gt;</code>", parse_mode="HTML")
             return
         new_days = int(parts[1])
         if new_days < 1:
-            await message.answer("⚠️ Число должно быть больше 0")
+            await message.answer("⚠️ Число должно быть > 0")
             return
         
         bot_state["min_days"] = new_days
-        logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: " + str(new_days))
+        logger.info("=== ПОРОГ === Новый: " + str(new_days))
         
-        await message.answer("✅ Порог установлен на <b>" + str(new_days) + "</b> дней.", parse_mode="HTML")
+        await message.answer("✅ Порог: <b>" + str(new_days) + "</b> дней.", parse_mode="HTML")
         
-        await message.answer("🔍 Проверяю с новым порогом...")
-        loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
-        if loras:
-            await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
-        else:
-            await message.answer("✅ Лоры не найдены")
-            
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
-        await message.answer("❌ Не удалось изменить настройку.")
+        await message.answer("❌ Не удалось изменить.")
 
 @dp.message(Command("status"), F.from_user.id == OWNER_ID_INT)
 async def cmd_status(message: Message):
     try:
-        txt = "⚙️ <b>Настройки бота:</b>\n"
+        txt = "⚙️ <b>Настройки:</b>\n"
         txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней\n"
-        txt += "🔄 Автопроверка: каждые <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
-        txt += "📄 Макс. страниц: <b>" + str(MAX_PAGES) + "</b>"
+        txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
+        txt += "📄 Страниц: до <b>" + str(MAX_PAGES) + "</b>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
 
-@dp.message(Command("debug"), F.from_user.id == OWNER_ID_INT)
-async def cmd_debug(message: Message):
-    try:
-        txt = "🔍 <b>Отладка:</b>\n"
-        txt += "Порог в памяти: " + str(bot_state["min_days"]) + "\n"
-        txt += "Порог из env (MIN_DAYS): " + str(DEFAULT_MIN_DAYS) + "\n"
-        txt += "Базовый URL: " + BASE_URL
-        await message.answer(txt, parse_mode="HTML")
-    except Exception as e:
-        logger.error("Ошибка в /debug: " + str(e))
-
 @dp.message()
 async def silent_ignore(message: Message):
     pass
-
-# ================= ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК =================
-@dp.errors()
-async def global_error_handler(event, exception):
-    logger.critical("Критическая ошибка aiogram: " + str(exception))
-    if isinstance(exception, TelegramNetworkError):
-        logger.warning("Проблемы с сетью Telegram. Ждём восстановления...")
-    elif isinstance(exception, TelegramRetryAfter):
-        logger.warning("Лимит Telegram. Ждём " + str(exception.retry_after) + " сек...")
-        await asyncio.sleep(exception.retry_after)
 
 # ================= ФОНОВЫЕ ЗАДАЧИ =================
 async def periodic_check():
     await asyncio.sleep(60)
     while True:
         try:
-            logger.info("=== АВТОПРОВЕРКА === Порог: " + str(bot_state["min_days"]))
+            logger.info("=== АВТОПРОВЕРКА ===")
             loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
             if loras:
-                logger.info("Найдено лор: " + str(len(loras)))
                 for lora in loras:
                     try:
                         await bot.send_message(
@@ -264,50 +232,69 @@ async def periodic_check():
                             parse_mode="HTML"
                         )
                         await asyncio.sleep(0.5)
-                    except TelegramNetworkError:
-                        logger.warning("Сеть Telegram упала, повтор через 10 сек...")
-                        await asyncio.sleep(10)
                     except Exception as e:
-                        logger.error("Ошибка отправки сообщения: " + str(e))
-            else:
-                logger.info("Лор не найдено")
+                        logger.error("Ошибка отправки: " + str(e))
         except Exception as e:
             logger.error("Автопроверка упала: " + str(e))
         await asyncio.sleep(CHECK_INTERVAL_HOURS * 3600)
 
 async def on_startup():
-    logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
-    logger.info("🔒 Private mode | Порог: " + str(bot_state["min_days"]) + " | Страниц: до " + str(MAX_PAGES))
+    logger.info("🚀 Bot started (WEBHOOK). Owner: " + str(OWNER_ID_INT))
     asyncio.create_task(periodic_check())
 
-# ================= WEB SERVER (RENDER) =================
+async def on_shutdown():
+    logger.info("👋 Bot shutting down...")
+    await bot.session.close()
+
+# ================= WEBHOOK SERVER =================
+async def webhook_handler(request):
+    try:
+        update = await request.json()
+        await dp.feed_webhook_update(bot, update)
+        return web.Response(text="OK")
+    except Exception as e:
+        logger.error("Ошибка вебхука: " + str(e))
+        return web.Response(text="Error", status=500)
+
 async def health_handler(request):
     return web.Response(text="OK")
 
 async def run_web_server():
     app = web.Application()
+    
+    # Вебхук для Telegram
+    app.router.add_post("/webhook/" + BOT_TOKEN.split(":")[0], webhook_handler)
+    
+    # Health check для UptimeRobot
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
+    
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info("🌐 Health server running on port " + str(port))
+    logger.info("🌐 Server on port " + str(port))
+    
+    # Устанавливаем вебхук в Telegram
+    webhook_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if webhook_url:
+        webhook_full = webhook_url + "/webhook/" + BOT_TOKEN.split(":")[0]
+        await bot.set_webhook(webhook_full)
+        logger.info("✅ Webhook set: " + webhook_full)
+    else:
+        logger.warning("⚠️ RENDER_EXTERNAL_URL не задан!")
 
 async def main():
     dp.startup.register(on_startup)
-    try:
-        await asyncio.gather(
-            dp.start_polling(bot),
-            run_web_server(),
-            return_exceptions=True
-        )
-    except Exception as e:
-        logger.critical("Главный цикл упал: " + str(e))
+    dp.shutdown.register(on_shutdown)
+    await run_web_server()
+    # Держим сервер запущенным
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Bot stopped by user")
+        logger.info("👋 Bot stopped")
