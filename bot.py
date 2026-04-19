@@ -8,7 +8,6 @@ from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
@@ -51,65 +50,59 @@ def fetch_with_retry(url, max_retries=3):
                 return None
             time.sleep(2 ** attempt)
 
-# ================= ПАРСЕР ОДНОЙ СТРАНИЦЫ =================
+# ================= ПАРСЕР ПО HTML-ТЕГУ =================
 def parse_loras_from_html(html, min_days):
     if html is None:
         return []
     
     try:
         soup = BeautifulSoup(html, "html.parser")
-        text = soup.get_text()
-        lines = text.split("\n")
-
-        id_pattern = re.compile(r"#️⃣\s*(\d+)")
-        days_pattern = re.compile(r"🕸️\s*(\d+)\s*days?")
-        loonie_pattern = re.compile(r"\bLoonie\b", re.IGNORECASE)
-
         results = []
-        current = {}
-
-        for line in lines:
-            line = line.strip()
-            if not line:
+        
+        # === ИЩЕМ ВСЕ ТЕГИ <span class="tag_gray">Loonie</span> ===
+        loonie_tags = soup.find_all("span", class_="tag_gray", string="Loonie")
+        
+        logger.info("Найдено тегов Loonie: " + str(len(loonie_tags)))
+        
+        for tag in loonie_tags:
+            try:
+                # Поднимаемся к родительскому контейнеру лоры
+                lora_container = tag.find_parent()
+                if not lora_container:
+                    continue
+                
+                # Ищем ID в контейнере (паттерн #️⃣ 12345)
+                id_pattern = re.compile(r"#️⃣\s*(\d+)")
+                id_match = id_pattern.search(lora_container.get_text())
+                if not id_match:
+                    continue
+                lora_id = id_match.group(1)
+                
+                # Ищем дни в контейнере (паттерн 🕸️ 10 days)
+                days_pattern = re.compile(r"🕸️\s*(\d+)\s*d", re.IGNORECASE)
+                days_match = days_pattern.search(lora_container.get_text())
+                if not days_match:
+                    continue
+                lora_days = int(days_match.group(1))
+                
+                # === ПРОВЕРКА: >= min_days ===
+                if lora_days >= min_days:
+                    results.append({
+                        "id": lora_id,
+                        "days": lora_days,
+                        "name": "Loonie"
+                    })
+                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ВКЛЮЧЕНО")
+                else:
+                    logger.info("❌ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ОТКЛОНЕНО (< " + str(min_days) + ")")
+                    
+            except Exception as e:
+                logger.warning("Ошибка обработки тега: " + str(e))
                 continue
-
-            id_match = id_pattern.search(line)
-            if id_match:
-                if (current.get("id") and 
-                    current.get("days") is not None and 
-                    current.get("has_loonie")):
-                    if current["days"] > min_days:
-                        results.append({
-                            "id": current["id"],
-                            "days": current["days"],
-                            "name": current.get("name", "Loonie")
-                        })
-                current = {
-                    "id": id_match.group(1),
-                    "days": None,
-                    "has_loonie": bool(loonie_pattern.search(line)),
-                    "name": "Loonie"
-                }
-                continue
-
-            if current.get("id"):
-                days_match = days_pattern.search(line)
-                if days_match:
-                    current["days"] = int(days_match.group(1))
-                if loonie_pattern.search(line):
-                    current["has_loonie"] = True
-
-        if (current.get("id") and 
-            current.get("days") is not None and 
-            current.get("has_loonie")):
-            if current["days"] > min_days:
-                results.append({
-                    "id": current["id"],
-                    "days": current["days"],
-                    "name": current.get("name", "Loonie")
-                })
-
+        
+        logger.info("=== Страница готова === Лор: " + str(len(results)))
         return results
+        
     except Exception as e:
         logger.error("Ошибка парсинга: " + str(e))
         return []
@@ -125,7 +118,7 @@ def find_inactive_loonies_all_pages(base_url, min_days):
         else:
             url = base_url + "&c=" + str(page)
         
-        logger.info("Страница: " + str(page))
+        logger.info("=== Страница: " + str(page) + " ===")
         html = fetch_with_retry(url)
         
         if html is None:
@@ -137,10 +130,10 @@ def find_inactive_loonies_all_pages(base_url, min_days):
         
         if loras:
             all_results.extend(loras)
-            logger.info("Стр. " + str(page) + ": " + str(len(loras)) + " лор")
+            logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
         else:
-            logger.info("Стр. " + str(page) + ": пусто, завершаю")
-            break
+            logger.info("Стр. " + str(page) + ": лор не найдено")
+            # Не прерываем, т.к. на других страницах могут быть лоры
         
         if page < MAX_PAGES:
             time.sleep(1.5)
@@ -150,7 +143,7 @@ def find_inactive_loonies_all_pages(base_url, min_days):
 
 def format_message(lora):
     msg = []
-    msg.append("🧠 <b>" + str(lora["name"]) + "</b>")
+    msg.append("🧠 <b>Loonie</b>")
     msg.append("🆔 <code>ID: " + str(lora["id"]) + "</code>")
     msg.append("🕸️ <b>" + str(lora["days"]) + " дней</b> без использования")
     msg.append("🗑️ <code>/dellora " + str(lora["id"]) + "</code>")
@@ -161,8 +154,8 @@ def format_message(lora):
 @dp.message(Command("check"), F.from_user.id == OWNER_ID_INT)
 async def cmd_check(message: Message):
     try:
-        logger.info("=== ПРОВЕРКА === Порог: " + str(bot_state["min_days"]))
-        await message.answer("🔍 Сканирую все страницы...")
+        logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]))
+        await message.answer("🔍 Сканирую по тегу <span class=\"tag_gray\">Loonie</span>...")
         
         loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
         
@@ -193,9 +186,15 @@ async def cmd_setdays(message: Message):
             return
         
         bot_state["min_days"] = new_days
-        logger.info("=== ПОРОГ === Новый: " + str(new_days))
+        logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
-        await message.answer("✅ Порог: <b>" + str(new_days) + "</b> дней.", parse_mode="HTML")
+        await message.answer("✅ Порог: <b>" + str(new_days) + "</b> дней (>=). Сейчас проверю...", parse_mode="HTML")
+        
+        loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
+        if loras:
+            await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
+        else:
+            await message.answer("⚠️ Лоры не найдены. Смотри логи Render.")
         
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
@@ -205,12 +204,39 @@ async def cmd_setdays(message: Message):
 async def cmd_status(message: Message):
     try:
         txt = "⚙️ <b>Настройки:</b>\n"
-        txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней\n"
+        txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней (>=)\n"
         txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
-        txt += "📄 Страниц: до <b>" + str(MAX_PAGES) + "</b>"
+        txt += "📄 Страниц: до <b>" + str(MAX_PAGES) + "</b>\n"
+        txt += "🏷️ Поиск: по тегу <code>&lt;span class=\"tag_gray\"&gt;Loonie&lt;/span&gt;</code>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
+
+@dp.message(Command("debug"), F.from_user.id == OWNER_ID_INT)
+async def cmd_debug(message: Message):
+    try:
+        html = fetch_with_retry(BASE_URL)
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            loonie_tags = soup.find_all("span", class_="tag_gray", string="Loonie")
+            
+            txt = "🔍 <b>Отладка:</b>\n"
+            txt += "Порог: >= " + str(bot_state["min_days"]) + "\n"
+            txt += "Найдено тегов Loonie: " + str(len(loonie_tags)) + "\n\n"
+            
+            # Показываем первые 5 лор с их данными
+            for i, tag in enumerate(loonie_tags[:5]):
+                container = tag.find_parent()
+                if container:
+                    text = container.get_text()[:100].replace("\n", " ")
+                    txt += str(i+1) + ". " + text + "...\n"
+            
+            await message.answer(txt, parse_mode="HTML")
+        else:
+            await message.answer("❌ Не удалось загрузить сайт")
+    except Exception as e:
+        logger.error("Ошибка в /debug: " + str(e))
+        await message.answer("❌ Ошибка: " + str(e))
 
 @dp.message()
 async def silent_ignore(message: Message):
@@ -221,7 +247,7 @@ async def periodic_check():
     await asyncio.sleep(60)
     while True:
         try:
-            logger.info("=== АВТОПРОВЕРКА ===")
+            logger.info("=== АВТОПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]))
             loras = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"])
             if loras:
                 for lora in loras:
@@ -240,6 +266,7 @@ async def periodic_check():
 
 async def on_startup():
     logger.info("🚀 Bot started (WEBHOOK). Owner: " + str(OWNER_ID_INT))
+    logger.info("📊 Порог: >= " + str(bot_state["min_days"]) + " дней | Поиск по тегу")
     asyncio.create_task(periodic_check())
 
 async def on_shutdown():
@@ -262,10 +289,9 @@ async def health_handler(request):
 async def run_web_server():
     app = web.Application()
     
-    # Вебхук для Telegram
-    app.router.add_post("/webhook/" + BOT_TOKEN.split(":")[0], webhook_handler)
+    webhook_path = "/webhook/" + BOT_TOKEN.split(":")[0]
+    app.router.add_post(webhook_path, webhook_handler)
     
-    # Health check для UptimeRobot
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
     
@@ -276,10 +302,9 @@ async def run_web_server():
     await site.start()
     logger.info("🌐 Server on port " + str(port))
     
-    # Устанавливаем вебхук в Telegram
     webhook_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if webhook_url:
-        webhook_full = webhook_url + "/webhook/" + BOT_TOKEN.split(":")[0]
+        webhook_full = webhook_url + webhook_path
         await bot.set_webhook(webhook_full)
         logger.info("✅ Webhook set: " + webhook_full)
     else:
@@ -289,7 +314,6 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     await run_web_server()
-    # Держим сервер запущенным
     while True:
         await asyncio.sleep(3600)
 
