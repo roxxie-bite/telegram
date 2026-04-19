@@ -23,15 +23,6 @@ DEFAULT_TAGS = [TAG_ENV] if TAG_ENV else ["loonie"]
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 20
 CONFIG_FILE = "config.json"
-
-# === СПЕЦИАЛЬНЫЕ ТЕГИ С ЦВЕТНЫМИ КЛАССАМИ ===
-# Только для этих тегов проверяем конкретный цвет класса
-SPECIAL_TAGS = {
-    "xl": "tag_red",
-    "style": "tag_purple",
-    "character": "tag_green",
-    "quality": "tag_gold",
-}
 # =============================================
 
 logging.basicConfig(
@@ -85,7 +76,7 @@ def fetch_with_retry(url, max_retries=3):
             time.sleep(2 ** attempt)
 
 # ================= ПАРСЕР ПО lora_head =================
-def parse_loras_from_html(html, min_days, tag_name):
+def parse_loras_from_html(html, min_days):
     if html is None:
         return []
     
@@ -96,54 +87,28 @@ def parse_loras_from_html(html, min_days, tag_name):
         lora_heads = soup.find_all("p", class_="lora_head")
         logger.info("Найдено lora_head: " + str(len(lora_heads)))
         
-        # Проверяем, есть ли специальный класс для этого тега
-        special_class = SPECIAL_TAGS.get(tag_name.lower())
-        
         for head in lora_heads:
             try:
                 text = head.get_text()
                 
-                # === ПРОВЕРКА ТЕГА ===
-                has_tag = False
-                
-                if special_class:
-                    # Для специальных тегов проверяем цветной класс
-                    tag_span = head.find("span", class_=special_class)
-                    if tag_span and tag_name.lower() in tag_span.get_text().lower():
-                        has_tag = True
-                else:
-                    # Для обычных тегов ищем название тега в любом span class="tag_*"
-                    for span in head.find_all("span", class_=re.compile(r"^tag_")):
-                        if tag_name.lower() in span.get_text().lower():
-                            has_tag = True
-                            break
-                
-                if not has_tag:
-                    continue  # Пропускаем, если нет нужного тега
-                
-                # Ищем ID: #️⃣123456
                 id_match = re.search(r"#️⃣\s*(\d+)", text)
                 if not id_match:
                     continue
                 lora_id = id_match.group(1)
                 
-                # Ищем дни: 🕸️10 days или 🕸️1 day
                 days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
                 if not days_match:
                     continue
                 lora_days = int(days_match.group(1))
                 
-                # === ИЗВЛЕКАЕМ НАЗВАНИЕ (до "||") ===
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 if name_match:
                     lora_name = name_match.group(1).strip()
                 else:
-                    lora_name = tag_name.capitalize()
+                    lora_name = "Loonie"
                 
-                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
-                # === ПРОВЕРКА: >= min_days ===
                 if lora_days >= min_days:
                     results.append({
                         "id": lora_id,
@@ -151,7 +116,7 @@ def parse_loras_from_html(html, min_days, tag_name):
                         "name": lora_name,
                         "url": lora_url
                     })
-                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | Тег: " + tag_name + " | ВКЛЮЧЕНО")
+                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ВКЛЮЧЕНО")
                 else:
                     logger.info("❌ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ОТКЛОНЕНО")
                     
@@ -167,7 +132,7 @@ def parse_loras_from_html(html, min_days, tag_name):
         return []
 
 # ================= ПАРСЕР ВСЕХ СТРАНИЦ =================
-def find_inactive_loonies_all_pages(base_url, min_days, tag_name):
+def find_inactive_loonies_all_pages(base_url, min_days):
     all_results = []
     pages_scanned = 0
     
@@ -177,14 +142,14 @@ def find_inactive_loonies_all_pages(base_url, min_days, tag_name):
         else:
             url = base_url + "&c=" + str(page)
         
-        logger.info("=== Страница: " + str(page) + " | Тег: " + tag_name + " ===")
+        logger.info("=== Страница: " + str(page) + " ===")
         html = fetch_with_retry(url)
         
         if html is None:
             logger.warning("Страница " + str(page) + " не загрузилась")
             break
         
-        loras = parse_loras_from_html(html, min_days, tag_name)
+        loras = parse_loras_from_html(html, min_days)
         pages_scanned += 1
         
         if loras:
@@ -227,10 +192,6 @@ async def cmd_help(message: Message):
         txt += "/tags — Показать все активные теги\n"
         txt += "/setschedule <время> — Установить расписание\n"
         txt += "/schedule — Показать расписание проверок\n\n"
-        txt += "<b>📊 Специальные теги:</b>\n"
-        txt += "xl (красный), style (фиолетовый),\n"
-        txt += "character (зелёный), quality (золотой)\n"
-        txt += "<i>Остальные теги работают автоматически</i>\n\n"
         txt += "<i>Все команды доступны только тебе (владелец)</i>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
@@ -249,7 +210,7 @@ async def cmd_check(message: Message):
         
         for tag in bot_state["tags"]:
             base_url = SITE_BASE + "/?p=lora&t=" + tag
-            loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"], tag)
+            loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
             all_loras.extend(loras)
             total_pages += pages
         
@@ -314,11 +275,10 @@ async def cmd_addtag(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            await message.answer("⚠️ Используй: <code>/addtag &lt;название&gt;</code>\nПример: <code>/addtag xl</code>", parse_mode="HTML")
+            await message.answer("⚠️ Используй: <code>/addtag &lt;название&gt;</code>\nПример: <code>/addtag anime</code>", parse_mode="HTML")
             return
         
         new_tag = parts[1].strip().lower()
-        
         if not new_tag.isalnum():
             await message.answer("⚠️ Тег должен содержать только буквы и цифры", parse_mode="HTML")
             return
@@ -329,16 +289,9 @@ async def cmd_addtag(message: Message):
         
         bot_state["tags"].append(new_tag)
         save_config()
+        logger.info("=== ТЕГ ДОБАВЛЕН === " + new_tag)
         
-        # Проверяем, специальный ли тег
-        if new_tag in SPECIAL_TAGS:
-            tag_info = " (спец: " + SPECIAL_TAGS[new_tag] + ")"
-        else:
-            tag_info = " (обычный)"
-        
-        logger.info("=== ТЕГ ДОБАВЛЕН === " + new_tag + tag_info)
-        
-        await message.answer("✅ Тег <b>" + new_tag + "</b> добавлен" + tag_info + ".\nТекущие теги: " + ", ".join(bot_state["tags"]), parse_mode="HTML")
+        await message.answer("✅ Тег <b>" + new_tag + "</b> добавлен. Текущие теги: " + ", ".join(bot_state["tags"]), parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /addtag: " + str(e))
@@ -381,10 +334,7 @@ async def cmd_tags(message: Message):
     try:
         txt = "🏷️ <b>Активные теги:</b>\n"
         for i, tag in enumerate(bot_state["tags"], 1):
-            if tag in SPECIAL_TAGS:
-                txt += str(i) + ". <code>" + tag + "</code> (спец: " + SPECIAL_TAGS[tag] + ")\n"
-            else:
-                txt += str(i) + ". <code>" + tag + "</code> (обычный)\n"
+            txt += str(i) + ". <code>" + tag + "</code>\n"
         txt += "\n<i>Всего: " + str(len(bot_state["tags"])) + "</i>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
@@ -483,7 +433,7 @@ async def periodic_check():
             
             for tag in bot_state["tags"]:
                 base_url = SITE_BASE + "/?p=lora&t=" + tag
-                loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"], tag)
+                loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
                 all_loras.extend(loras)
                 total_pages += pages
             
