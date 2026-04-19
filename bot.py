@@ -4,10 +4,13 @@ import asyncio
 import logging
 import requests
 import time
+import json
+from datetime import datetime
+from io import BytesIO
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
@@ -17,9 +20,11 @@ MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 TAG_ENV = os.getenv("TAG", "loonie")
 SITE_BASE = "https://lynther.sytes.net"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 25
-DEFAULT_TAG = TAG_ENV if TAG_ENV else "loonie"
-CHECK_INTERVAL_HOURS = 48
+DEFAULT_TAGS = [TAG_ENV] if TAG_ENV else ["loonie"]
+CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 20
+HISTORY_FILE = "history.json"
+CONFIG_FILE = "config.json"
 # =============================================
 
 logging.basicConfig(
@@ -36,10 +41,47 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # === СОСТОЯНИЕ В ПАМЯТИ ===
-bot_state = {
-    "min_days": DEFAULT_MIN_DAYS,
-    "tag": DEFAULT_TAG
-}
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "min_days": DEFAULT_MIN_DAYS,
+        "tags": DEFAULT_TAGS.copy(),
+        "schedule": []
+    }
+
+def save_config():
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(bot_state, f, indent=2)
+    except Exception as e:
+        logger.error("Не удалось сохранить config.json: " + str(e))
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "total_deleted": 0,
+        "sessions": []
+    }
+
+def save_history():
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history_state, f, indent=2)
+    except Exception as e:
+        logger.error("Не удалось сохранить history.json: " + str(e))
+
+bot_state = load_config()
+history_state = load_history()
 
 # ================= ЗАЩИЩЁННЫЙ ЗАПРОС =================
 def fetch_with_retry(url, max_retries=3):
@@ -71,29 +113,24 @@ def parse_loras_from_html(html, min_days):
             try:
                 text = head.get_text()
                 
-                # Ищем ID: #️⃣123456
                 id_match = re.search(r"#️⃣\s*(\d+)", text)
                 if not id_match:
                     continue
                 lora_id = id_match.group(1)
                 
-                # Ищем дни: 🕸️10 days или 🕸️1 day
                 days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
                 if not days_match:
                     continue
                 lora_days = int(days_match.group(1))
                 
-                # === ИЗВЛЕКАЕМ НАЗВАНИЕ (до "||") ===
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 if name_match:
                     lora_name = name_match.group(1).strip()
                 else:
                     lora_name = "Loonie"
                 
-                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
-                # === ПРОВЕРКА: >= min_days ===
                 if lora_days >= min_days:
                     results.append({
                         "id": lora_id,
@@ -148,10 +185,9 @@ def find_inactive_loonies_all_pages(base_url, min_days):
             time.sleep(1.5)
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
-    return all_results
+    return all_results, pages_scanned
 
 def format_message(lora):
-    """Формирует сообщение с кликабельным названием лоры"""
     msg = []
     msg.append("🧠 <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>")
     msg.append("🆔 <code>ID: " + str(lora["id"]) + "</code>")
@@ -161,37 +197,68 @@ def format_message(lora):
     return "\n".join(msg)
 
 # ================= КОМАНДЫ =================
+@dp.message(Command("help"), F.from_user.id == OWNER_ID_INT)
+async def cmd_help(message: Message):
+    try:
+        txt = "📖 <b>Справка по командам:</b>\n\n"
+        txt += "<b>🔍 Основные:</b>\n"
+        txt += "/check — Проверить все теги на лоры\n"
+        txt += "/export — Скачать файл со всеми /dellora\n"
+        txt += "/status — Показать текущие настройки\n\n"
+        
+        txt += "<b>⚙️ Настройки:</b>\n"
+        txt += "/setdays <N> — Установить порог дней (>= N)\n"
+        txt += "/addtag <тег> — Добавить тег для поиска\n"
+        txt += "/rmtag <тег> — Удалить тег из списка\n"
+        txt += "/tags — Показать все активные теги\n"
+        txt += "/setschedule <время> — Установить расписание\n"
+        txt += "/schedule — Показать расписание проверок\n\n"
+        
+        txt += "<b>📊 Информация:</b>\n"
+        txt += "/history — История проверок и статистика\n"
+        txt += "/help — Эта справка\n\n"
+        
+        txt += "<i>Все команды доступны только тебе (владелец)</i>"
+        
+        await message.answer(txt, parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка в /help: " + str(e))
+
 @dp.message(Command("check"), F.from_user.id == OWNER_ID_INT)
 async def cmd_check(message: Message):
     try:
-        logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Тег: " + bot_state["tag"])
-        await message.answer("🔍 Сканирую тег <b>" + bot_state["tag"] + "</b> (порог: >= " + str(bot_state["min_days"]) + " дней)...", parse_mode="HTML")
+        logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + ", ".join(bot_state["tags"]))
+        await message.answer("🔍 Сканирую теги: <b>" + ", ".join(bot_state["tags"]) + "</b> (порог: >= " + str(bot_state["min_days"]) + " дней)...", parse_mode="HTML")
         
-        base_url = SITE_BASE + "/?p=lora&t=" + bot_state["tag"]
-        loras = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
+        all_loras = []
+        total_pages = 0
         
-        if not loras:
+        for tag in bot_state["tags"]:
+            base_url = SITE_BASE + "/?p=lora&t=" + tag
+            loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
+            all_loras.extend(loras)
+            total_pages += pages
+        
+        if not all_loras:
             await message.answer("✅ Лоры не найдены.")
             return
         
-        # Сортировка: сначала самые старые (больше дней)
-        loras.sort(key=lambda x: x["days"], reverse=True)
+        all_loras.sort(key=lambda x: x["days"], reverse=True)
         
-        await message.answer("📊 Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
+        await message.answer("📊 Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
         
-        for lora in loras:
+        for lora in all_loras:
             await message.answer(format_message(lora), parse_mode="HTML")
             await asyncio.sleep(0.3)
         
-        # === СТАТИСТИКА ===
-        if loras:
-            avg_days = sum(l["days"] for l in loras) // len(loras)
-            max_lora = max(loras, key=lambda x: x["days"])
-            min_lora = min(loras, key=lambda x: x["days"])
+        if all_loras:
+            avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
+            max_lora = max(all_loras, key=lambda x: x["days"])
+            min_lora = min(all_loras, key=lambda x: x["days"])
             
             stats = "\n📊 <b>Статистика:</b>\n"
-            stats += "• Страниц просканировано: " + str(MAX_PAGES) + " (макс)\n"
-            stats += "• Лор найдено: <b>" + str(len(loras)) + "</b>\n"
+            stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
+            stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
             stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
             stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
             stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
@@ -202,9 +269,45 @@ async def cmd_check(message: Message):
         logger.error("Ошибка в /check: " + str(e))
         await message.answer("❌ Ошибка при проверке.")
 
+@dp.message(Command("export"), F.from_user.id == OWNER_ID_INT)
+async def cmd_export(message: Message):
+    try:
+        logger.info("=== ЭКСПОРТ ===")
+        await message.answer("📄 Готовлю файл с командами...")
+        
+        all_loras = []
+        for tag in bot_state["tags"]:
+            base_url = SITE_BASE + "/?p=lora&t=" + tag
+            loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
+            all_loras.extend(loras)
+        
+        if not all_loras:
+            await message.answer("✅ Нечего экспортировать — лоры не найдены.")
+            return
+        
+        all_loras.sort(key=lambda x: x["days"], reverse=True)
+        
+        content = "# Loonie Bot Export\n# Дата: " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n# Лор: " + str(len(all_loras)) + "\n\n"
+        for lora in all_loras:
+            content += "/dellora " + lora["id"] + "\n"
+        
+        file = BytesIO(content.encode("utf-8"))
+        file.name = "dellora_commands.txt"
+        
+        await message.answer_document(
+            document=file,
+            caption="📄 <b>Экспорт команд</b>\nЛор: " + str(len(all_loras)) + "\nФормат: /dellora <id>",
+            parse_mode="HTML"
+        )
+        
+        logger.info("✅ Экспорт выполнен: " + str(len(all_loras)) + " команд")
+        
+    except Exception as e:
+        logger.error("Ошибка в /export: " + str(e))
+        await message.answer("❌ Ошибка при экспорте.")
+
 @dp.message(Command("setdays"), F.from_user.id == OWNER_ID_INT)
 async def cmd_setdays(message: Message):
-    """Только сохраняет порог, без автоматической проверки"""
     try:
         parts = message.text.split()
         if len(parts) != 2 or not parts[1].isdigit():
@@ -216,6 +319,7 @@ async def cmd_setdays(message: Message):
             return
         
         bot_state["min_days"] = new_days
+        save_config()
         logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
         await message.answer("✅ Порог установлен на <b>" + str(new_days) + "</b> дней (>=). Используй /check для поиска.", parse_mode="HTML")
@@ -224,13 +328,12 @@ async def cmd_setdays(message: Message):
         logger.error("Ошибка в /setdays: " + str(e))
         await message.answer("❌ Не удалось изменить.")
 
-@dp.message(Command("settag"), F.from_user.id == OWNER_ID_INT)
-async def cmd_settag(message: Message):
-    """Меняет тег для поиска на лету"""
+@dp.message(Command("addtag"), F.from_user.id == OWNER_ID_INT)
+async def cmd_addtag(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            await message.answer("⚠️ Используй: <code>/settag &lt;название&gt;</code>\nПример: <code>/settag anime</code>", parse_mode="HTML")
+            await message.answer("⚠️ Используй: <code>/addtag &lt;название&gt;</code>\nПример: <code>/addtag anime</code>", parse_mode="HTML")
             return
         
         new_tag = parts[1].strip().lower()
@@ -238,24 +341,136 @@ async def cmd_settag(message: Message):
             await message.answer("⚠️ Тег должен содержать только буквы и цифры", parse_mode="HTML")
             return
         
-        bot_state["tag"] = new_tag
-        logger.info("=== ТЕГ ИЗМЕНЁН === Новый: " + new_tag)
+        if new_tag in bot_state["tags"]:
+            await message.answer("⚠️ Тег <b>" + new_tag + "</b> уже в списке", parse_mode="HTML")
+            return
         
-        await message.answer("✅ Тег установлен на <b>" + new_tag + "</b>. Используй /check для поиска.", parse_mode="HTML")
+        bot_state["tags"].append(new_tag)
+        save_config()
+        logger.info("=== ТЕГ ДОБАВЛЕН === " + new_tag)
+        
+        await message.answer("✅ Тег <b>" + new_tag + "</b> добавлен. Текущие теги: " + ", ".join(bot_state["tags"]), parse_mode="HTML")
         
     except Exception as e:
-        logger.error("Ошибка в /settag: " + str(e))
-        await message.answer("❌ Не удалось изменить тег.")
+        logger.error("Ошибка в /addtag: " + str(e))
+        await message.answer("❌ Не удалось добавить тег.")
+
+@dp.message(Command("rmtag"), F.from_user.id == OWNER_ID_INT)
+async def cmd_rmtag(message: Message):
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.answer("⚠️ Используй: <code>/rmtag &lt;название&gt;</code>", parse_mode="HTML")
+            return
+        
+        tag_to_remove = parts[1].strip().lower()
+        
+        if tag_to_remove not in bot_state["tags"]:
+            await message.answer("⚠️ Тег <b>" + tag_to_remove + "</b> не найден", parse_mode="HTML")
+            return
+        
+        if len(bot_state["tags"]) <= 1:
+            await message.answer("⚠️ Должен остаться хотя бы один тег", parse_mode="HTML")
+            return
+        
+        bot_state["tags"].remove(tag_to_remove)
+        save_config()
+        logger.info("=== ТЕГ УДАЛЁН === " + tag_to_remove)
+        
+        await message.answer("✅ Тег <b>" + tag_to_remove + "</b> удалён. Текущие теги: " + ", ".join(bot_state["tags"]), parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error("Ошибка в /rmtag: " + str(e))
+        await message.answer("❌ Не удалось удалить тег.")
+
+@dp.message(Command("tags"), F.from_user.id == OWNER_ID_INT)
+async def cmd_tags(message: Message):
+    try:
+        txt = "🏷️ <b>Активные теги:</b>\n"
+        for i, tag in enumerate(bot_state["tags"], 1):
+            txt += str(i) + ". <code>" + tag + "</code>\n"
+        txt += "\n<i>Всего: " + str(len(bot_state["tags"])) + "</i>"
+        await message.answer(txt, parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка в /tags: " + str(e))
+
+@dp.message(Command("setschedule"), F.from_user.id == OWNER_ID_INT)
+async def cmd_setschedule(message: Message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ Используй: <code>/setschedule &lt;время&gt; [&lt;время&gt;...]</code>\n"
+                "Пример: <code>/setschedule 09:00 15:00 21:00</code>\n"
+                "Формат: ЧЧ:ММ (24 часа)",
+                parse_mode="HTML"
+            )
+            return
+        
+        times = []
+        for t in parts[1:]:
+            if re.match(r'^\d{2}:\d{2}$', t):
+                times.append(t)
+            else:
+                await message.answer("⚠️ Неверный формат времени: <code>" + t + "</code>\nИспользуй ЧЧ:ММ (например, 09:00)", parse_mode="HTML")
+                return
+        
+        bot_state["schedule"] = times
+        save_config()
+        logger.info("=== РАСПИСАНИЕ === Установлено: " + ", ".join(times))
+        
+        if times:
+            await message.answer("✅ Расписание установлено: <b>" + ", ".join(times) + "</b>\nАвтопроверки будут в это время.", parse_mode="HTML")
+        else:
+            await message.answer("✅ Расписание очищено. Автопроверки отключены.", parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error("Ошибка в /setschedule: " + str(e))
+        await message.answer("❌ Не удалось установить расписание.")
+
+@dp.message(Command("schedule"), F.from_user.id == OWNER_ID_INT)
+async def cmd_schedule(message: Message):
+    try:
+        if bot_state["schedule"]:
+            txt = "⏰ <b>Расписание автопроверок:</b>\n"
+            for t in bot_state["schedule"]:
+                txt += "• <code>" + t + "</code>\n"
+            txt += "\n<i>Следующая проверка в ближайшее время из списка</i>"
+        else:
+            txt = "⏰ <b>Расписание:</b> не установлено\n"
+            txt += "<i>Используй /setschedule 09:00 15:00 21:00</i>"
+        await message.answer(txt, parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка в /schedule: " + str(e))
+
+@dp.message(Command("history"), F.from_user.id == OWNER_ID_INT)
+async def cmd_history(message: Message):
+    try:
+        txt = "📊 <b>История проверок:</b>\n"
+        txt += "Всего лор найдено: <b>" + str(history_state["total_deleted"]) + "</b>\n\n"
+        
+        if history_state["sessions"]:
+            txt += "<b>Последние сессии:</b>\n"
+            for session in history_state["sessions"][-10:]:
+                txt += "• " + session["date"] + ": " + str(session["count"]) + " лор\n"
+        else:
+            txt += "<i>История пуста</i>"
+        
+        await message.answer(txt, parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка в /history: " + str(e))
 
 @dp.message(Command("status"), F.from_user.id == OWNER_ID_INT)
 async def cmd_status(message: Message):
     try:
         txt = "⚙️ <b>Настройки:</b>\n"
         txt += "🕸️ Порог: <b>" + str(bot_state["min_days"]) + "</b> дней (>=)\n"
-        txt += "🏷️ Тег: <b>" + bot_state["tag"] + "</b>\n"
+        txt += "🏷️ Теги: <b>" + ", ".join(bot_state["tags"]) + "</b>\n"
         txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
-        txt += "📄 Страниц: до <b>" + str(MAX_PAGES) + "</b>\n"
-        txt += "🏷️ Поиск: по &lt;p class='lora_head'&gt;"
+        txt += "📄 Макс. страниц: <b>" + str(MAX_PAGES) + "</b>\n"
+        if bot_state["schedule"]:
+            txt += "⏰ Расписание: <b>" + ", ".join(bot_state["schedule"]) + "</b>\n"
+        txt += "📊 Всего найдено: <b>" + str(history_state["total_deleted"]) + "</b> лор"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
@@ -269,13 +484,29 @@ async def periodic_check():
     await asyncio.sleep(60)
     while True:
         try:
-            logger.info("=== АВТОПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Тег: " + bot_state["tag"])
-            base_url = SITE_BASE + "/?p=lora&t=" + bot_state["tag"]
-            loras = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
-            if loras:
-                # Сортировка: сначала самые старые
-                loras.sort(key=lambda x: x["days"], reverse=True)
-                for lora in loras:
+            now = datetime.now()
+            current_time = now.strftime("%H:%M")
+            
+            if bot_state["schedule"]:
+                if current_time not in bot_state["schedule"]:
+                    await asyncio.sleep(60)
+                    continue
+            
+            logger.info("=== АВТОПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + ", ".join(bot_state["tags"]))
+            
+            all_loras = []
+            total_pages = 0
+            
+            for tag in bot_state["tags"]:
+                base_url = SITE_BASE + "/?p=lora&t=" + tag
+                loras, pages = find_inactive_loonies_all_pages(base_url, bot_state["min_days"])
+                all_loras.extend(loras)
+                total_pages += pages
+            
+            if all_loras:
+                all_loras.sort(key=lambda x: x["days"], reverse=True)
+                
+                for lora in all_loras:
                     try:
                         await bot.send_message(
                             chat_id=OWNER_ID_INT,
@@ -285,13 +516,26 @@ async def periodic_check():
                         await asyncio.sleep(0.5)
                     except Exception as e:
                         logger.error("Ошибка отправки: " + str(e))
+                
+                history_state["total_deleted"] += len(all_loras)
+                history_state["sessions"].append({
+                    "date": now.strftime("%Y-%m-%d %H:%M"),
+                    "count": len(all_loras),
+                    "pages": total_pages
+                })
+                save_history()
+                
+                logger.info("✅ Автопроверка завершена: " + str(len(all_loras)) + " лор | Страниц: " + str(total_pages))
+            
+            await asyncio.sleep(60)
+            
         except Exception as e:
             logger.error("Автопроверка упала: " + str(e))
-        await asyncio.sleep(CHECK_INTERVAL_HOURS * 3600)
+            await asyncio.sleep(60)
 
 async def on_startup():
     logger.info("🚀 Bot started (WEBHOOK). Owner: " + str(OWNER_ID_INT))
-    logger.info("📊 Порог: >= " + str(bot_state["min_days"]) + " дней | Тег: " + bot_state["tag"])
+    logger.info("📊 Порог: >= " + str(bot_state["min_days"]) + " дней | Теги: " + ", ".join(bot_state["tags"]))
     asyncio.create_task(periodic_check())
 
 async def on_shutdown():
