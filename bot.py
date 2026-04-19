@@ -195,6 +195,25 @@ async def cmd_debug(message: Message):
 async def silent_ignore(message: Message):
     pass
 
+
+@dp.message(Command("raw"), F.from_user.id == OWNER_ID_INT)
+async def cmd_raw(message: Message):
+    try:
+        html = fetch_with_retry(TARGET_URL)
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text()[:1000]  # Первые 1000 символов
+            await message.answer(
+                "📄 <b>Сырой текст (первые 1000 символов):</b>\n"
+                "<code>" + text.replace("`", "\\`") + "</code>",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Не удалось загрузить сайт")
+    except Exception as e:
+        logger.error("Ошибка в /raw: " + str(e))
+        await message.answer("❌ Ошибка: " + str(e))
+
 # ================= ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК =================
 @dp.errors()
 async def global_error_handler(event, exception):
