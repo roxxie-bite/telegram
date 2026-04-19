@@ -80,15 +80,14 @@ def parse_loras_from_html(html, min_days):
                 lora_days = int(days_match.group(1))
                 
                 # === ИЗВЛЕКАЕМ НАЗВАНИЕ (до "||") ===
-                # Формат: "3. Uniro (style) [Illustrious] || ..."
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 if name_match:
                     lora_name = name_match.group(1).strip()
                 else:
                     lora_name = "Loonie"
                 
-                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
-                lora_url = SITE_BASE + "/?p=lora&id=" + lora_id
+                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ (ИСПРАВЛЕНО) ===
+                lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
                 # === ПРОВЕРКА: >= min_days ===
                 if lora_days >= min_days:
