@@ -1285,9 +1285,8 @@ async def run_web_server():
 
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
-<<<<<<< HEAD
 
-=======
+
     app.router.add_get("/panel", web_panel_handler)
     
     # API endpoints
@@ -1301,7 +1300,7 @@ async def run_web_server():
     app.router.add_post("/api/blacklist/add", api_add_blacklist)
     app.router.add_post("/api/blacklist/remove", api_remove_blacklist)
     
->>>>>>> d8296f47bac30f1cb00ce48f5340dd9309a72d7b
+
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", "8080"))
