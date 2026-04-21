@@ -130,79 +130,72 @@ def has_tag_in_head(head, tag_name):
 
 
 # ================= ПАРСЕР =================
-def parse_loras_from_html(html, min_days, active_tags, current_tag):
+def parse_loras_from_html(html, min_days, current_tag):
+    """Возвращает (все_лоры_на_странице, отфильтрованные_лоры)"""
     if html is None:
-        return []
+        return [], []
     
     try:
         soup = BeautifulSoup(html, "html.parser")
-        results = []
+        all_on_page = []  # Все лоры на странице (независимо от дней)
+        filtered = []     # Только те, что >= min_days
         
         lora_heads = soup.find_all("p", class_="lora_head")
-        logger.info("Найдено lora_head: " + str(len(lora_heads)))
         
         for head in lora_heads:
             try:
                 text = head.get_text()
                 
-                # === ПРОВЕРКА ТЕГА ===
-                # Так как URL уже фильтрует по тегу (&t=tag), просто берём все лоры со страницы
-                # Но для надёжности можно проверить наличие тега в HTML
-                
-                # Ищем ID: #️⃣123456
                 id_match = re.search(r"#️⃣\s*(\d+)", text)
                 if not id_match:
                     continue
                 lora_id = id_match.group(1)
                 
-                # Ищем дни: 🕸️10 days или 🕸️1 day
                 days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
                 if not days_match:
                     continue
                 lora_days = int(days_match.group(1))
                 
-                # === ИЗВЛЕКАЕМ НАЗВАНИЕ (до "||") ===
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 lora_name = name_match.group(1).strip() if name_match else "Unknown"
                 
-                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
-                # === ПРОВЕРКА: >= min_days ===
+                # Сохраняем ВСЕ лоры (для проверки, есть ли ещё страницы)
+                all_on_page.append({
+                    "id": lora_id,
+                    "days": lora_days,
+                    "name": lora_name,
+                    "url": lora_url
+                })
+                
+                # Фильтруем по дням
                 if lora_days >= min_days:
-                    results.append({
+                    filtered.append({
                         "id": lora_id,
                         "days": lora_days,
                         "name": lora_name,
                         "url": lora_url
                     })
-                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | Тег: " + current_tag + " | ВКЛЮЧЕНО")
+                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ВКЛЮЧЕНО")
                 else:
                     logger.info("❌ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ОТКЛОНЕНО")
                     
             except Exception as e:
-                logger.warning("Ошибка обработки lora_head: " + str(e))
+                logger.warning("Ошибка: " + str(e))
                 continue
         
-        logger.info("=== Страница готова === Лор: " + str(len(results)))
-        return results
+        return all_on_page, filtered
         
     except Exception as e:
         logger.error("Ошибка парсинга: " + str(e))
-        return []
+        return [], []
 
 # ================= ПАРСЕР ВСЕХ СТРАНИЦ =================
 def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=None):
-    """
-    :param base_url: базовый URL (например, https://lynther.sytes.net/?p=lora)
-    :param min_days: минимальное количество дней
-    :param active_tags: список активных тегов
-    :param tag_name: конкретный тег для поиска (если None, ищем все active_tags)
-    """
     all_results = []
     pages_scanned = 0
     
-    # Если передан конкретный тег — ищем только его
     tags_to_search = [tag_name] if tag_name else active_tags
     
     for search_tag in tags_to_search:
@@ -210,12 +203,10 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=No
         tag_pages = 0
         
         for page in range(1, MAX_PAGES + 1):
-            # === ПРОВЕРКА: не остановлен ли бот ===
             if not bot_running:
-                logger.info("🛑 Остановка во время сканирования")
+                logger.info("🛑 Остановка")
                 break
             
-            # === ФОРМИРУЕМ URL С ТЕГОМ ===
             if page == 1:
                 url = base_url + "&t=" + search_tag
             else:
@@ -225,18 +216,25 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=No
             html = fetch_with_retry(url)
             
             if html is None:
-                logger.warning("Страница " + str(page) + " не загрузилась")
+                logger.warning("Страница не загрузилась")
                 break
             
-            loras = parse_loras_from_html(html, min_days, active_tags, search_tag)
+            # === ИСПРАВЛЕНИЕ: получаем и все лоры, и отфильтрованные ===
+            all_on_page, filtered = parse_loras_from_html(html, min_days, search_tag)
             tag_pages += 1
             
-            if loras:
-                tag_results.extend(loras)
-                logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
-            else:
-                logger.info("Стр. " + str(page) + ": лор не найдено → завершаю поиск")
+            # Добавляем только отфильтрованные
+            tag_results.extend(filtered)
+            
+            if filtered:
+                logger.info("Стр. " + str(page) + ": найдено " + str(len(filtered)) + " лор (из " + str(len(all_on_page)) + ")")
+            
+            # === ИСПРАВЛЕНИЕ: прерываем только если на странице вообще нет лор ===
+            if not all_on_page:
+                logger.info("Стр. " + str(page) + ": лор нет → завершаю поиск")
                 break
+            else:
+                logger.info("Стр. " + str(page) + ": есть лоры, продолжаю...")
             
             if page < MAX_PAGES:
                 time.sleep(1.5)
@@ -247,6 +245,7 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=No
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
+
 
 
 def format_message(lora):
@@ -312,20 +311,20 @@ async def cmd_help(message: Message):
     except Exception as e:
         logger.error("Ошибка в /help: " + str(e))
 
+# ================= КОМАНДА /check (ИСПРАВЛЕНА) =================
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     if not bot_running:
-        await message.answer(EMOJI["error"] + " Бот остановлен. Используй /start для запуска.", parse_mode="HTML")
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
         return
     try:
-        logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + (", ".join(bot_state["tags"]) if bot_state["tags"] else "ВСЕ"))
+        logger.info("=== ПРОВЕРКА ===")
         
-        # Если теги заданы — ищем по каждому, если нет — ищем все лоры
+        # Собираем лоры
         if bot_state["tags"]:
             tag_info = "по тегам: <b>" + ", ".join(bot_state["tags"]) + "</b>"
-            # Ищем по каждому тегу отдельно
             all_loras = []
             total_pages = 0
             for tag in bot_state["tags"]:
@@ -345,7 +344,13 @@ async def cmd_check(message: Message):
         
         all_loras.sort(key=lambda x: x["days"], reverse=True)
         
+        # === ИСПРАВЛЕНИЕ: выбор отправки через временный файл, а не storage ===
         if len(all_loras) > EXPORT_THRESHOLD:
+            # Сохраняем во временный файл на диске (работает на Render)
+            temp_file = "/tmp/loonie_pending_" + str(OWNER_ID_INT) + ".json"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump({"loras": all_loras, "pages": total_pages}, f)
+            
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text=EMOJI["chat"] + " В чат (" + str(len(all_loras)) + ")", callback_data="send_chat"),
@@ -358,31 +363,35 @@ async def cmd_check(message: Message):
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
-            dp.storage.set_data(chat_id=message.chat.id, user_id=message.from_user.id, key="pending_loras", value=all_loras)
-            dp.storage.set_data(chat_id=message.chat.id, user_id=message.from_user.id, key="pending_pages", value=total_pages)
-            return
+            return  # ← Ждём выбора пользователя
         
-        await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
-        for lora in all_loras:
-            await message.answer(format_message(lora), parse_mode="HTML")
-            await asyncio.sleep(0.3)
-        
-        avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
-        max_lora = max(all_loras, key=lambda x: x["days"])
-        min_lora = min(all_loras, key=lambda x: x["days"])
-        
-        stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
-        stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
-        stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
-        stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
-        stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
-        stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
-        await message.answer(stats, parse_mode="HTML")
+        # Если лор мало — отправляем сразу
+        await _send_loras_to_chat(message, all_loras, total_pages)
             
     except Exception as e:
         logger.error("Ошибка в /check: " + str(e))
         await message.answer(EMOJI["error"] + " Ошибка при проверке.")
 
+async def _send_loras_to_chat(message, all_loras, total_pages):
+    """Вспомогательная функция для отправки лор в чат"""
+    await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
+    for lora in all_loras:
+        await message.answer(format_message(lora), parse_mode="HTML")
+        await asyncio.sleep(0.3)
+    
+    avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
+    max_lora = max(all_loras, key=lambda x: x["days"])
+    min_lora = min(all_loras, key=lambda x: x["days"])
+    
+    stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
+    stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
+    stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
+    stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
+    stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
+    stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
+    await message.answer(stats, parse_mode="HTML")
+
+# ================= CALLBACK (ИСПРАВЛЕН) =================
 @dp.callback_query(F.data.in_({"send_chat", "send_file"}))
 async def handle_send_choice(callback: CallbackQuery):
     if callback.from_user.id != OWNER_ID_INT:
@@ -392,23 +401,28 @@ async def handle_send_choice(callback: CallbackQuery):
         await callback.answer("❌ Бот остановлен", show_alert=True)
         return
     
-    all_loras = dp.storage.get_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_loras")
-    total_pages = dp.storage.get_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_pages")
-    
-    if not all_loras:
+    # === ИСПРАВЛЕНИЕ: читаем из файла, а не из storage ===
+    temp_file = "/tmp/loonie_pending_" + str(OWNER_ID_INT) + ".json"
+    if not os.path.exists(temp_file):
         await callback.answer("❌ Данные устарели, сделай /check заново", show_alert=True)
         return
     
-    dp.storage.set_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_loras", value=None)
-    dp.storage.set_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_pages", value=None)
+    try:
+        with open(temp_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        all_loras = data["loras"]
+        total_pages = data["pages"]
+        os.remove(temp_file)  # Удаляем временный файл
+    except Exception as e:
+        logger.error("Ошибка чтения файла: " + str(e))
+        await callback.answer("❌ Ошибка данных", show_alert=True)
+        return
     
     await callback.message.edit_reply_markup(reply_markup=None)
     
     if callback.data == "send_chat":
         await callback.message.answer(EMOJI["chat"] + " Отправляю в чат...")
-        for lora in all_loras:
-            await callback.message.answer(format_message(lora), parse_mode="HTML")
-            await asyncio.sleep(0.3)
+        await _send_loras_to_chat(callback.message, all_loras, total_pages)
     else:
         await callback.message.answer(EMOJI["file"] + " Готовлю файл...")
         content = make_export_file(all_loras, bot_state["min_days"], bot_state["tags"])
@@ -421,18 +435,7 @@ async def handle_send_choice(callback: CallbackQuery):
                    "Порог: >= " + str(bot_state["min_days"]) + " дней",
             parse_mode="HTML"
         )
-    
-    avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
-    max_lora = max(all_loras, key=lambda x: x["days"])
-    min_lora = min(all_loras, key=lambda x: x["days"])
-    
-    stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
-    stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
-    stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
-    stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
-    stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
-    stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
-    await callback.message.answer(stats, parse_mode="HTML")
+        # Статистику в файл не пишем, чтобы не загромождать
     
     await callback.answer()
 
