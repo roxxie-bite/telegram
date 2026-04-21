@@ -10,7 +10,7 @@ from io import BytesIO
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
@@ -25,7 +25,7 @@ DEFAULT_TAGS = []
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 50
 CONFIG_FILE = "config.json"
-EXPORT_THRESHOLD = 50  # Если больше — отправляем файлом
+EXPORT_THRESHOLD = 50
 
 # === СПЕЦИАЛЬНЫЕ ТЕГИ ===
 SPECIAL_TAGS = {"xl": "tag_red", "style": "tag_purple", "character": "tag_green", "quality": "tag_gold"}
@@ -127,7 +127,7 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=No
             all_on_page, filtered = parse_loras_from_html(html, min_days)
             tag_pages += 1
             tag_results.extend(filtered)
-            if not all_on_page:  # ← Останавливаемся только если лор вообще нет
+            if not all_on_page:
                 break
             if page < MAX_PAGES:
                 time.sleep(1.5)
@@ -180,15 +180,22 @@ async def _send_loras_to_chat(message, all_loras, total_pages):
         await message.answer(stats, parse_mode="HTML")
 
 async def _send_loras_as_file(message, all_loras, total_pages):
+    """Отправляет лоры файлом .txt (исправлено для aiogram 3.x)"""
     content = make_export_file(all_loras, bot_state["min_days"], bot_state["tags"])
-    file = BytesIO(content)
-    file.name = "loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt"
+    
+    # === ИСПРАВЛЕНИЕ: используем BufferedInputFile ===
+    file = BufferedInputFile(
+        file=content,
+        filename="loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt"
+    )
+    
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\n"
     caption += "Лор: " + str(len(all_loras)) + "\nПорог: >= " + str(bot_state["min_days"]) + " дней"
     if bot_state["tags"]:
         caption += "\nТеги: " + ", ".join(bot_state["tags"])
+    
     await message.answer_document(document=file, caption=caption, parse_mode="HTML")
-    # Статистику отдельно
+    
     if all_loras:
         avg = sum(l["days"] for l in all_loras) // len(all_loras)
         mx = max(all_loras, key=lambda x: x["days"])
@@ -232,7 +239,6 @@ async def cmd_check(message: Message):
         
         all_loras.sort(key=lambda x: x["days"], reverse=True)
         
-        # === АВТОМАТИЧЕСКИЙ ВЫБОР: файл если много, чат если мало ===
         if len(all_loras) > EXPORT_THRESHOLD:
             await message.answer(EMOJI["file"] + " Лор много (<b>" + str(len(all_loras)) + "</b>), отправляю файлом...", parse_mode="HTML")
             await _send_loras_as_file(message, all_loras, total_pages)
@@ -387,7 +393,6 @@ async def periodic_check():
             all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], [])
         if all_loras:
             all_loras.sort(key=lambda x: x["days"], reverse=True)
-            # Автопроверка всегда отправляет файлом если много
             if len(all_loras) > EXPORT_THRESHOLD:
                 await _send_loras_as_file(bot, all_loras, total_pages)
             else:
