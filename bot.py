@@ -203,45 +203,121 @@ def parse_loras_from_html(html, min_days):
         logger.error("Ошибка парсинга: " + str(e))
         return [], []
 
-# ================= ПОИСК ПО СТРАНИЦАМ =================
+# ================= ПОИСК ПО СТРАНИЦАМ (ИСПРАВЛЕНО) =================
 def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=None):
+    """
+    Режимы работы:
+    1. tag_name задан → ищем только этот тег
+    2. active_tags не пуст → ищем каждый тег из списка
+    3. active_tags пуст → ищем ВСЕ лоры без фильтра по тегу
+    """
     all_results, pages_scanned = [], 0
-    for search_tag in ([tag_name] if tag_name else active_tags):
+    
+    if tag_name:
+        tags_to_search = [tag_name]
+        use_tag_filter = True
+    elif active_tags:
+        tags_to_search = active_tags
+        use_tag_filter = True
+    else:
+        # Нет тегов → ищем все лоры
+        tags_to_search = [None]
+        use_tag_filter = False
+    
+    for search_tag in tags_to_search:
         tag_results, tag_pages = [], 0
+        
         for page in range(1, MAX_PAGES + 1):
             if not bot_running:
                 break
-            url = base_url + "&t=" + search_tag + ("&c=" + str(page) if page > 1 else "")
+            
+            # Формируем URL
+            if use_tag_filter and search_tag:
+                url = base_url + "&t=" + search_tag
+                if page > 1:
+                    url += "&c=" + str(page)
+            else:
+                url = base_url
+                if page > 1:
+                    url += "&c=" + str(page)
+            
+            logger.info("=== Страница: " + str(page) + " | URL: " + url + " ===")
             html = fetch_with_retry(url)
+            
             if not html:
                 break
+            
             all_on_page, filtered = parse_loras_from_html(html, min_days)
             tag_pages += 1
             tag_results.extend(filtered)
+            
             if not all_on_page:
                 break
+            
             if page < MAX_PAGES:
                 time.sleep(1.0)
+        
         all_results.extend(tag_results)
         pages_scanned += tag_pages
+    
+    logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
 
-def format_message(lora):
-    return "\n".join([
-        EMOJI["brain"] + " <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>",
-        EMOJI["id"] + " <code>ID: " + str(lora["id"]) + "</code>",
-        EMOJI["days"] + " <b>" + str(lora["days"]) + " дней</b> без использования",
-        EMOJI["delete"] + " <code>/dellora " + str(lora["id"]) + "</code>",
-        "─" * 30
-    ])
-
-def make_export_file(loras, min_days, tags):
-    lines = ["# Loonie Bot Export", "# Дата: " + datetime.now().strftime("%Y-%m-%d %H:%M"),
-             "# Порог: >= " + str(min_days) + " дней", "# Теги: " + (", ".join(tags) if tags else "все"),
-             "# Лор: " + str(len(loras)), ""]
-    for l in loras:
-        lines.append("/dellora " + l["id"] + "  # " + l["name"] + " (" + str(l["days"]) + " дней)")
-    return "\n".join(lines).encode("utf-8")
+# ================= ПАРСЕР (с отладкой) =================
+def parse_loras_from_html(html, min_days):
+    if html is None:
+        return [], []
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        all_on_page, filtered = [], []
+        
+        # Отладка: покажем первые 500 символов если нет лор
+        lora_heads = soup.find_all("p", class_="lora_head")
+        if not lora_heads:
+            logger.warning("⚠️ Не найдено <p class='lora_head'>! Проверь структуру сайта.")
+            # Попробуем найти любые <p> с эмодзи
+            fallback = soup.find_all("p", string=re.compile(r"#️⃣|🕸️"))
+            if fallback:
+                logger.info("🔍 Найдено через fallback: " + str(len(fallback)))
+        
+        for head in lora_heads:
+            try:
+                text = head.get_text()
+                
+                # Ищем ID
+                id_match = re.search(r"#️⃣\s*(\d+)", text)
+                if not id_match:
+                    continue
+                lora_id = id_match.group(1)
+                
+                # Ищем дни (более гибкий паттерн)
+                days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
+                if not days_match:
+                    # Пробуем альтернативный формат
+                    days_match = re.search(r"(\d+)\s+days?", text, re.IGNORECASE)
+                if not days_match:
+                    continue
+                lora_days = int(days_match.group(1))
+                
+                # Название
+                name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
+                lora_name = name_match.group(1).strip() if name_match else "Unknown"
+                
+                lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
+                
+                all_on_page.append({"id": lora_id, "days": lora_days, "name": lora_name, "url": lora_url})
+                
+                if lora_days >= min_days:
+                    filtered.append({"id": lora_id, "days": lora_days, "name": lora_name, "url": lora_url})
+                    
+            except Exception as e:
+                logger.warning("Ошибка парсинга: " + str(e))
+                continue
+        
+        return all_on_page, filtered
+    except Exception as e:
+        logger.error("Ошибка парсинга: " + str(e))
+        return [], []
 
 # ================= УПРАВЛЕНИЕ ЗАДАЧАМИ =================
 def cancel_periodic_task():
