@@ -6,10 +6,11 @@ import requests
 import time
 import json
 from datetime import datetime
+from io import BytesIO
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, MessageEntity
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
@@ -23,6 +24,7 @@ DEFAULT_TAGS = []
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 50
 CONFIG_FILE = "config.json"
+EXPORT_THRESHOLD = 50  # Если лор больше — предлагать файл
 
 # === СПЕЦИАЛЬНЫЕ ТЕГИ (регистр не важен) ===
 SPECIAL_TAGS = {
@@ -32,24 +34,8 @@ SPECIAL_TAGS = {
     "quality": "tag_gold",
 }
 
-# === ПРЕМИУМ ЭМОДЗИ (кастомные) ===
-# Формат: "ключ": {"text": "видимый символ", "id": "emoji_id"}
-PREMIUM_EMOJI = {
-    "loading": {"text": "⏳", "id": "5366411093453346346"},
-    "dot1": {"text": "◾️", "id": "5256250825897968331"},
-    "dot2": {"text": "◾️", "id": "5256213734560401256"},
-    "dot3": {"text": "◾️", "id": "5255769686481601612"},
-    "dot4": {"text": "◾️", "id": "5256130803036883120"},
-    "dot5": {"text": "◾️", "id": "5256079448112926202"},
-    # Добавляй свои премиум-эмодзи сюда:
-    # "brain": {"text": "🧠", "id": "1234567890"},
-    # "id_icon": {"text": "🆔", "id": "0987654321"},
-}
-
-# === ОБЫЧНЫЕ ЭМОДЗИ (запасной вариант) ===
-REGULAR_EMOJI = {
-    "loading": "⏳",
-    "dot": "◾",
+# === ОБЫЧНЫЕ ЭМОДЗИ ===
+EMOJI = {
     "brain": "🧠",
     "id": "🆔",
     "days": "🕸️",
@@ -63,6 +49,8 @@ REGULAR_EMOJI = {
     "warning": "⚠️",
     "error": "❌",
     "info": "ℹ️",
+    "file": "📄",
+    "chat": "💬",
 }
 # =============================================
 
@@ -102,75 +90,6 @@ def save_config():
 
 bot_state = load_config()
 
-# ================= ПРЕМИУМ ЭМОДЗИ ХЕЛПЕРЫ =================
-def get_emoji(key, fallback_to_regular=True):
-    """Возвращает премиум-эмодзи или обычный, если премиум не найден"""
-    if key in PREMIUM_EMOJI:
-        return PREMIUM_EMOJI[key]["text"]
-    elif fallback_to_regular and key in REGULAR_EMOJI:
-        return REGULAR_EMOJI[key]
-    return ""
-
-def make_premium_text(text, emoji_keys):
-    """
-    Создаёт текст с премиум-эмодзи через MessageEntity
-    :param text: итоговый текст
-    :param emoji_keys: список кортежей [(ключ_эмодзи, позиция_начала), ...]
-    """
-    entities = []
-    for key, pos in emoji_keys:
-        if key in PREMIUM_EMOJI:
-            emoji_info = PREMIUM_EMOJI[key]
-            # Находим позицию символа в тексте
-            start = text.find(emoji_info["text"], pos)
-            if start != -1:
-                end = start + len(emoji_info["text"])
-                entities.append(MessageEntity(
-                    type="custom_emoji",
-                    offset=start,
-                    length=len(emoji_info["text"]),
-                    custom_emoji_id=emoji_info["id"]
-                ))
-    return text, entities if entities else None
-
-def loading_animation_frames():
-    """Генерирует кадры анимации загрузки"""
-    dots = "".join([get_emoji("dot" + str(i)) for i in range(1, 6)])
-    base = get_emoji("loading")
-    frames = []
-    for i in range(len(dots) + 1):
-        frames.append(base + " " + dots[:i] + (" " if i < len(dots) else ""))
-    return frames
-
-async def send_loading(message, text="Сканирую..."):
-    """Отправляет сообщение с анимацией загрузки"""
-    frames = loading_animation_frames()
-    loading_msg = await message.answer(text + " " + frames[0])
-    
-    async def animate():
-        frame_idx = 0
-        while True:
-            await asyncio.sleep(0.5)
-            try:
-                await loading_msg.edit_text(text + " " + frames[frame_idx % len(frames)])
-                frame_idx += 1
-            except Exception:
-                break  # Сообщение удалено или изменено
-    
-    task = asyncio.create_task(animate())
-    return loading_msg, task
-
-async def stop_loading(loading_msg, task, final_text=None):
-    """Останавливает анимацию и обновляет сообщение"""
-    task.cancel()
-    try:
-        if final_text:
-            await loading_msg.edit_text(final_text)
-        else:
-            await loading_msg.delete()
-    except Exception:
-        pass
-
 # ================= ЗАЩИЩЁННЫЙ ЗАПРОС =================
 def fetch_with_retry(url, max_retries=3):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -187,10 +106,8 @@ def fetch_with_retry(url, max_retries=3):
 
 # ================= ПРОВЕРКА ТЕГА (БЕЗ УЧЁТА РЕГИСТРА) =================
 def has_tag_in_head(head, tag_name):
-    """Проверяет, есть ли нужный тег в элементе lora_head (регистр не важен)"""
     tag_lower = tag_name.lower()
     
-    # Специальные теги по цветному классу
     if tag_lower in SPECIAL_TAGS:
         special_class = SPECIAL_TAGS[tag_lower]
         for span in head.find_all("span", class_=special_class):
@@ -198,12 +115,10 @@ def has_tag_in_head(head, tag_name):
                 return True
         return False
     
-    # Обычные теги: ищем в любом span class="tag_*"
     for span in head.find_all("span", class_=re.compile(r"^tag_", re.IGNORECASE)):
         span_text = span.get_text().strip().lower()
         if tag_lower == span_text or tag_lower in span_text:
             return True
-    
     return False
 
 # ================= ПАРСЕР ПО lora_head =================
@@ -222,7 +137,6 @@ def parse_loras_from_html(html, min_days, active_tags):
             try:
                 text = head.get_text()
                 
-                # Фильтр по тегам (если список не пуст)
                 if active_tags:
                     has_any_tag = False
                     for tag in active_tags:
@@ -232,26 +146,21 @@ def parse_loras_from_html(html, min_days, active_tags):
                     if not has_any_tag:
                         continue
                 
-                # ID
                 id_match = re.search(r"#️⃣\s*(\d+)", text)
                 if not id_match:
                     continue
                 lora_id = id_match.group(1)
                 
-                # Дни
                 days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
                 if not days_match:
                     continue
                 lora_days = int(days_match.group(1))
                 
-                # Название
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 lora_name = name_match.group(1).strip() if name_match else "Unknown"
                 
-                # Ссылка
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
-                # Фильтр по дням
                 if lora_days >= min_days:
                     results.append({
                         "id": lora_id,
@@ -309,19 +218,23 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags):
     return all_results, pages_scanned
 
 def format_message(lora):
-    """Формирует сообщение с премиум-эмодзи"""
-    brain = get_emoji("brain")
-    id_icon = get_emoji("id")
-    days_icon = get_emoji("days")
-    delete_icon = get_emoji("delete")
-    
     msg = []
-    msg.append(brain + " <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>")
-    msg.append(id_icon + " <code>ID: " + str(lora["id"]) + "</code>")
-    msg.append(days_icon + " <b>" + str(lora["days"]) + " дней</b> без использования")
-    msg.append(delete_icon + " <code>/dellora " + str(lora["id"]) + "</code>")
+    msg.append(EMOJI["brain"] + " <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>")
+    msg.append(EMOJI["id"] + " <code>ID: " + str(lora["id"]) + "</code>")
+    msg.append(EMOJI["days"] + " <b>" + str(lora["days"]) + " дней</b> без использования")
+    msg.append(EMOJI["delete"] + " <code>/dellora " + str(lora["id"]) + "</code>")
     msg.append("─" * 30)
     return "\n".join(msg)
+
+def make_export_file(loras, min_days, tags):
+    content = "# Loonie Bot Export\n"
+    content += "# Дата: " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n"
+    content += "# Порог: >= " + str(min_days) + " дней\n"
+    content += "# Теги: " + (", ".join(tags) if tags else "все") + "\n"
+    content += "# Лор: " + str(len(loras)) + "\n\n"
+    for lora in loras:
+        content += "/dellora " + lora["id"] + "  # " + lora["name"] + " (" + str(lora["days"]) + " дней)\n"
+    return content.encode("utf-8")
 
 # ================= КОМАНДЫ =================
 @dp.message(Command("help"))
@@ -329,28 +242,22 @@ async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     try:
-        search_icon = get_emoji("search")
-        settings_icon = get_emoji("settings")
-        info_icon = get_emoji("info")
-        tag_icon = get_emoji("tag")
-        clock_icon = get_emoji("clock")
-        
-        txt = info_icon + " <b>Справка по командам:</b>\n\n"
-        txt += "<b>" + search_icon + " Основные:</b>\n"
+        txt = EMOJI["info"] + " <b>Справка по командам:</b>\n\n"
+        txt += "<b>" + EMOJI["search"] + " Основные:</b>\n"
         txt += "/check — Проверить все лоры по активным тегам\n"
         txt += "/status — Показать текущие настройки\n"
         txt += "/help — Эта справка\n\n"
-        txt += "<b>" + settings_icon + " Настройки:</b>\n"
+        txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n"
         txt += "/setdays <N> — Порог дней (>= N), 0 = все лоры\n"
-        txt += "/addtag <тег> — Добавить тег для фильтрации (регистр не важен)\n"
+        txt += "/addtag <тег> — Добавить тег (регистр не важен)\n"
         txt += "/rmtag <тег> — Удалить тег из списка\n"
         txt += "/tags — Показать все активные теги\n"
         txt += "/setschedule <время> — Установить расписание\n"
         txt += "/schedule — Показать расписание проверок\n\n"
-        txt += "<b>" + tag_icon + " Специальные теги:</b>\n"
+        txt += "<b>" + EMOJI["tag"] + " Специальные теги:</b>\n"
         txt += "xl (красный), style (фиолетовый),\n"
         txt += "character (зелёный), quality (золотой)\n"
-        txt += "<i>Остальные теги ищутся по названию (без учёта регистра)</i>\n\n"
+        txt += "<i>Остальные теги ищутся по названию</i>\n\n"
         txt += "<i>Все команды доступны только тебе (владелец)</i>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
@@ -363,48 +270,114 @@ async def cmd_check(message: Message):
     try:
         logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + (", ".join(bot_state["tags"]) if bot_state["tags"] else "ВСЕ"))
         
-        search_icon = get_emoji("search")
         tag_info = "по тегам: <b>" + ", ".join(bot_state["tags"]) + "</b>" if bot_state["tags"] else "<b>все лоры</b>"
         days_info = " (>= " + str(bot_state["min_days"]) + " дней)" if bot_state["min_days"] > 0 else ""
-        
-        # Запускаем анимацию загрузки
-        loading_msg, anim_task = await send_loading(message, search_icon + " Сканирую " + tag_info + days_info + "...")
+        await message.answer(EMOJI["search"] + " Сканирую " + tag_info + days_info + "...", parse_mode="HTML")
         
         all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], bot_state["tags"])
         
-        # Останавливаем анимацию
-        await stop_loading(loading_msg, anim_task)
-        
         if not all_loras:
-            await message.answer(get_emoji("check") + " Лоры не найдены.")
+            await message.answer(EMOJI["check"] + " Лоры не найдены.")
             return
         
         all_loras.sort(key=lambda x: x["days"], reverse=True)
         
-        stats_icon = get_emoji("stats")
-        await message.answer(stats_icon + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
+        # Если лор много — спрашиваем, как отправить
+        if len(all_loras) > EXPORT_THRESHOLD:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=EMOJI["chat"] + " В чат (" + str(len(all_loras)) + ")", callback_data="send_chat"),
+                    InlineKeyboardButton(text=EMOJI["file"] + " Файлом", callback_data="send_file")
+                ]
+            ])
+            await message.answer(
+                EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор (много!)\n\n"
+                "Как отправить?",
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            # Сохраняем лоры во временное хранилище для обработки в callback
+            dp.storage.set_data(chat_id=message.chat.id, user_id=message.from_user.id, key="pending_loras", value=all_loras)
+            dp.storage.set_data(chat_id=message.chat.id, user_id=message.from_user.id, key="pending_pages", value=total_pages)
+            return
         
+        # Если лор мало — отправляем сразу в чат
+        await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
         for lora in all_loras:
             await message.answer(format_message(lora), parse_mode="HTML")
             await asyncio.sleep(0.3)
         
-        if all_loras:
-            avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
-            max_lora = max(all_loras, key=lambda x: x["days"])
-            min_lora = min(all_loras, key=lambda x: x["days"])
-            
-            stats = "\n" + stats_icon + " <b>Статистика:</b>\n"
-            stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
-            stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
-            stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
-            stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
-            stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
-            
-            await message.answer(stats, parse_mode="HTML")
+        # Статистика
+        avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
+        max_lora = max(all_loras, key=lambda x: x["days"])
+        min_lora = min(all_loras, key=lambda x: x["days"])
+        
+        stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
+        stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
+        stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
+        stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
+        stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
+        stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
+        await message.answer(stats, parse_mode="HTML")
             
     except Exception as e:
         logger.error("Ошибка в /check: " + str(e))
-        await message.answer(get_emoji("error") + " Ошибка при проверке.")
+        await message.answer(EMOJI["error"] + " Ошибка при проверке.")
+
+@dp.callback_query(F.data.in_({"send_chat", "send_file"}))
+async def handle_send_choice(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Не авторизован", show_alert=True)
+        return
+    
+    # Получаем сохранённые лоры
+    all_loras = dp.storage.get_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_loras")
+    total_pages = dp.storage.get_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_pages")
+    
+    if not all_loras:
+        await callback.answer("❌ Данные устарели, сделай /check заново", show_alert=True)
+        return
+    
+    # Очищаем хранилище
+    dp.storage.set_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_loras", value=None)
+    dp.storage.set_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_pages", value=None)
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    if callback.data == "send_chat":
+        # Отправляем в чат
+        await callback.message.answer(EMOJI["chat"] + " Отправляю в чат...")
+        for lora in all_loras:
+            await callback.message.answer(format_message(lora), parse_mode="HTML")
+            await asyncio.sleep(0.3)
+    else:
+        # Отправляем файлом
+        await callback.message.answer(EMOJI["file"] + " Готовлю файл...")
+        content = make_export_file(all_loras, bot_state["min_days"], bot_state["tags"])
+        file = BytesIO(content)
+        file.name = "loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt"
+        await callback.message.answer_document(
+            document=file,
+            caption=EMOJI["file"] + " <b>Экспорт лор</b>\n" +
+                   "Лор: " + str(len(all_loras)) + "\n" +
+                   "Порог: >= " + str(bot_state["min_days"]) + " дней",
+            parse_mode="HTML"
+        )
+    
+    # Статистика (в любом случае)
+    avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
+    max_lora = max(all_loras, key=lambda x: x["days"])
+    min_lora = min(all_loras, key=lambda x: x["days"])
+    
+    stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
+    stats += "• Страниц просканировано: <b>" + str(total_pages) + "</b>\n"
+    stats += "• Лор найдено: <b>" + str(len(all_loras)) + "</b>\n"
+    stats += "• Средний простой: <b>" + str(avg_days) + "</b> дней\n"
+    stats += "• Минимум: " + str(min_lora["days"]) + " дней\n"
+    stats += "• Максимум: <b>" + str(max_lora["days"]) + "</b> дней (ID: <code>" + max_lora["id"] + "</code>)"
+    await callback.message.answer(stats, parse_mode="HTML")
+    
+    await callback.answer()
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
@@ -413,11 +386,11 @@ async def cmd_setdays(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2 or not parts[1].isdigit():
-            await message.answer(get_emoji("warning") + " Используй: <code>/setdays &lt;число&gt;</code>\nПример: <code>/setdays 10</code> или <code>/setdays 0</code> (все лоры)", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Используй: <code>/setdays &lt;число&gt;</code>\nПример: <code>/setdays 10</code> или <code>/setdays 0</code> (все лоры)", parse_mode="HTML")
             return
         new_days = int(parts[1])
         if new_days < 0:
-            await message.answer(get_emoji("warning") + " Число должно быть >= 0", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Число должно быть >= 0", parse_mode="HTML")
             return
         
         bot_state["min_days"] = new_days
@@ -425,11 +398,11 @@ async def cmd_setdays(message: Message):
         logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
         days_text = "все лоры" if new_days == 0 else ">= " + str(new_days) + " дней"
-        await message.answer(get_emoji("check") + " Порог установлен: <b>" + days_text + "</b>. Используй /check для поиска.", parse_mode="HTML")
+        await message.answer(EMOJI["check"] + " Порог установлен: <b>" + days_text + "</b>. Используй /check для поиска.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
-        await message.answer(get_emoji("error") + " Не удалось изменить.")
+        await message.answer(EMOJI["error"] + " Не удалось изменить.")
 
 @dp.message(Command("addtag"))
 async def cmd_addtag(message: Message):
@@ -438,17 +411,16 @@ async def cmd_addtag(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            await message.answer(get_emoji("warning") + " Используй: <code>/addtag &lt;название&gt;</code>\nПример: <code>/addtag anime</code>", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Используй: <code>/addtag &lt;название&gt;</code>\nПример: <code>/addtag anime</code>", parse_mode="HTML")
             return
         
-        new_tag = parts[1].strip().lower()  # Приводим к нижнему регистру
+        new_tag = parts[1].strip().lower()
         if not new_tag.isalnum():
-            await message.answer(get_emoji("warning") + " Тег должен содержать только буквы и цифры", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Тег должен содержать только буквы и цифры", parse_mode="HTML")
             return
         
-        # Проверяем без учёта регистра
         if any(t.lower() == new_tag for t in bot_state["tags"]):
-            await message.answer(get_emoji("warning") + " Тег <b>" + new_tag + "</b> уже в списке", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Тег <b>" + new_tag + "</b> уже в списке", parse_mode="HTML")
             return
         
         bot_state["tags"].append(new_tag)
@@ -458,11 +430,11 @@ async def cmd_addtag(message: Message):
         logger.info("=== ТЕГ ДОБАВЛЕН === " + new_tag + tag_type)
         
         tags_list = ", ".join(bot_state["tags"]) if bot_state["tags"] else "<i>нет (будут все лоры)</i>"
-        await message.answer(get_emoji("check") + " Тег <b>" + new_tag + "</b> добавлен" + tag_type + ".\nТекущие теги: " + tags_list, parse_mode="HTML")
+        await message.answer(EMOJI["check"] + " Тег <b>" + new_tag + "</b> добавлен" + tag_type + ".\nТекущие теги: " + tags_list, parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /addtag: " + str(e))
-        await message.answer(get_emoji("error") + " Не удалось добавить тег.")
+        await message.answer(EMOJI["error"] + " Не удалось добавить тег.")
 
 @dp.message(Command("rmtag"))
 async def cmd_rmtag(message: Message):
@@ -471,12 +443,11 @@ async def cmd_rmtag(message: Message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            await message.answer(get_emoji("warning") + " Используй: <code>/rmtag &lt;название&gt;</code>", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Используй: <code>/rmtag &lt;название&gt;</code>", parse_mode="HTML")
             return
         
         tag_to_remove = parts[1].strip().lower()
         
-        # Ищем без учёта регистра
         tag_found = None
         for t in bot_state["tags"]:
             if t.lower() == tag_to_remove:
@@ -484,7 +455,7 @@ async def cmd_rmtag(message: Message):
                 break
         
         if not tag_found:
-            await message.answer(get_emoji("warning") + " Тег <b>" + tag_to_remove + "</b> не найден", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Тег <b>" + tag_to_remove + "</b> не найден", parse_mode="HTML")
             return
         
         bot_state["tags"].remove(tag_found)
@@ -492,23 +463,22 @@ async def cmd_rmtag(message: Message):
         logger.info("=== ТЕГ УДАЛЁН === " + tag_found)
         
         tags_list = ", ".join(bot_state["tags"]) if bot_state["tags"] else "<i>нет (будут все лоры)</i>"
-        await message.answer(get_emoji("check") + " Тег <b>" + tag_found + "</b> удалён.\nТекущие теги: " + tags_list, parse_mode="HTML")
+        await message.answer(EMOJI["check"] + " Тег <b>" + tag_found + "</b> удалён.\nТекущие теги: " + tags_list, parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /rmtag: " + str(e))
-        await message.answer(get_emoji("error") + " Не удалось удалить тег.")
+        await message.answer(EMOJI["error"] + " Не удалось удалить тег.")
 
 @dp.message(Command("tags"))
 async def cmd_tags(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     try:
-        tag_icon = get_emoji("tag")
         if not bot_state["tags"]:
-            await message.answer(tag_icon + " <b>Активные теги:</b>\n<i>нет</i>\n\n<i>Будут показаны ВСЕ лоры</i>", parse_mode="HTML")
+            await message.answer(EMOJI["tag"] + " <b>Активные теги:</b>\n<i>нет</i>\n\n<i>Будут показаны ВСЕ лоры</i>", parse_mode="HTML")
             return
         
-        txt = tag_icon + " <b>Активные теги:</b>\n"
+        txt = EMOJI["tag"] + " <b>Активные теги:</b>\n"
         for i, tag in enumerate(bot_state["tags"], 1):
             tag_type = " (спец)" if tag in SPECIAL_TAGS else " (обычный)"
             txt += str(i) + ". <code>" + tag + "</code>" + tag_type + "\n"
@@ -525,7 +495,7 @@ async def cmd_setschedule(message: Message):
         parts = message.text.split()
         if len(parts) < 2:
             await message.answer(
-                get_emoji("warning") + " Используй: <code>/setschedule &lt;время&gt; [&lt;время&gt;...]</code>\n"
+                EMOJI["warning"] + " Используй: <code>/setschedule &lt;время&gt; [&lt;время&gt;...]</code>\n"
                 "Пример: <code>/setschedule 09:00 15:00 21:00</code>\n"
                 "Формат: ЧЧ:ММ (24 часа)",
                 parse_mode="HTML"
@@ -537,36 +507,34 @@ async def cmd_setschedule(message: Message):
             if re.match(r'^\d{2}:\d{2}$', t):
                 times.append(t)
             else:
-                await message.answer(get_emoji("warning") + " Неверный формат времени: <code>" + t + "</code>\nИспользуй ЧЧ:ММ (например, 09:00)", parse_mode="HTML")
+                await message.answer(EMOJI["warning"] + " Неверный формат времени: <code>" + t + "</code>\nИспользуй ЧЧ:ММ (например, 09:00)", parse_mode="HTML")
                 return
         
         bot_state["schedule"] = times
         save_config()
         logger.info("=== РАСПИСАНИЕ === Установлено: " + ", ".join(times))
         
-        clock_icon = get_emoji("clock")
         if times:
-            await message.answer(clock_icon + " Расписание установлено: <b>" + ", ".join(times) + "</b>\nАвтопроверки будут в это время.", parse_mode="HTML")
+            await message.answer(EMOJI["clock"] + " Расписание установлено: <b>" + ", ".join(times) + "</b>\nАвтопроверки будут в это время.", parse_mode="HTML")
         else:
-            await message.answer(clock_icon + " Расписание очищено. Автопроверки отключены.", parse_mode="HTML")
+            await message.answer(EMOJI["clock"] + " Расписание очищено. Автопроверки отключены.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /setschedule: " + str(e))
-        await message.answer(get_emoji("error") + " Не удалось установить расписание.")
+        await message.answer(EMOJI["error"] + " Не удалось установить расписание.")
 
 @dp.message(Command("schedule"))
 async def cmd_schedule(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     try:
-        clock_icon = get_emoji("clock")
         if bot_state["schedule"]:
-            txt = clock_icon + " <b>Расписание автопроверок:</b>\n"
+            txt = EMOJI["clock"] + " <b>Расписание автопроверок:</b>\n"
             for t in bot_state["schedule"]:
                 txt += "• <code>" + t + "</code>\n"
             txt += "\n<i>Следующая проверка в ближайшее время из списка</i>"
         else:
-            txt = clock_icon + " <b>Расписание:</b> не установлено\n"
+            txt = EMOJI["clock"] + " <b>Расписание:</b> не установлено\n"
             txt += "<i>Используй /setschedule 09:00 15:00 21:00</i>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
@@ -577,20 +545,16 @@ async def cmd_status(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     try:
-        settings_icon = get_emoji("settings")
-        tag_icon = get_emoji("tag")
-        clock_icon = get_emoji("clock")
-        
         days_text = "все лоры" if bot_state["min_days"] == 0 else ">= " + str(bot_state["min_days"]) + " дней"
         tags_text = ", ".join(bot_state["tags"]) if bot_state["tags"] else "нет (все лоры)"
         
-        txt = settings_icon + " <b>Настройки:</b>\n"
-        txt += get_emoji("days") + " Порог: <b>" + days_text + "</b>\n"
-        txt += tag_icon + " Теги: <b>" + tags_text + "</b>\n"
+        txt = EMOJI["settings"] + " <b>Настройки:</b>\n"
+        txt += EMOJI["days"] + " Порог: <b>" + days_text + "</b>\n"
+        txt += EMOJI["tag"] + " Теги: <b>" + tags_text + "</b>\n"
         txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
         txt += "📄 Макс. страниц: <b>" + str(MAX_PAGES) + "</b>\n"
         if bot_state["schedule"]:
-            txt += clock_icon + " Расписание: <b>" + ", ".join(bot_state["schedule"]) + "</b>\n"
+            txt += EMOJI["clock"] + " Расписание: <b>" + ", ".join(bot_state["schedule"]) + "</b>\n"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /status: " + str(e))
@@ -619,6 +583,7 @@ async def periodic_check():
             if all_loras:
                 all_loras.sort(key=lambda x: x["days"], reverse=True)
                 
+                # Автопроверка всегда отправляет в чат (без выбора)
                 for lora in all_loras:
                     try:
                         await bot.send_message(
