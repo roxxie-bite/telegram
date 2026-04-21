@@ -5,8 +5,6 @@ import logging
 import requests
 import time
 import json
-import signal
-import sys
 from datetime import datetime
 from io import BytesIO
 from bs4 import BeautifulSoup
@@ -18,7 +16,7 @@ from aiohttp import web
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
-STOP_PASSWORD = os.getenv("STOP_PASSWORD", "stop123")  # Пароль для остановки
+STOP_PASSWORD = os.getenv("STOP_PASSWORD", "stop123")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 SITE_BASE = "https://lynther.sytes.net"
 BASE_URL = SITE_BASE + "/?p=lora"
@@ -58,9 +56,9 @@ EMOJI = {
     "restart": "🔄",
 }
 
-# === ГЛОБАЛЬНЫЕ ФЛАГИ ===
-stop_event = asyncio.Event()
+# === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
+periodic_task = None  # Ссылка на задачу автопроверки
 # =============================================
 
 logging.basicConfig(
@@ -198,8 +196,9 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags):
     pages_scanned = 0
     
     for page in range(1, MAX_PAGES + 1):
-        if stop_event.is_set():
-            logger.info("🛑 Остановка по запросу")
+        # === ПРОВЕРКА: не остановлен ли бот ===
+        if not bot_running:
+            logger.info("🛑 Остановка во время сканирования")
             break
         
         if page == 1:
@@ -248,6 +247,24 @@ def make_export_file(loras, min_days, tags):
     for lora in loras:
         content += "/dellora " + lora["id"] + "  # " + lora["name"] + " (" + str(lora["days"]) + " дней)\n"
     return content.encode("utf-8")
+
+# ================= УПРАВЛЕНИЕ ЗАДАЧАМИ =================
+def cancel_periodic_task():
+    """Отменяет задачу автопроверки"""
+    global periodic_task
+    if periodic_task and not periodic_task.done():
+        periodic_task.cancel()
+        logger.info("🛑 Задача автопроверки отменена")
+    periodic_task = None
+
+def start_periodic_task():
+    """Запускает задачу автопроверки"""
+    global periodic_task
+    if periodic_task and not periodic_task.done():
+        logger.warning("⚠️ Задача автопроверки уже запущена")
+        return
+    periodic_task = asyncio.create_task(periodic_check())
+    logger.info("🔄 Задача автопроверки запущена")
 
 # ================= КОМАНДЫ =================
 @dp.message(Command("help"))
@@ -398,9 +415,7 @@ async def cmd_stop(message: Message):
             await message.answer(
                 EMOJI["stop"] + " <b>Аварийная остановка бота</b>\n\n"
                 "Используй: <code>/stop &lt;пароль&gt;</code>\n"
-                "Пароль по умолчанию: <code>stop123</code>\n\n"
-                "⚠️ После остановки бот перестанет отвечать!\n"
-                "Для запуска используй вебхук: <code>/stop?action=start</code>",
+                "Пароль по умолчанию: <code>stop123</code>",
                 parse_mode="HTML"
             )
             return
@@ -412,56 +427,78 @@ async def cmd_stop(message: Message):
         
         global bot_running
         bot_running = False
-        stop_event.set()
+        
+        # === ОТМЕНЯЕМ ЗАДАЧУ АВТОПРОВЕРКИ ===
+        cancel_periodic_task()
         
         logger.warning("🛑 БОТ ОСТАНОВЛЕН ПО ЗАПРОСУ ВЛАДЕЛЬЦА")
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=EMOJI["restart"] + " Запустить снова", url="https://t.me/" + bot.username + "?start=restart")]
+            [InlineKeyboardButton(text=EMOJI["restart"] + " Запустить снова", callback_data="restart_bot")]
         ])
         
         await message.answer(
             EMOJI["stop"] + " <b>БОТ ОСТАНОВЛЕН!</b>\n\n"
-            "• Все процессы остановлены\n"
-            "• Вебхук отключён\n"
-            "• Автопроверки отключены\n\n"
-            "Для перезапуска нажми кнопку ниже или используй вебхук:",
+            "• Автопроверки отключены\n"
+            "• Поиск лор остановлен\n"
+            "• Команды не работают (кроме /start)\n\n"
+            "Нажми кнопку для запуска:",
             parse_mode="HTML",
             reply_markup=keyboard
         )
-        
-        # Отключаем вебхук
-        await bot.delete_webhook()
         
     except Exception as e:
         logger.error("Ошибка в /stop: " + str(e))
         await message.answer(EMOJI["error"] + " Ошибка при остановке.", parse_mode="HTML")
 
+@dp.callback_query(F.data == "restart_bot")
+async def handle_restart(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Не авторизован", show_alert=True)
+        return
+    
+    global bot_running
+    bot_running = True
+    
+    # === ЗАПУСКАЕМ ЗАДАЧУ АВТОПРОВЕРКИ ===
+    start_periodic_task()
+    
+    logger.info("🔄 БОТ ЗАПУЩЕН СНОВА")
+    
+    await callback.message.edit_text(
+        EMOJI["check"] + " <b>Бот запущен!</b>\n\n"
+        "• Автопроверки активны\n"
+        "• Все команды работают",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    """Обработчик /start (для перезапуска после остановки)"""
     if message.from_user.id != OWNER_ID_INT:
         return
     
-    # Проверяем, это перезапуск после /stop?
-    if message.text and message.text.startswith("/start restart"):
-        global bot_running
-        bot_running = True
-        stop_event.clear()
-        
-        logger.info("🔄 БОТ ЗАПУЩЕН СНОВА ПО ЗАПРОСУ ВЛАДЕЛЬЦА")
-        
+    global bot_running
+    
+    # Если бот уже работает
+    if bot_running:
         await message.answer(
-            EMOJI["check"] + " <b>Бот запущен!</b>\n\n"
-            "Все функции восстановлены.",
+            EMOJI["info"] + " <b>Бот уже активен!</b>\n\n"
+            "Используй /help для списка команд.",
             parse_mode="HTML"
         )
         return
     
-    # Обычный /start
+    # Запускаем бота
+    bot_running = True
+    start_periodic_task()
+    
+    logger.info("🔄 БОТ ЗАПУЩЕН ПО ЗАПРОСУ ВЛАДЕЛЬЦА")
+    
     await message.answer(
-        EMOJI["info"] + " <b>Бот активен!</b>\n\n"
-        "Используй /help для списка команд.",
+        EMOJI["check"] + " <b>Бот запущен!</b>\n\n"
+        "• Автопроверки активны\n"
+        "• Все команды работают",
         parse_mode="HTML"
     )
 
@@ -470,7 +507,7 @@ async def cmd_setdays(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     if not bot_running:
-        await message.answer(EMOJI["error"] + " Бот остановлен. Используй /start для запуска.", parse_mode="HTML")
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
         return
     try:
         parts = message.text.split()
@@ -484,7 +521,6 @@ async def cmd_setdays(message: Message):
         
         bot_state["min_days"] = new_days
         save_config()
-        logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
         days_text = "все лоры" if new_days == 0 else ">= " + str(new_days) + " дней"
         await message.answer(EMOJI["check"] + " Порог установлен: <b>" + days_text + "</b>.", parse_mode="HTML")
@@ -654,19 +690,21 @@ async def silent_ignore(message: Message):
 
 # ================= ФОНОВЫЕ ЗАДАЧИ =================
 async def periodic_check():
-    await asyncio.sleep(60)
-    while True:
-        if not bot_running:
-            await asyncio.sleep(60)
-            continue
-        
+    """Задача автопроверки — запускается только когда bot_running=True"""
+    while bot_running:
         try:
+            # Проверяем каждую минуту, не пора ли по расписанию
+            await asyncio.sleep(60)
+            
+            if not bot_running:
+                break
+            
             now = datetime.now()
             current_time = now.strftime("%H:%M")
             
+            # Если есть расписание — проверяем по нему
             if bot_state["schedule"]:
                 if current_time not in bot_state["schedule"]:
-                    await asyncio.sleep(60)
                     continue
             
             logger.info("=== АВТОПРОВЕРКА ===")
@@ -676,6 +714,9 @@ async def periodic_check():
             if all_loras:
                 all_loras.sort(key=lambda x: x["days"], reverse=True)
                 for lora in all_loras:
+                    if not bot_running:
+                        logger.info("🛑 Остановка во время отправки")
+                        break
                     try:
                         await bot.send_message(chat_id=OWNER_ID_INT, text=format_message(lora), parse_mode="HTML")
                         await asyncio.sleep(0.5)
@@ -684,20 +725,25 @@ async def periodic_check():
                 
                 logger.info("✅ Автопроверка завершена: " + str(len(all_loras)) + " лор")
             
-            await asyncio.sleep(60)
-            
+        except asyncio.CancelledError:
+            logger.info("🛑 Задача автопроверки отменена")
+            break
         except Exception as e:
             logger.error("Автопроверка упала: " + str(e))
+            if not bot_running:
+                break
             await asyncio.sleep(60)
 
 async def on_startup():
-    global bot_running
     logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
     logger.info("📊 Статус: " + ("Активен" if bot_running else "Остановлен"))
-    asyncio.create_task(periodic_check())
+    # Запускаем автопроверку только если бот активен
+    if bot_running:
+        start_periodic_task()
 
 async def on_shutdown():
     logger.info("👋 Bot shutting down...")
+    cancel_periodic_task()
     await bot.session.close()
 
 # ================= WEBHOOK SERVER =================
@@ -711,7 +757,7 @@ async def webhook_handler(request):
         return web.Response(text="Error", status=500)
 
 async def stop_handler(request):
-    """Вебхук-эндпоинт для аварийной остановки"""
+    """Вебхук для остановки/запуска"""
     global bot_running
     
     action = request.query.get("action", "stop")
@@ -722,18 +768,13 @@ async def stop_handler(request):
     
     if action == "stop":
         bot_running = False
-        stop_event.set()
-        await bot.delete_webhook()
+        cancel_periodic_task()
         logger.warning("🛑 БОТ ОСТАНОВЛЕН ЧЕРЕЗ ВЕБХУК")
         return web.Response(text="✅ Бот остановлен")
     
     elif action == "start":
         bot_running = True
-        stop_event.clear()
-        webhook_url = os.getenv("RENDER_EXTERNAL_URL", "")
-        if webhook_url:
-            webhook_full = webhook_url + "/webhook/" + BOT_TOKEN.split(":")[0]
-            await bot.set_webhook(webhook_full)
+        start_periodic_task()
         logger.info("🔄 БОТ ЗАПУЩЕН ЧЕРЕЗ ВЕБХУК")
         return web.Response(text="✅ Бот запущен")
     
@@ -741,7 +782,8 @@ async def stop_handler(request):
 
 async def health_handler(request):
     status = "running" if bot_running else "stopped"
-    return web.Response(text="OK - Status: " + status)
+    task_status = "active" if periodic_task and not periodic_task.done() else "inactive"
+    return web.Response(text="OK - Status: " + status + " | Task: " + task_status)
 
 async def run_web_server():
     app = web.Application()
@@ -749,7 +791,6 @@ async def run_web_server():
     webhook_path = "/webhook/" + BOT_TOKEN.split(":")[0]
     app.router.add_post(webhook_path, webhook_handler)
     
-    # Эндпоинт для остановки/запуска
     app.router.add_get("/stop", stop_handler)
     
     app.router.add_get("/", health_handler)
