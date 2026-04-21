@@ -10,7 +10,7 @@ from io import BytesIO
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
@@ -25,28 +25,19 @@ DEFAULT_TAGS = []
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 50
 CONFIG_FILE = "config.json"
-EXPORT_THRESHOLD = 50
+EXPORT_THRESHOLD = 50  # Если больше — отправляем файлом
 
 # === СПЕЦИАЛЬНЫЕ ТЕГИ ===
-SPECIAL_TAGS = {
-    "xl": "tag_red",
-    "style": "tag_purple",
-    "character": "tag_green",
-    "quality": "tag_gold",
-}
+SPECIAL_TAGS = {"xl": "tag_red", "style": "tag_purple", "character": "tag_green", "quality": "tag_gold"}
 
 # === ЭМОДЗИ ===
-EMOJI = {
-    "brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️",
-    "search": "🔍", "stats": "📊", "settings": "⚙️", "tag": "🏷️",
-    "clock": "⏰", "check": "✅", "warning": "⚠️", "error": "❌",
-    "info": "ℹ️", "file": "📄", "chat": "💬", "stop": "🛑", "restart": "🔄",
-}
+EMOJI = {"brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", "search": "🔍", "stats": "📊",
+         "settings": "⚙️", "tag": "🏷️", "clock": "⏰", "check": "✅", "warning": "⚠️", "error": "❌",
+         "info": "ℹ️", "file": "📄", "chat": "💬", "stop": "🛑", "restart": "🔄"}
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 periodic_task = None
-_pending_exports = {}  # Кэш для выбора отправки
 # =============================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -93,7 +84,7 @@ def fetch_with_retry(url, max_retries=3):
             time.sleep(2 ** attempt)
 
 # ================= ПАРСЕР =================
-def parse_loras_from_html(html, min_days, current_tag):
+def parse_loras_from_html(html, min_days):
     if html is None:
         return [], []
     try:
@@ -110,11 +101,9 @@ def parse_loras_from_html(html, min_days, current_tag):
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 lora_name = name_match.group(1).strip() if name_match else "Unknown"
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
-                
                 all_on_page.append({"id": lora_id, "days": lora_days, "name": lora_name, "url": lora_url})
                 if lora_days >= min_days:
                     filtered.append({"id": lora_id, "days": lora_days, "name": lora_name, "url": lora_url})
-                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ВКЛЮЧЕНО")
             except Exception as e:
                 logger.warning("Ошибка: " + str(e))
                 continue
@@ -135,7 +124,7 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=No
             html = fetch_with_retry(url)
             if not html:
                 break
-            all_on_page, filtered = parse_loras_from_html(html, min_days, search_tag)
+            all_on_page, filtered = parse_loras_from_html(html, min_days)
             tag_pages += 1
             tag_results.extend(filtered)
             if not all_on_page:  # ← Останавливаемся только если лор вообще нет
@@ -181,20 +170,32 @@ async def _send_loras_to_chat(message, all_loras, total_pages):
     for lora in all_loras:
         await message.answer(format_message(lora), parse_mode="HTML")
         await asyncio.sleep(0.3)
-    avg = sum(l["days"] for l in all_loras) // len(all_loras)
-    mx = max(all_loras, key=lambda x: x["days"])
-    mn = min(all_loras, key=lambda x: x["days"])
-    stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
-    stats += "• Страниц: <b>" + str(total_pages) + "</b>\n• Лор: <b>" + str(len(all_loras)) + "</b>\n"
-    stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Мин: " + str(mn["days"]) + " | Макс: <b>" + str(mx["days"]) + "</b>"
-    await message.answer(stats, parse_mode="HTML")
+    if all_loras:
+        avg = sum(l["days"] for l in all_loras) // len(all_loras)
+        mx = max(all_loras, key=lambda x: x["days"])
+        mn = min(all_loras, key=lambda x: x["days"])
+        stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
+        stats += "• Страниц: <b>" + str(total_pages) + "</b>\n• Лор: <b>" + str(len(all_loras)) + "</b>\n"
+        stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Мин: " + str(mn["days"]) + " | Макс: <b>" + str(mx["days"]) + "</b>"
+        await message.answer(stats, parse_mode="HTML")
 
-async def cleanup_expired_exports():
-    while True:
-        now = time.time()
-        for k in [k for k, v in _pending_exports.items() if v.get("expires", 0) < now]:
-            _pending_exports.pop(k, None)
-        await asyncio.sleep(60)
+async def _send_loras_as_file(message, all_loras, total_pages):
+    content = make_export_file(all_loras, bot_state["min_days"], bot_state["tags"])
+    file = BytesIO(content)
+    file.name = "loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt"
+    caption = EMOJI["file"] + " <b>Экспорт лор</b>\n"
+    caption += "Лор: " + str(len(all_loras)) + "\nПорог: >= " + str(bot_state["min_days"]) + " дней"
+    if bot_state["tags"]:
+        caption += "\nТеги: " + ", ".join(bot_state["tags"])
+    await message.answer_document(document=file, caption=caption, parse_mode="HTML")
+    # Статистику отдельно
+    if all_loras:
+        avg = sum(l["days"] for l in all_loras) // len(all_loras)
+        mx = max(all_loras, key=lambda x: x["days"])
+        stats = "\n" + EMOJI["stats"] + " <b>Статистика:</b>\n"
+        stats += "• Страниц: <b>" + str(total_pages) + "</b>\n• Лор: <b>" + str(len(all_loras)) + "</b>\n"
+        stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Макс: <b>" + str(mx["days"]) + "</b> дней"
+        await message.answer(stats, parse_mode="HTML")
 
 # ================= КОМАНДЫ =================
 @dp.message(Command("help"))
@@ -231,50 +232,16 @@ async def cmd_check(message: Message):
         
         all_loras.sort(key=lambda x: x["days"], reverse=True)
         
-        # Если лор много — показываем выбор
+        # === АВТОМАТИЧЕСКИЙ ВЫБОР: файл если много, чат если мало ===
         if len(all_loras) > EXPORT_THRESHOLD:
-            cache_key = f"export_{message.from_user.id}_{int(time.time())}"
-            _pending_exports[cache_key] = {"loras": all_loras, "pages": total_pages, "expires": time.time() + 300}
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=EMOJI["chat"] + " В чат", callback_data=f"send_chat:{cache_key}"),
-                InlineKeyboardButton(text=EMOJI["file"] + " Файлом", callback_data=f"send_file:{cache_key}")
-            ]])
-            await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор (много!)\n\nКак отправить?",
-                               parse_mode="HTML", reply_markup=keyboard)
-            return
-        
-        await _send_loras_to_chat(message, all_loras, total_pages)
+            await message.answer(EMOJI["file"] + " Лор много (<b>" + str(len(all_loras)) + "</b>), отправляю файлом...", parse_mode="HTML")
+            await _send_loras_as_file(message, all_loras, total_pages)
+        else:
+            await _send_loras_to_chat(message, all_loras, total_pages)
+            
     except Exception as e:
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
         await message.answer(EMOJI["error"] + " Ошибка при проверке.")
-
-@dp.callback_query()
-async def handle_send_choice(callback: CallbackQuery):
-    try:
-        if callback.from_user.id != OWNER_ID_INT or not bot_running:
-            await callback.answer("❌ Доступ запрещён", show_alert=True)
-            return
-        if ":" not in callback.data:
-            await callback.answer("❌ Неверный формат", show_alert=True)
-            return
-        action, cache_key = callback.data.split(":", 1)
-        if action not in ("send_chat", "send_file") or cache_key not in _pending_exports:
-            await callback.answer("⏰ Данные устарели", show_alert=True)
-            return
-        data = _pending_exports.pop(cache_key)
-        await callback.message.edit_reply_markup(reply_markup=None)
-        if action == "send_chat":
-            await callback.message.answer(EMOJI["chat"] + " Отправляю в чат...")
-            await _send_loras_to_chat(callback.message, data["loras"], data["pages"])
-        else:
-            await callback.message.answer(EMOJI["file"] + " Готовлю файл...")
-            file = BytesIO(make_export_file(data["loras"], bot_state["min_days"], bot_state["tags"]))
-            file.name = "loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt"
-            await callback.message.answer_document(document=file, caption=EMOJI["file"] + " Экспорт: " + str(len(data["loras"])) + " лор", parse_mode="HTML")
-        await callback.answer("✅ Готово!")
-    except Exception as e:
-        logger.error("❌ Ошибка в callback: " + str(e), exc_info=True)
-        await callback.answer("❌ Ошибка", show_alert=True)
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
@@ -286,7 +253,8 @@ async def cmd_setdays(message: Message):
         return
     bot_state["min_days"] = int(parts[1])
     save_config()
-    await message.answer(EMOJI["check"] + " Порог: <b>" + ("все лоры" if bot_state["min_days"]==0 else ">=" + str(bot_state["min_days"]) + " дней") + "</b>", parse_mode="HTML")
+    days_text = "все лоры" if bot_state["min_days"]==0 else ">=" + str(bot_state["min_days"]) + " дней"
+    await message.answer(EMOJI["check"] + " Порог: <b>" + days_text + "</b>", parse_mode="HTML")
 
 @dp.message(Command("addtag"))
 async def cmd_addtag(message: Message):
@@ -419,20 +387,23 @@ async def periodic_check():
             all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], [])
         if all_loras:
             all_loras.sort(key=lambda x: x["days"], reverse=True)
-            for lora in all_loras:
-                if not bot_running:
-                    break
-                try:
-                    await bot.send_message(chat_id=OWNER_ID_INT, text=format_message(lora), parse_mode="HTML")
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.error("Ошибка отправки: " + str(e))
+            # Автопроверка всегда отправляет файлом если много
+            if len(all_loras) > EXPORT_THRESHOLD:
+                await _send_loras_as_file(bot, all_loras, total_pages)
+            else:
+                for lora in all_loras:
+                    if not bot_running:
+                        break
+                    try:
+                        await bot.send_message(chat_id=OWNER_ID_INT, text=format_message(lora), parse_mode="HTML")
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        logger.error("Ошибка отправки: " + str(e))
 
 async def on_startup():
     logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
     if bot_running:
         start_periodic_task()
-    asyncio.create_task(cleanup_expired_exports())
 
 async def on_shutdown():
     logger.info("👋 Bot shutting down...")
