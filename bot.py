@@ -12,14 +12,6 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiohttp import web
 
-# Пытаемся импортировать supabase, но не падаем если нет
-try:
-    from supabase import create_client, Client
-    SUPABASE_AVAILABLE = True
-except ImportError:
-    SUPABASE_AVAILABLE = False
-    logger.warning("⚠️ Supabase пакет не установлен. Используй: pip install supabase")
-
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
@@ -47,7 +39,9 @@ EMOJI = {"brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 periodic_task = None
-supabase: Client = None
+supabase = None
+db_available = False  # Флаг: работает ли база
+
 # =============================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -60,30 +54,46 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= БАЗА ДАННЫХ =================
-def init_supabase():
-    """Инициализирует подключение к Supabase"""
-    global supabase
-    if not SUPABASE_AVAILABLE:
-        logger.error("❌ Supabase пакет не установлен. Установи: pip install supabase")
-        return False
+# ================= БАЗА ДАННЫХ (с фоллбэком) =================
+def init_database():
+    """Пытается подключить Supabase, иначе работает в режиме без БД"""
+    global supabase, db_available
+    
     if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.error("❌ Переменные SUPABASE_URL или SUPABASE_KEY не заданы в Render!")
-        return False
+        logger.warning("⚠️ SUPABASE_URL или SUPABASE_KEY не заданы. Работаю без базы данных.")
+        db_available = False
+        return
+    
     try:
+        from supabase import create_client
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         # Тестовый запрос
         supabase.table("users").select("user_id").limit(1).execute()
-        logger.info("✅ Supabase подключена: " + SUPABASE_URL[:30] + "...")
-        return True
+        logger.info("✅ Supabase подключена")
+        db_available = True
+    except ImportError:
+        logger.error("❌ Пакет supabase не установлен. Установи: pip install supabase")
+        db_available = False
     except Exception as e:
         logger.error("❌ Ошибка подключения к Supabase: " + str(e))
-        return False
+        db_available = False
+
+def get_default_user():
+    """Возвращает настройки по умолчанию (фоллбэк)"""
+    return {
+        "user_id": None,
+        "min_days": DEFAULT_MIN_DAYS,
+        "tags": DEFAULT_TAGS.copy(),
+        "schedule": [],
+        "last_check": 0,
+        "is_checking": False
+    }
 
 def get_user(user_id):
-    """Получает настройки пользователя"""
-    if not supabase:
-        return None
+    """Получает настройки пользователя (с фоллбэком)"""
+    if not db_available or not supabase:
+        return get_default_user()
+    
     try:
         response = supabase.table("users").select("*").eq("user_id", user_id).execute()
         if response.data and len(response.data) > 0:
@@ -93,17 +103,17 @@ def get_user(user_id):
                 "min_days": user["min_days"],
                 "tags": json.loads(user["tags"]),
                 "schedule": json.loads(user["schedule"]),
-                "last_check": user["last_check"],
-                "is_checking": user["is_checking"]
+                "last_check": user["last_check"] or 0,
+                "is_checking": user["is_checking"] or False
             }
-        return None
+        return get_default_user()
     except Exception as e:
-        logger.error("Ошибка get_user: " + str(e))
-        return None
+        logger.warning("⚠️ Ошибка get_user (использую настройки по умолчанию): " + str(e))
+        return get_default_user()
 
 def create_user(user_id):
-    """Создаёт нового пользователя"""
-    if not supabase:
+    """Создаёт пользователя (тихо, если БД не работает)"""
+    if not db_available or not supabase:
         return
     try:
         supabase.table("users").insert({
@@ -114,14 +124,13 @@ def create_user(user_id):
             "last_check": 0,
             "is_checking": False
         }).execute()
-        logger.info("✅ Пользователь создан: " + str(user_id))
     except Exception as e:
         if "duplicate" not in str(e).lower():
-            logger.error("Ошибка create_user: " + str(e))
+            logger.warning("⚠️ Не удалось создать пользователя: " + str(e))
 
 def update_user(user_id, **kwargs):
-    """Обновляет настройки пользователя"""
-    if not supabase:
+    """Обновляет настройки (тихо, если БД не работает)"""
+    if not db_available or not supabase:
         return
     try:
         data = {}
@@ -131,19 +140,17 @@ def update_user(user_id, **kwargs):
             data[key] = value
         supabase.table("users").update(data).eq("user_id", user_id).execute()
     except Exception as e:
-        logger.error("Ошибка update_user: " + str(e))
+        logger.warning("⚠️ Не удалось обновить пользователя: " + str(e))
 
 def is_user_checking(user_id):
     user = get_user(user_id)
-    return user and user.get("is_checking", False)
+    return user.get("is_checking", False)
 
 def set_checking_status(user_id, is_checking):
     update_user(user_id, is_checking=is_checking)
 
 def check_cooldown(user_id):
     user = get_user(user_id)
-    if not user:
-        return True, 0
     elapsed = time.time() - (user.get("last_check", 0) or 0)
     if elapsed >= COOLDOWN_SECONDS:
         return True, 0
@@ -249,7 +256,7 @@ def start_periodic_task():
         periodic_task = asyncio.create_task(periodic_check())
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
-async def _send_loras_to_chat(message, all_loras, total_pages, user_id):
+async def _send_loras_to_chat(message, all_loras, total_pages):
     await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
     for i, lora in enumerate(all_loras, 1):
         await message.answer(format_message(lora), parse_mode="HTML")
@@ -266,11 +273,7 @@ async def _send_loras_to_chat(message, all_loras, total_pages, user_id):
         stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Мин: " + str(mn["days"]) + " | Макс: <b>" + str(mx["days"]) + "</b>"
         await message.answer(stats, parse_mode="HTML")
 
-async def _send_loras_as_file(message, all_loras, total_pages, user_id):
-    user = get_user(user_id)
-    if not user:
-        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
-        return
+async def _send_loras_as_file(message, all_loras, total_pages, user):
     content = make_export_file(all_loras, user["min_days"], user["tags"])
     file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\n"
@@ -293,7 +296,6 @@ async def cmd_help(message: Message):
     create_user(user_id)
     is_owner = (user_id == OWNER_ID_INT)
     
-    # === ВСЕ < и > ЗАМЕНЕНЫ НА &lt; и &gt; ДЛЯ HTML ===
     txt = EMOJI["info"] + " <b>Справка:</b>\n\n"
     txt += "<b>" + EMOJI["search"] + " Основные:</b>\n"
     txt += "/check — Проверить лоры по твоим настройкам\n"
@@ -301,17 +303,19 @@ async def cmd_help(message: Message):
     txt += "/help — Эта справка\n\n"
     txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n"
     txt += "/setdays N — Порог дней (0=все)\n"
-    txt += "/addtag &lt;тег&gt; — Добавить тег\n"  # ← &lt; и &gt;
-    txt += "/rmtag &lt;тег&gt; — Удалить тег\n"    # ← &lt; и &gt;
+    txt += "/addtag &lt;тег&gt; — Добавить тег\n"
+    txt += "/rmtag &lt;тег&gt; — Удалить тег\n"
     txt += "/tags — Твои теги\n"
     txt += "/setschedule ЧЧ:ММ — Расписание (опционально)\n\n"
     
     if is_owner:
         txt += "<b>" + EMOJI["stop"] + " Владелец:</b>\n"
-        txt += "/stop &lt;пароль&gt; — Остановить бота\n"  # ← &lt; и &gt;
+        txt += "/stop &lt;пароль&gt; — Остановить бота\n"
         txt += "/start — Запустить бота\n"
-        txt += "/broadcast &lt;текст&gt; — Рассылка всем\n\n"  # ← &lt; и &gt;
+        txt += "/broadcast &lt;текст&gt; — Рассылка всем\n\n"
     
+    if not db_available:
+        txt += "<i>⚠️ База данных не подключена — настройки сбрасываются при рестарте</i>\n"
     txt += "<i>⏱️ Кулдаун /check: " + str(COOLDOWN_SECONDS) + " сек</i>"
     await message.answer(txt, parse_mode="HTML")
 
@@ -325,7 +329,7 @@ async def cmd_check(message: Message):
         return
     
     if is_user_checking(user_id):
-        await message.answer(EMOJI["lock"] + " <b>Проверка уже запущена!</b>\n\nПодожди завершения текущей проверки.", parse_mode="HTML")
+        await message.answer(EMOJI["lock"] + " <b>Проверка уже запущена!</b>\n\nПодожди завершения.", parse_mode="HTML")
         return
     
     can_use, remaining = check_cooldown(user_id)
@@ -335,15 +339,10 @@ async def cmd_check(message: Message):
     
     try:
         set_checking_status(user_id, True)
-        await message.answer(EMOJI["search"] + " <b>Проверка запущена!</b>\n\nЭто займёт некоторое время...", parse_mode="HTML")
+        await message.answer(EMOJI["search"] + " <b>Проверка запущена!</b>", parse_mode="HTML")
         
         user = get_user(user_id)
-        if not user:
-            await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
-            set_checking_status(user_id, False)
-            return
-        
-        logger.info("=== ПРОВЕРКА === User: " + str(user_id) + " | Теги: " + str(user["tags"]))
+        logger.info("=== ПРОВЕРКА === User: " + str(user_id))
         
         if user["tags"]:
             all_loras, total_pages = [], 0
@@ -364,12 +363,12 @@ async def cmd_check(message: Message):
         
         if len(all_loras) > EXPORT_THRESHOLD:
             await message.answer(EMOJI["file"] + " Лор много (<b>" + str(len(all_loras)) + "</b>), отправляю файлом...", parse_mode="HTML")
-            await _send_loras_as_file(message, all_loras, total_pages, user_id)
+            await _send_loras_as_file(message, all_loras, total_pages, user)
         else:
-            await _send_loras_to_chat(message, all_loras, total_pages, user_id)
+            await _send_loras_to_chat(message, all_loras, total_pages)
         
         update_last_check(user_id)
-        logger.info("✅ Проверка завершена для пользователя " + str(user_id))
+        logger.info("✅ Проверка завершена")
         
     except Exception as e:
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
@@ -391,7 +390,7 @@ async def cmd_setdays(message: Message):
     update_user(user_id, min_days=new_days)
     
     days_text = "все лоры" if new_days==0 else ">=" + str(new_days) + " дней"
-    await message.answer(EMOJI["check"] + " Порог установлен: <b>" + days_text + "</b>", parse_mode="HTML")
+    await message.answer(EMOJI["check"] + " Порог: <b>" + days_text + "</b>", parse_mode="HTML")
 
 @dp.message(Command("addtag"))
 async def cmd_addtag(message: Message):
@@ -405,9 +404,6 @@ async def cmd_addtag(message: Message):
     
     new_tag = parts[1].strip().lower()
     user = get_user(user_id)
-    if not user:
-        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
-        return
     
     if any(t.lower() == new_tag for t in user["tags"]):
         await message.answer(EMOJI["warning"] + " Тег уже в списке", parse_mode="HTML")
@@ -429,10 +425,6 @@ async def cmd_rmtag(message: Message):
     
     tag_to_remove = parts[1].strip().lower()
     user = get_user(user_id)
-    if not user:
-        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
-        return
-    
     tag = next((t for t in user["tags"] if t.lower() == tag_to_remove), None)
     
     if not tag or len(user["tags"]) <= 1:
@@ -448,9 +440,6 @@ async def cmd_tags(message: Message):
     user_id = message.from_user.id
     create_user(user_id)
     user = get_user(user_id)
-    if not user:
-        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
-        return
     
     if not user["tags"]:
         await message.answer(EMOJI["tag"] + " <b>Твои теги:</b>\n<i>нет</i>\n\nИспользуй /addtag &lt;тег&gt;", parse_mode="HTML")
@@ -477,10 +466,6 @@ async def cmd_status(message: Message):
     user_id = message.from_user.id
     create_user(user_id)
     user = get_user(user_id)
-    if not user:
-        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
-        return
-    
     is_owner = (user_id == OWNER_ID_INT)
     
     txt = EMOJI["settings"] + " <b>Твои настройки:</b>\n"
@@ -491,16 +476,16 @@ async def cmd_status(message: Message):
         txt += EMOJI["clock"] + " Расписание: <b>" + ", ".join(user["schedule"]) + "</b>\n"
     
     can_use, remaining = check_cooldown(user_id)
-    if can_use:
-        txt += "⏱️ Кулдаун: <b>готов</b>\n"
-    else:
-        txt += "⏱️ Кулдаун: <b>" + str(remaining) + " сек</b>\n"
+    txt += "⏱️ Кулдаун: <b>" + ("готов" if can_use else str(remaining) + " сек") + "</b>\n"
     
     if is_user_checking(user_id):
         txt += EMOJI["lock"] + " Статус: <b>проверка идёт...</b>\n"
     
     if is_owner:
         txt += "\n" + EMOJI["check" if bot_running else "stop"] + " <b>Бот:</b> " + ("Активен" if bot_running else "ОСТАНОВЛЕН")
+    
+    if not db_available:
+        txt += "\n<i>⚠️ База не подключена</i>"
     
     await message.answer(txt, parse_mode="HTML")
 
@@ -509,83 +494,66 @@ async def cmd_status(message: Message):
 async def cmd_stop(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
-    
     parts = message.text.split()
     if len(parts) != 2 or parts[1] != STOP_PASSWORD:
         await message.answer(EMOJI["stop"] + " <b>Остановка:</b>\nИспользуй: <code>/stop " + STOP_PASSWORD + "</code>", parse_mode="HTML")
         return
-    
     global bot_running
     bot_running = False
     cancel_periodic_task()
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=EMOJI["restart"] + " Запустить", callback_data="restart_bot")]])
-    await message.answer(EMOJI["stop"] + " <b>БОТ ОСТАНОВЛЕН!</b>\n\nНажми кнопку для запуска:", parse_mode="HTML", reply_markup=keyboard)
-    logger.warning("🛑 БОТ ОСТАНОВЛЕН ВЛАДЕЛЬЦЕМ")
+    await message.answer(EMOJI["stop"] + " <b>БОТ ОСТАНОВЛЕН!</b>", parse_mode="HTML", reply_markup=keyboard)
+    logger.warning("🛑 БОТ ОСТАНОВЛЕН")
 
 @dp.callback_query(F.data == "restart_bot")
 async def handle_restart(callback: CallbackQuery):
     if callback.from_user.id != OWNER_ID_INT:
         await callback.answer("❌", show_alert=True)
         return
-    
     global bot_running
     bot_running = True
     start_periodic_task()
-    
     await callback.message.edit_text(EMOJI["check"] + " <b>Бот запущен!</b>", parse_mode="HTML")
     await callback.answer()
-    logger.info("🔄 БОТ ЗАПУЩЕН ВЛАДЕЛЬЦЕМ")
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
-    
     global bot_running
     if bot_running:
         await message.answer(EMOJI["info"] + " <b>Бот уже активен!</b>", parse_mode="HTML")
         return
-    
     bot_running = True
     start_periodic_task()
     await message.answer(EMOJI["check"] + " <b>Бот запущен!</b>", parse_mode="HTML")
-    logger.info("🔄 БОТ ЗАПУЩЕН ВЛАДЕЛЬЦЕМ")
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
-    
     text = message.text.replace("/broadcast", "").strip()
     if not text:
         await message.answer(EMOJI["warning"] + " Используй: <code>/broadcast &lt;текст&gt;</code>", parse_mode="HTML")
         return
-    
-    if not supabase:
+    if not db_available or not supabase:
         await message.answer(EMOJI["error"] + " База данных не подключена", parse_mode="HTML")
         return
-    
     try:
         response = supabase.table("users").select("user_id").execute()
         users = response.data
     except Exception as e:
-        logger.error("Ошибка получения пользователей: " + str(e))
-        await message.answer(EMOJI["error"] + " Ошибка базы данных", parse_mode="HTML")
+        await message.answer(EMOJI["error"] + " Ошибка БД", parse_mode="HTML")
         return
-    
-    sent = 0
-    failed = 0
+    sent = failed = 0
     for user in users:
         try:
-            await bot.send_message(chat_id=user["user_id"], text=EMOJI["info"] + " <b>Сообщение от владельца:</b>\n\n" + text, parse_mode="HTML")
+            await bot.send_message(chat_id=user["user_id"], text=EMOJI["info"] + " <b>От владельца:</b>\n\n" + text, parse_mode="HTML")
             sent += 1
             await asyncio.sleep(0.1)
-        except Exception as e:
+        except:
             failed += 1
-            logger.error("Не удалось отправить пользователю " + str(user["user_id"]) + ": " + str(e))
-    
-    await message.answer(EMOJI["check"] + " Рассылка завершена!\n\nОтправлено: <b>" + str(sent) + "</b>\nНе удалось: <b>" + str(failed) + "</b>", parse_mode="HTML")
+    await message.answer(EMOJI["check"] + " Рассылка: <b>" + str(sent) + "</b> ок, <b>" + str(failed) + "</b> ошибок", parse_mode="HTML")
 
 @dp.message()
 async def silent_ignore(message: Message):
@@ -597,15 +565,11 @@ async def periodic_check():
         await asyncio.sleep(60)
         if not bot_running:
             break
-        
         now = datetime.now().strftime("%H:%M")
         owner = get_user(OWNER_ID_INT)
-        
         if owner and owner["schedule"] and now not in owner["schedule"]:
             continue
-        
         logger.info("=== АВТОПРОВЕРКА (ВЛАДЕЛЕЦ) ===")
-        
         if owner and owner["tags"]:
             all_loras, total_pages = [], 0
             for tag in owner["tags"]:
@@ -614,11 +578,10 @@ async def periodic_check():
                 total_pages += pages
         else:
             all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, owner["min_days"] if owner else 0, [])
-        
         if all_loras:
             all_loras.sort(key=lambda x: x["days"], reverse=True)
             if len(all_loras) > EXPORT_THRESHOLD:
-                await _send_loras_as_file(bot, all_loras, total_pages, OWNER_ID_INT)
+                await _send_loras_as_file(bot, all_loras, total_pages, owner)
             else:
                 for lora in all_loras:
                     if not bot_running:
@@ -627,14 +590,12 @@ async def periodic_check():
                         await bot.send_message(chat_id=OWNER_ID_INT, text=format_message(lora), parse_mode="HTML")
                         await asyncio.sleep(0.5)
                     except Exception as e:
-                        logger.error("Ошибка отправки: " + str(e))
+                        logger.error("Ошибка: " + str(e))
 
 async def on_startup():
-    # Инициализируем Supabase
-    init_supabase()
-    # Создаём владельца
+    init_database()
     create_user(OWNER_ID_INT)
-    logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
+    logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT) + " | DB: " + ("✅" if db_available else "❌"))
     if bot_running:
         start_periodic_task()
 
