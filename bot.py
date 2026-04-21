@@ -128,8 +128,9 @@ def has_tag_in_head(head, tag_name):
             return True
     return False
 
+
 # ================= ПАРСЕР =================
-def parse_loras_from_html(html, min_days, active_tags):
+def parse_loras_from_html(html, min_days, active_tags, current_tag):
     if html is None:
         return []
     
@@ -144,30 +145,30 @@ def parse_loras_from_html(html, min_days, active_tags):
             try:
                 text = head.get_text()
                 
-                if active_tags:
-                    has_any_tag = False
-                    for tag in active_tags:
-                        if has_tag_in_head(head, tag):
-                            has_any_tag = True
-                            break
-                    if not has_any_tag:
-                        continue
+                # === ПРОВЕРКА ТЕГА ===
+                # Так как URL уже фильтрует по тегу (&t=tag), просто берём все лоры со страницы
+                # Но для надёжности можно проверить наличие тега в HTML
                 
+                # Ищем ID: #️⃣123456
                 id_match = re.search(r"#️⃣\s*(\d+)", text)
                 if not id_match:
                     continue
                 lora_id = id_match.group(1)
                 
+                # Ищем дни: 🕸️10 days или 🕸️1 day
                 days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
                 if not days_match:
                     continue
                 lora_days = int(days_match.group(1))
                 
+                # === ИЗВЛЕКАЕМ НАЗВАНИЕ (до "||") ===
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 lora_name = name_match.group(1).strip() if name_match else "Unknown"
                 
+                # === ФОРМИРУЕМ ССЫЛКУ НА ЛОРУ ===
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
                 
+                # === ПРОВЕРКА: >= min_days ===
                 if lora_days >= min_days:
                     results.append({
                         "id": lora_id,
@@ -175,7 +176,7 @@ def parse_loras_from_html(html, min_days, active_tags):
                         "name": lora_name,
                         "url": lora_url
                     })
-                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ВКЛЮЧЕНО")
+                    logger.info("✅ ID: " + lora_id + " | Дни: " + str(lora_days) + " | Тег: " + current_tag + " | ВКЛЮЧЕНО")
                 else:
                     logger.info("❌ ID: " + lora_id + " | Дни: " + str(lora_days) + " | ОТКЛОНЕНО")
                     
@@ -191,43 +192,62 @@ def parse_loras_from_html(html, min_days, active_tags):
         return []
 
 # ================= ПАРСЕР ВСЕХ СТРАНИЦ =================
-def find_inactive_loonies_all_pages(base_url, min_days, active_tags):
+def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=None):
+    """
+    :param base_url: базовый URL (например, https://lynther.sytes.net/?p=lora)
+    :param min_days: минимальное количество дней
+    :param active_tags: список активных тегов
+    :param tag_name: конкретный тег для поиска (если None, ищем все active_tags)
+    """
     all_results = []
     pages_scanned = 0
     
-    for page in range(1, MAX_PAGES + 1):
-        # === ПРОВЕРКА: не остановлен ли бот ===
-        if not bot_running:
-            logger.info("🛑 Остановка во время сканирования")
-            break
+    # Если передан конкретный тег — ищем только его
+    tags_to_search = [tag_name] if tag_name else active_tags
+    
+    for search_tag in tags_to_search:
+        tag_results = []
+        tag_pages = 0
         
-        if page == 1:
-            url = base_url
-        else:
-            url = base_url + "&c=" + str(page)
+        for page in range(1, MAX_PAGES + 1):
+            # === ПРОВЕРКА: не остановлен ли бот ===
+            if not bot_running:
+                logger.info("🛑 Остановка во время сканирования")
+                break
+            
+            # === ФОРМИРУЕМ URL С ТЕГОМ ===
+            if page == 1:
+                url = base_url + "&t=" + search_tag
+            else:
+                url = base_url + "&t=" + search_tag + "&c=" + str(page)
+            
+            logger.info("=== Страница: " + str(page) + " | Тег: " + search_tag + " ===")
+            html = fetch_with_retry(url)
+            
+            if html is None:
+                logger.warning("Страница " + str(page) + " не загрузилась")
+                break
+            
+            loras = parse_loras_from_html(html, min_days, active_tags, search_tag)
+            tag_pages += 1
+            
+            if loras:
+                tag_results.extend(loras)
+                logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
+            else:
+                logger.info("Стр. " + str(page) + ": лор не найдено → завершаю поиск")
+                break
+            
+            if page < MAX_PAGES:
+                time.sleep(1.5)
         
-        logger.info("=== Страница: " + str(page) + " ===")
-        html = fetch_with_retry(url)
-        
-        if html is None:
-            logger.warning("Страница " + str(page) + " не загрузилась")
-            break
-        
-        loras = parse_loras_from_html(html, min_days, active_tags)
-        pages_scanned += 1
-        
-        if loras:
-            all_results.extend(loras)
-            logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
-        else:
-            logger.info("Стр. " + str(page) + ": лор не найдено → завершаю поиск")
-            break
-        
-        if page < MAX_PAGES:
-            time.sleep(1.5)
+        all_results.extend(tag_results)
+        pages_scanned += tag_pages
+        logger.info("=== Тег " + search_tag + " готов === Лор: " + str(len(tag_results)))
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
+
 
 def format_message(lora):
     msg = []
@@ -302,11 +322,22 @@ async def cmd_check(message: Message):
     try:
         logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + (", ".join(bot_state["tags"]) if bot_state["tags"] else "ВСЕ"))
         
-        tag_info = "по тегам: <b>" + ", ".join(bot_state["tags"]) + "</b>" if bot_state["tags"] else "<b>все лоры</b>"
+        # Если теги заданы — ищем по каждому, если нет — ищем все лоры
+        if bot_state["tags"]:
+            tag_info = "по тегам: <b>" + ", ".join(bot_state["tags"]) + "</b>"
+            # Ищем по каждому тегу отдельно
+            all_loras = []
+            total_pages = 0
+            for tag in bot_state["tags"]:
+                loras, pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], bot_state["tags"], tag_name=tag)
+                all_loras.extend(loras)
+                total_pages += pages
+        else:
+            tag_info = "<b>все лоры</b>"
+            all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], [])
+        
         days_info = " (>= " + str(bot_state["min_days"]) + " дней)" if bot_state["min_days"] > 0 else ""
         await message.answer(EMOJI["search"] + " Сканирую " + tag_info + days_info + "...", parse_mode="HTML")
-        
-        all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], bot_state["tags"])
         
         if not all_loras:
             await message.answer(EMOJI["check"] + " Лоры не найдены.")
@@ -709,7 +740,16 @@ async def periodic_check():
             
             logger.info("=== АВТОПРОВЕРКА ===")
             
-            all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], bot_state["tags"])
+            # Если теги заданы — ищем по каждому, если нет — ищем все лоры
+            if bot_state["tags"]:
+                all_loras = []
+                total_pages = 0
+                for tag in bot_state["tags"]:
+                    loras, pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], bot_state["tags"], tag_name=tag)
+                    all_loras.extend(loras)
+                    total_pages += pages
+            else:
+                all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], [])
             
             if all_loras:
                 all_loras.sort(key=lambda x: x["days"], reverse=True)
