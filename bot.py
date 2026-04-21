@@ -5,19 +5,21 @@ import logging
 import requests
 import time
 import json
-import sqlite3
 from datetime import datetime
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiohttp import web
+from supabase import create_client, Client
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 STOP_PASSWORD = os.getenv("STOP_PASSWORD", "stop123")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SITE_BASE = "https://lynther.sytes.net"
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
@@ -25,8 +27,7 @@ DEFAULT_TAGS = []
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 50
 EXPORT_THRESHOLD = 50
-COOLDOWN_SECONDS = 60  # Кулдаун между /check
-DB_FILE = "bot_database.db"
+COOLDOWN_SECONDS = 60
 
 # === СПЕЦИАЛЬНЫЕ ТЕГИ ===
 SPECIAL_TAGS = {"xl": "tag_red", "style": "tag_purple", "character": "tag_green", "quality": "tag_gold"}
@@ -39,6 +40,7 @@ EMOJI = {"brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 periodic_task = None
+supabase: Client = None
 # =============================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -46,93 +48,75 @@ logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN or not OWNER_ID:
     raise ValueError("❌ Переменные BOT_TOKEN и OWNER_ID не заданы!")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ Переменные SUPABASE_URL и SUPABASE_KEY не заданы!")
 
 OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= БАЗА ДАННЫХ =================
-def init_database():
-    """Инициализирует SQLite базу данных"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Таблица пользователей
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            min_days INTEGER DEFAULT 0,
-            tags TEXT DEFAULT '[]',
-            schedule TEXT DEFAULT '[]',
-            last_check REAL DEFAULT 0,
-            is_checking INTEGER DEFAULT 0,
-            created_at REAL DEFAULT (strftime('%s', 'now'))
-        )
-    ''')
-    
-    # Таблица истории лор (для будущих функций)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS lora_history (
-            user_id INTEGER,
-            lora_id TEXT,
-            found_at REAL,
-            PRIMARY KEY (user_id, lora_id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ База данных инициализирована")
+# ================= БАЗА ДАННЫХ (SUPABASE) =================
+def init_supabase():
+    """Инициализирует подключение к Supabase"""
+    global supabase
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("✅ Supabase подключена")
 
 def get_user(user_id):
     """Получает настройки пользователя"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row:
-        return {
-            "user_id": row[0],
-            "min_days": row[1],
-            "tags": json.loads(row[2]),
-            "schedule": json.loads(row[3]),
-            "last_check": row[4],
-            "is_checking": row[5]
-        }
-    return None
+    try:
+        response = supabase.table("users").select("*").eq("user_id", user_id).execute()
+        if response.data and len(response.data) > 0:
+            user = response.data[0]
+            return {
+                "user_id": user["user_id"],
+                "min_days": user["min_days"],
+                "tags": json.loads(user["tags"]),
+                "schedule": json.loads(user["schedule"]),
+                "last_check": user["last_check"],
+                "is_checking": user["is_checking"]
+            }
+        return None
+    except Exception as e:
+        logger.error("Ошибка get_user: " + str(e))
+        return None
 
 def create_user(user_id):
     """Создаёт нового пользователя"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR IGNORE INTO users (user_id, min_days, tags, schedule)
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, DEFAULT_MIN_DAYS, json.dumps(DEFAULT_TAGS), json.dumps([])))
-    conn.commit()
-    conn.close()
+    try:
+        supabase.table("users").insert({
+            "user_id": user_id,
+            "min_days": DEFAULT_MIN_DAYS,
+            "tags": json.dumps(DEFAULT_TAGS),
+            "schedule": json.dumps([]),
+            "last_check": 0,
+            "is_checking": False
+        }).execute()
+        logger.info("✅ Пользователь создан: " + str(user_id))
+    except Exception as e:
+        if "duplicate" not in str(e).lower():  # Игнорируем дубликаты
+            logger.error("Ошибка create_user: " + str(e))
 
 def update_user(user_id, **kwargs):
     """Обновляет настройки пользователя"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    for key, value in kwargs.items():
-        if key in ["tags", "schedule"]:
-            value = json.dumps(value)
-        cursor.execute(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
-    conn.commit()
-    conn.close()
+    try:
+        data = {}
+        for key, value in kwargs.items():
+            if key in ["tags", "schedule"]:
+                value = json.dumps(value)
+            data[key] = value
+        supabase.table("users").update(data).eq("user_id", user_id).execute()
+    except Exception as e:
+        logger.error("Ошибка update_user: " + str(e))
 
 def is_user_checking(user_id):
     """Проверяет, запущен ли уже /check у пользователя"""
     user = get_user(user_id)
-    return user and user.get("is_checking", 0) == 1
+    return user and user.get("is_checking", False)
 
 def set_checking_status(user_id, is_checking):
     """Устанавливает статус проверки"""
-    update_user(user_id, is_checking=1 if is_checking else 0)
+    update_user(user_id, is_checking=is_checking)
 
 def check_cooldown(user_id):
     """Проверяет кулдаун. Возвращает (можно_ли_использовать, секунд_осталось)"""
@@ -140,7 +124,7 @@ def check_cooldown(user_id):
     if not user:
         return True, 0
     
-    elapsed = time.time() - user.get("last_check", 0)
+    elapsed = time.time() - (user.get("last_check", 0) or 0)
     if elapsed >= COOLDOWN_SECONDS:
         return True, 0
     
@@ -212,7 +196,7 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags, tag_name=No
             if not all_on_page:
                 break
             if page < MAX_PAGES:
-                time.sleep(1.0)  # Оптимизированная пауза
+                time.sleep(1.0)
         all_results.extend(tag_results)
         pages_scanned += tag_pages
     return all_results, pages_scanned
@@ -251,7 +235,7 @@ async def _send_loras_to_chat(message, all_loras, total_pages, user_id):
     await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
     for i, lora in enumerate(all_loras, 1):
         await message.answer(format_message(lora), parse_mode="HTML")
-        if i % 10 == 0:  # Пауза каждые 10 лор
+        if i % 10 == 0:
             await asyncio.sleep(0.5)
         else:
             await asyncio.sleep(0.2)
@@ -265,12 +249,13 @@ async def _send_loras_to_chat(message, all_loras, total_pages, user_id):
         await message.answer(stats, parse_mode="HTML")
 
 async def _send_loras_as_file(message, all_loras, total_pages, user_id):
-    content = make_export_file(all_loras, get_user(user_id)["min_days"], get_user(user_id)["tags"])
+    user = get_user(user_id)
+    content = make_export_file(all_loras, user["min_days"], user["tags"])
     file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\n"
-    caption += "Лор: " + str(len(all_loras)) + "\nПорог: >= " + str(get_user(user_id)["min_days"]) + " дней"
-    if get_user(user_id)["tags"]:
-        caption += "\nТеги: " + ", ".join(get_user(user_id)["tags"])
+    caption += "Лор: " + str(len(all_loras)) + "\nПорог: >= " + str(user["min_days"]) + " дней"
+    if user["tags"]:
+        caption += "\nТеги: " + ", ".join(user["tags"])
     await message.answer_document(document=file, caption=caption, parse_mode="HTML")
     if all_loras:
         avg = sum(l["days"] for l in all_loras) // len(all_loras)
@@ -313,24 +298,20 @@ async def cmd_check(message: Message):
     user_id = message.from_user.id
     create_user(user_id)
     
-    # Проверка: владелец или бот активен
     if user_id != OWNER_ID_INT and not bot_running:
         await message.answer(EMOJI["error"] + " Бот временно остановлен.", parse_mode="HTML")
         return
     
-    # Проверка: не запущен ли уже check
     if is_user_checking(user_id):
         await message.answer(EMOJI["lock"] + " <b>Проверка уже запущена!</b>\n\nПодожди завершения текущей проверки.", parse_mode="HTML")
         return
     
-    # Проверка: кулдаун
     can_use, remaining = check_cooldown(user_id)
     if not can_use:
         await message.answer(EMOJI["clock"] + " <b>Кулдаун!</b>\n\nПовтори через <b>" + str(remaining) + "</b> сек.", parse_mode="HTML")
         return
     
     try:
-        # Блокируем команду
         set_checking_status(user_id, True)
         await message.answer(EMOJI["search"] + " <b>Проверка запущена!</b>\n\nЭто займёт некоторое время...", parse_mode="HTML")
         
@@ -367,7 +348,6 @@ async def cmd_check(message: Message):
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
         await message.answer(EMOJI["error"] + " Ошибка при проверке.")
     finally:
-        # Всегда снимаем блокировку
         set_checking_status(user_id, False)
 
 @dp.message(Command("setdays"))
@@ -469,14 +449,12 @@ async def cmd_status(message: Message):
     if user["schedule"]:
         txt += EMOJI["clock"] + " Расписание: <b>" + ", ".join(user["schedule"]) + "</b>\n"
     
-    # Кулдаун
     can_use, remaining = check_cooldown(user_id)
     if can_use:
         txt += "⏱️ Кулдаун: <b>готов</b>\n"
     else:
         txt += "⏱️ Кулдаун: <b>" + str(remaining) + " сек</b>\n"
     
-    # Статус проверки
     if is_user_checking(user_id):
         txt += EMOJI["lock"] + " Статус: <b>проверка идёт...</b>\n"
     
@@ -535,7 +513,6 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
-    """Рассылка сообщения всем пользователям (только владелец)"""
     if message.from_user.id != OWNER_ID_INT:
         return
     
@@ -544,22 +521,24 @@ async def cmd_broadcast(message: Message):
         await message.answer(EMOJI["warning"] + " Используй: <code>/broadcast &lt;текст&gt;</code>", parse_mode="HTML")
         return
     
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-    conn.close()
+    try:
+        response = supabase.table("users").select("user_id").execute()
+        users = response.data
+    except Exception as e:
+        logger.error("Ошибка получения пользователей: " + str(e))
+        await message.answer(EMOJI["error"] + " Ошибка базы данных", parse_mode="HTML")
+        return
     
     sent = 0
     failed = 0
-    for (user_id,) in users:
+    for user in users:
         try:
-            await bot.send_message(chat_id=user_id, text=EMOJI["info"] + " <b>Сообщение от владельца:</b>\n\n" + text, parse_mode="HTML")
+            await bot.send_message(chat_id=user["user_id"], text=EMOJI["info"] + " <b>Сообщение от владельца:</b>\n\n" + text, parse_mode="HTML")
             sent += 1
             await asyncio.sleep(0.1)
         except Exception as e:
             failed += 1
-            logger.error("Не удалось отправить пользователю " + str(user_id) + ": " + str(e))
+            logger.error("Не удалось отправить пользователю " + str(user["user_id"]) + ": " + str(e))
     
     await message.answer(EMOJI["check"] + " Рассылка завершена!\n\nОтправлено: <b>" + str(sent) + "</b>\nНе удалось: <b>" + str(failed) + "</b>", parse_mode="HTML")
 
@@ -569,7 +548,6 @@ async def silent_ignore(message: Message):
 
 # ================= ФОНОВЫЕ ЗАДАЧИ =================
 async def periodic_check():
-    """Автопроверка только для владельца"""
     while bot_running:
         await asyncio.sleep(60)
         if not bot_running:
@@ -607,8 +585,8 @@ async def periodic_check():
                         logger.error("Ошибка отправки: " + str(e))
 
 async def on_startup():
-    init_database()
-    create_user(OWNER_ID_INT)  # Создаём владельца
+    init_supabase()
+    create_user(OWNER_ID_INT)
     logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
     if bot_running:
         start_periodic_task()
