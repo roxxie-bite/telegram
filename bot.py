@@ -5,6 +5,8 @@ import logging
 import requests
 import time
 import json
+import signal
+import sys
 from datetime import datetime
 from io import BytesIO
 from bs4 import BeautifulSoup
@@ -16,6 +18,7 @@ from aiohttp import web
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
+STOP_PASSWORD = os.getenv("STOP_PASSWORD", "stop123")  # Пароль для остановки
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 SITE_BASE = "https://lynther.sytes.net"
 BASE_URL = SITE_BASE + "/?p=lora"
@@ -24,9 +27,9 @@ DEFAULT_TAGS = []
 CHECK_INTERVAL_HOURS = 6
 MAX_PAGES = 50
 CONFIG_FILE = "config.json"
-EXPORT_THRESHOLD = 50  # Если лор больше — предлагать файл
+EXPORT_THRESHOLD = 50
 
-# === СПЕЦИАЛЬНЫЕ ТЕГИ (регистр не важен) ===
+# === СПЕЦИАЛЬНЫЕ ТЕГИ ===
 SPECIAL_TAGS = {
     "xl": "tag_red",
     "style": "tag_purple",
@@ -34,7 +37,7 @@ SPECIAL_TAGS = {
     "quality": "tag_gold",
 }
 
-# === ОБЫЧНЫЕ ЭМОДЗИ ===
+# === ЭМОДЗИ ===
 EMOJI = {
     "brain": "🧠",
     "id": "🆔",
@@ -51,7 +54,13 @@ EMOJI = {
     "info": "ℹ️",
     "file": "📄",
     "chat": "💬",
+    "stop": "🛑",
+    "restart": "🔄",
 }
+
+# === ГЛОБАЛЬНЫЕ ФЛАГИ ===
+stop_event = asyncio.Event()
+bot_running = True
 # =============================================
 
 logging.basicConfig(
@@ -104,7 +113,7 @@ def fetch_with_retry(url, max_retries=3):
                 return None
             time.sleep(2 ** attempt)
 
-# ================= ПРОВЕРКА ТЕГА (БЕЗ УЧЁТА РЕГИСТРА) =================
+# ================= ПРОВЕРКА ТЕГА =================
 def has_tag_in_head(head, tag_name):
     tag_lower = tag_name.lower()
     
@@ -121,7 +130,7 @@ def has_tag_in_head(head, tag_name):
             return True
     return False
 
-# ================= ПАРСЕР ПО lora_head =================
+# ================= ПАРСЕР =================
 def parse_loras_from_html(html, min_days, active_tags):
     if html is None:
         return []
@@ -189,6 +198,10 @@ def find_inactive_loonies_all_pages(base_url, min_days, active_tags):
     pages_scanned = 0
     
     for page in range(1, MAX_PAGES + 1):
+        if stop_event.is_set():
+            logger.info("🛑 Остановка по запросу")
+            break
+        
         if page == 1:
             url = base_url
         else:
@@ -254,10 +267,9 @@ async def cmd_help(message: Message):
         txt += "/tags — Показать все активные теги\n"
         txt += "/setschedule <время> — Установить расписание\n"
         txt += "/schedule — Показать расписание проверок\n\n"
-        txt += "<b>" + EMOJI["tag"] + " Специальные теги:</b>\n"
-        txt += "xl (красный), style (фиолетовый),\n"
-        txt += "character (зелёный), quality (золотой)\n"
-        txt += "<i>Остальные теги ищутся по названию</i>\n\n"
+        txt += "<b>" + EMOJI["stop"] + " Аварийные:</b>\n"
+        txt += "/stop <пароль> — Остановить бота\n"
+        txt += "<i>Пароль по умолчанию: stop123</i>\n\n"
         txt += "<i>Все команды доступны только тебе (владелец)</i>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
@@ -266,6 +278,9 @@ async def cmd_help(message: Message):
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     if message.from_user.id != OWNER_ID_INT:
+        return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен. Используй /start для запуска.", parse_mode="HTML")
         return
     try:
         logger.info("=== ПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + (", ".join(bot_state["tags"]) if bot_state["tags"] else "ВСЕ"))
@@ -282,7 +297,6 @@ async def cmd_check(message: Message):
         
         all_loras.sort(key=lambda x: x["days"], reverse=True)
         
-        # Если лор много — спрашиваем, как отправить
         if len(all_loras) > EXPORT_THRESHOLD:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
@@ -296,18 +310,15 @@ async def cmd_check(message: Message):
                 parse_mode="HTML",
                 reply_markup=keyboard
             )
-            # Сохраняем лоры во временное хранилище для обработки в callback
             dp.storage.set_data(chat_id=message.chat.id, user_id=message.from_user.id, key="pending_loras", value=all_loras)
             dp.storage.set_data(chat_id=message.chat.id, user_id=message.from_user.id, key="pending_pages", value=total_pages)
             return
         
-        # Если лор мало — отправляем сразу в чат
         await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(all_loras)) + "</b> лор", parse_mode="HTML")
         for lora in all_loras:
             await message.answer(format_message(lora), parse_mode="HTML")
             await asyncio.sleep(0.3)
         
-        # Статистика
         avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
         max_lora = max(all_loras, key=lambda x: x["days"])
         min_lora = min(all_loras, key=lambda x: x["days"])
@@ -329,8 +340,10 @@ async def handle_send_choice(callback: CallbackQuery):
     if callback.from_user.id != OWNER_ID_INT:
         await callback.answer("❌ Не авторизован", show_alert=True)
         return
+    if not bot_running:
+        await callback.answer("❌ Бот остановлен", show_alert=True)
+        return
     
-    # Получаем сохранённые лоры
     all_loras = dp.storage.get_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_loras")
     total_pages = dp.storage.get_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_pages")
     
@@ -338,20 +351,17 @@ async def handle_send_choice(callback: CallbackQuery):
         await callback.answer("❌ Данные устарели, сделай /check заново", show_alert=True)
         return
     
-    # Очищаем хранилище
     dp.storage.set_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_loras", value=None)
     dp.storage.set_data(chat_id=callback.message.chat.id, user_id=callback.from_user.id, key="pending_pages", value=None)
     
     await callback.message.edit_reply_markup(reply_markup=None)
     
     if callback.data == "send_chat":
-        # Отправляем в чат
         await callback.message.answer(EMOJI["chat"] + " Отправляю в чат...")
         for lora in all_loras:
             await callback.message.answer(format_message(lora), parse_mode="HTML")
             await asyncio.sleep(0.3)
     else:
-        # Отправляем файлом
         await callback.message.answer(EMOJI["file"] + " Готовлю файл...")
         content = make_export_file(all_loras, bot_state["min_days"], bot_state["tags"])
         file = BytesIO(content)
@@ -364,7 +374,6 @@ async def handle_send_choice(callback: CallbackQuery):
             parse_mode="HTML"
         )
     
-    # Статистика (в любом случае)
     avg_days = sum(l["days"] for l in all_loras) // len(all_loras)
     max_lora = max(all_loras, key=lambda x: x["days"])
     min_lora = min(all_loras, key=lambda x: x["days"])
@@ -379,14 +388,94 @@ async def handle_send_choice(callback: CallbackQuery):
     
     await callback.answer()
 
-@dp.message(Command("setdays"))
-async def cmd_setdays(message: Message):
+@dp.message(Command("stop"))
+async def cmd_stop(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     try:
         parts = message.text.split()
+        if len(parts) != 2:
+            await message.answer(
+                EMOJI["stop"] + " <b>Аварийная остановка бота</b>\n\n"
+                "Используй: <code>/stop &lt;пароль&gt;</code>\n"
+                "Пароль по умолчанию: <code>stop123</code>\n\n"
+                "⚠️ После остановки бот перестанет отвечать!\n"
+                "Для запуска используй вебхук: <code>/stop?action=start</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        password = parts[1]
+        if password != STOP_PASSWORD:
+            await message.answer(EMOJI["error"] + " Неверный пароль!", parse_mode="HTML")
+            return
+        
+        global bot_running
+        bot_running = False
+        stop_event.set()
+        
+        logger.warning("🛑 БОТ ОСТАНОВЛЕН ПО ЗАПРОСУ ВЛАДЕЛЬЦА")
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=EMOJI["restart"] + " Запустить снова", url="https://t.me/" + bot.username + "?start=restart")]
+        ])
+        
+        await message.answer(
+            EMOJI["stop"] + " <b>БОТ ОСТАНОВЛЕН!</b>\n\n"
+            "• Все процессы остановлены\n"
+            "• Вебхук отключён\n"
+            "• Автопроверки отключены\n\n"
+            "Для перезапуска нажми кнопку ниже или используй вебхук:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        
+        # Отключаем вебхук
+        await bot.delete_webhook()
+        
+    except Exception as e:
+        logger.error("Ошибка в /stop: " + str(e))
+        await message.answer(EMOJI["error"] + " Ошибка при остановке.", parse_mode="HTML")
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    """Обработчик /start (для перезапуска после остановки)"""
+    if message.from_user.id != OWNER_ID_INT:
+        return
+    
+    # Проверяем, это перезапуск после /stop?
+    if message.text and message.text.startswith("/start restart"):
+        global bot_running
+        bot_running = True
+        stop_event.clear()
+        
+        logger.info("🔄 БОТ ЗАПУЩЕН СНОВА ПО ЗАПРОСУ ВЛАДЕЛЬЦА")
+        
+        await message.answer(
+            EMOJI["check"] + " <b>Бот запущен!</b>\n\n"
+            "Все функции восстановлены.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Обычный /start
+    await message.answer(
+        EMOJI["info"] + " <b>Бот активен!</b>\n\n"
+        "Используй /help для списка команд.",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("setdays"))
+async def cmd_setdays(message: Message):
+    if message.from_user.id != OWNER_ID_INT:
+        return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен. Используй /start для запуска.", parse_mode="HTML")
+        return
+    try:
+        parts = message.text.split()
         if len(parts) != 2 or not parts[1].isdigit():
-            await message.answer(EMOJI["warning"] + " Используй: <code>/setdays &lt;число&gt;</code>\nПример: <code>/setdays 10</code> или <code>/setdays 0</code> (все лоры)", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Используй: <code>/setdays &lt;число&gt;</code>", parse_mode="HTML")
             return
         new_days = int(parts[1])
         if new_days < 0:
@@ -398,7 +487,7 @@ async def cmd_setdays(message: Message):
         logger.info("=== ПОРОГ ИЗМЕНЁН === Новый: >= " + str(new_days))
         
         days_text = "все лоры" if new_days == 0 else ">= " + str(new_days) + " дней"
-        await message.answer(EMOJI["check"] + " Порог установлен: <b>" + days_text + "</b>. Используй /check для поиска.", parse_mode="HTML")
+        await message.answer(EMOJI["check"] + " Порог установлен: <b>" + days_text + "</b>.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /setdays: " + str(e))
@@ -408,10 +497,13 @@ async def cmd_setdays(message: Message):
 async def cmd_addtag(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        return
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            await message.answer(EMOJI["warning"] + " Используй: <code>/addtag &lt;название&gt;</code>\nПример: <code>/addtag anime</code>", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Используй: <code>/addtag &lt;название&gt;</code>", parse_mode="HTML")
             return
         
         new_tag = parts[1].strip().lower()
@@ -420,17 +512,13 @@ async def cmd_addtag(message: Message):
             return
         
         if any(t.lower() == new_tag for t in bot_state["tags"]):
-            await message.answer(EMOJI["warning"] + " Тег <b>" + new_tag + "</b> уже в списке", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Тег уже в списке", parse_mode="HTML")
             return
         
         bot_state["tags"].append(new_tag)
         save_config()
         
-        tag_type = " (спец: " + SPECIAL_TAGS.get(new_tag, "") + ")" if new_tag in SPECIAL_TAGS else " (обычный)"
-        logger.info("=== ТЕГ ДОБАВЛЕН === " + new_tag + tag_type)
-        
-        tags_list = ", ".join(bot_state["tags"]) if bot_state["tags"] else "<i>нет (будут все лоры)</i>"
-        await message.answer(EMOJI["check"] + " Тег <b>" + new_tag + "</b> добавлен" + tag_type + ".\nТекущие теги: " + tags_list, parse_mode="HTML")
+        await message.answer(EMOJI["check"] + " Тег <b>" + new_tag + "</b> добавлен.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /addtag: " + str(e))
@@ -440,6 +528,9 @@ async def cmd_addtag(message: Message):
 async def cmd_rmtag(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        return
     try:
         parts = message.text.split()
         if len(parts) != 2:
@@ -447,7 +538,6 @@ async def cmd_rmtag(message: Message):
             return
         
         tag_to_remove = parts[1].strip().lower()
-        
         tag_found = None
         for t in bot_state["tags"]:
             if t.lower() == tag_to_remove:
@@ -455,15 +545,13 @@ async def cmd_rmtag(message: Message):
                 break
         
         if not tag_found:
-            await message.answer(EMOJI["warning"] + " Тег <b>" + tag_to_remove + "</b> не найден", parse_mode="HTML")
+            await message.answer(EMOJI["warning"] + " Тег не найден", parse_mode="HTML")
             return
         
         bot_state["tags"].remove(tag_found)
         save_config()
-        logger.info("=== ТЕГ УДАЛЁН === " + tag_found)
         
-        tags_list = ", ".join(bot_state["tags"]) if bot_state["tags"] else "<i>нет (будут все лоры)</i>"
-        await message.answer(EMOJI["check"] + " Тег <b>" + tag_found + "</b> удалён.\nТекущие теги: " + tags_list, parse_mode="HTML")
+        await message.answer(EMOJI["check"] + " Тег <b>" + tag_found + "</b> удалён.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /rmtag: " + str(e))
@@ -473,16 +561,18 @@ async def cmd_rmtag(message: Message):
 async def cmd_tags(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        return
     try:
         if not bot_state["tags"]:
-            await message.answer(EMOJI["tag"] + " <b>Активные теги:</b>\n<i>нет</i>\n\n<i>Будут показаны ВСЕ лоры</i>", parse_mode="HTML")
+            await message.answer(EMOJI["tag"] + " <b>Активные теги:</b>\n<i>нет</i>", parse_mode="HTML")
             return
         
         txt = EMOJI["tag"] + " <b>Активные теги:</b>\n"
         for i, tag in enumerate(bot_state["tags"], 1):
             tag_type = " (спец)" if tag in SPECIAL_TAGS else " (обычный)"
             txt += str(i) + ". <code>" + tag + "</code>" + tag_type + "\n"
-        txt += "\n<i>Всего: " + str(len(bot_state["tags"])) + "</i>"
         await message.answer(txt, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /tags: " + str(e))
@@ -491,15 +581,13 @@ async def cmd_tags(message: Message):
 async def cmd_setschedule(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        return
     try:
         parts = message.text.split()
         if len(parts) < 2:
-            await message.answer(
-                EMOJI["warning"] + " Используй: <code>/setschedule &lt;время&gt; [&lt;время&gt;...]</code>\n"
-                "Пример: <code>/setschedule 09:00 15:00 21:00</code>\n"
-                "Формат: ЧЧ:ММ (24 часа)",
-                parse_mode="HTML"
-            )
+            await message.answer(EMOJI["warning"] + " Используй: <code>/setschedule &lt;время&gt;</code>", parse_mode="HTML")
             return
         
         times = []
@@ -507,36 +595,33 @@ async def cmd_setschedule(message: Message):
             if re.match(r'^\d{2}:\d{2}$', t):
                 times.append(t)
             else:
-                await message.answer(EMOJI["warning"] + " Неверный формат времени: <code>" + t + "</code>\nИспользуй ЧЧ:ММ (например, 09:00)", parse_mode="HTML")
+                await message.answer(EMOJI["warning"] + " Неверный формат времени", parse_mode="HTML")
                 return
         
         bot_state["schedule"] = times
         save_config()
-        logger.info("=== РАСПИСАНИЕ === Установлено: " + ", ".join(times))
         
-        if times:
-            await message.answer(EMOJI["clock"] + " Расписание установлено: <b>" + ", ".join(times) + "</b>\nАвтопроверки будут в это время.", parse_mode="HTML")
-        else:
-            await message.answer(EMOJI["clock"] + " Расписание очищено. Автопроверки отключены.", parse_mode="HTML")
+        await message.answer(EMOJI["clock"] + " Расписание установлено.", parse_mode="HTML")
         
     except Exception as e:
         logger.error("Ошибка в /setschedule: " + str(e))
-        await message.answer(EMOJI["error"] + " Не удалось установить расписание.")
+        await message.answer(EMOJI["error"] + " Не удалось установить.")
 
 @dp.message(Command("schedule"))
 async def cmd_schedule(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        return
     try:
         if bot_state["schedule"]:
-            txt = EMOJI["clock"] + " <b>Расписание автопроверок:</b>\n"
+            txt = EMOJI["clock"] + " <b>Расписание:</b>\n"
             for t in bot_state["schedule"]:
                 txt += "• <code>" + t + "</code>\n"
-            txt += "\n<i>Следующая проверка в ближайшее время из списка</i>"
+            await message.answer(txt, parse_mode="HTML")
         else:
-            txt = EMOJI["clock"] + " <b>Расписание:</b> не установлено\n"
-            txt += "<i>Используй /setschedule 09:00 15:00 21:00</i>"
-        await message.answer(txt, parse_mode="HTML")
+            await message.answer(EMOJI["clock"] + " Расписание не установлено.", parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка в /schedule: " + str(e))
 
@@ -545,10 +630,14 @@ async def cmd_status(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     try:
+        status_icon = EMOJI["check"] if bot_running else EMOJI["stop"]
+        status_text = "Активен" if bot_running else "ОСТАНОВЛЕН"
+        
         days_text = "все лоры" if bot_state["min_days"] == 0 else ">= " + str(bot_state["min_days"]) + " дней"
         tags_text = ", ".join(bot_state["tags"]) if bot_state["tags"] else "нет (все лоры)"
         
         txt = EMOJI["settings"] + " <b>Настройки:</b>\n"
+        txt += status_icon + " Статус: <b>" + status_text + "</b>\n"
         txt += EMOJI["days"] + " Порог: <b>" + days_text + "</b>\n"
         txt += EMOJI["tag"] + " Теги: <b>" + tags_text + "</b>\n"
         txt += "🔄 Автопроверка: <b>" + str(CHECK_INTERVAL_HOURS) + "</b> ч.\n"
@@ -567,6 +656,10 @@ async def silent_ignore(message: Message):
 async def periodic_check():
     await asyncio.sleep(60)
     while True:
+        if not bot_running:
+            await asyncio.sleep(60)
+            continue
+        
         try:
             now = datetime.now()
             current_time = now.strftime("%H:%M")
@@ -576,26 +669,20 @@ async def periodic_check():
                     await asyncio.sleep(60)
                     continue
             
-            logger.info("=== АВТОПРОВЕРКА === Порог: >= " + str(bot_state["min_days"]) + " | Теги: " + (", ".join(bot_state["tags"]) if bot_state["tags"] else "ВСЕ"))
+            logger.info("=== АВТОПРОВЕРКА ===")
             
             all_loras, total_pages = find_inactive_loonies_all_pages(BASE_URL, bot_state["min_days"], bot_state["tags"])
             
             if all_loras:
                 all_loras.sort(key=lambda x: x["days"], reverse=True)
-                
-                # Автопроверка всегда отправляет в чат (без выбора)
                 for lora in all_loras:
                     try:
-                        await bot.send_message(
-                            chat_id=OWNER_ID_INT,
-                            text=format_message(lora),
-                            parse_mode="HTML"
-                        )
+                        await bot.send_message(chat_id=OWNER_ID_INT, text=format_message(lora), parse_mode="HTML")
                         await asyncio.sleep(0.5)
                     except Exception as e:
                         logger.error("Ошибка отправки: " + str(e))
                 
-                logger.info("✅ Автопроверка завершена: " + str(len(all_loras)) + " лор | Страниц: " + str(total_pages))
+                logger.info("✅ Автопроверка завершена: " + str(len(all_loras)) + " лор")
             
             await asyncio.sleep(60)
             
@@ -604,9 +691,9 @@ async def periodic_check():
             await asyncio.sleep(60)
 
 async def on_startup():
-    tags_info = ", ".join(bot_state["tags"]) if bot_state["tags"] else "ВСЕ"
-    logger.info("🚀 Bot started (WEBHOOK). Owner: " + str(OWNER_ID_INT))
-    logger.info("📊 Порог: >= " + str(bot_state["min_days"]) + " дней | Теги: " + tags_info)
+    global bot_running
+    logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
+    logger.info("📊 Статус: " + ("Активен" if bot_running else "Остановлен"))
     asyncio.create_task(periodic_check())
 
 async def on_shutdown():
@@ -623,14 +710,47 @@ async def webhook_handler(request):
         logger.error("Ошибка вебхука: " + str(e))
         return web.Response(text="Error", status=500)
 
+async def stop_handler(request):
+    """Вебхук-эндпоинт для аварийной остановки"""
+    global bot_running
+    
+    action = request.query.get("action", "stop")
+    password = request.query.get("password", "")
+    
+    if password != STOP_PASSWORD:
+        return web.Response(text="❌ Неверный пароль", status=403)
+    
+    if action == "stop":
+        bot_running = False
+        stop_event.set()
+        await bot.delete_webhook()
+        logger.warning("🛑 БОТ ОСТАНОВЛЕН ЧЕРЕЗ ВЕБХУК")
+        return web.Response(text="✅ Бот остановлен")
+    
+    elif action == "start":
+        bot_running = True
+        stop_event.clear()
+        webhook_url = os.getenv("RENDER_EXTERNAL_URL", "")
+        if webhook_url:
+            webhook_full = webhook_url + "/webhook/" + BOT_TOKEN.split(":")[0]
+            await bot.set_webhook(webhook_full)
+        logger.info("🔄 БОТ ЗАПУЩЕН ЧЕРЕЗ ВЕБХУК")
+        return web.Response(text="✅ Бот запущен")
+    
+    return web.Response(text="❌ Неизвестное действие", status=400)
+
 async def health_handler(request):
-    return web.Response(text="OK")
+    status = "running" if bot_running else "stopped"
+    return web.Response(text="OK - Status: " + status)
 
 async def run_web_server():
     app = web.Application()
     
     webhook_path = "/webhook/" + BOT_TOKEN.split(":")[0]
     app.router.add_post(webhook_path, webhook_handler)
+    
+    # Эндпоинт для остановки/запуска
+    app.router.add_get("/stop", stop_handler)
     
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
@@ -641,14 +761,13 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info("🌐 Server on port " + str(port))
+    logger.info("🛑 Stop URL: https://ТВОЙ_ДОМЕН.onrender.com/stop?password=" + STOP_PASSWORD)
     
     webhook_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if webhook_url:
+    if webhook_url and bot_running:
         webhook_full = webhook_url + webhook_path
         await bot.set_webhook(webhook_full)
         logger.info("✅ Webhook set: " + webhook_full)
-    else:
-        logger.warning("⚠️ RENDER_EXTERNAL_URL не задан!")
 
 async def main():
     dp.startup.register(on_startup)
@@ -661,4 +780,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Bot stopped")
+        logger.info("👋 Bot stopped by user")
