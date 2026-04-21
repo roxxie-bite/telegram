@@ -11,7 +11,14 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiohttp import web
-from supabase import create_client, Client
+
+# Пытаемся импортировать supabase, но не падаем если нет
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    logger.warning("⚠️ Supabase пакет не установлен. Используй: pip install supabase")
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -48,22 +55,35 @@ logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN or not OWNER_ID:
     raise ValueError("❌ Переменные BOT_TOKEN и OWNER_ID не заданы!")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ Переменные SUPABASE_URL и SUPABASE_KEY не заданы!")
 
 OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= БАЗА ДАННЫХ (SUPABASE) =================
+# ================= БАЗА ДАННЫХ =================
 def init_supabase():
     """Инициализирует подключение к Supabase"""
     global supabase
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logger.info("✅ Supabase подключена")
+    if not SUPABASE_AVAILABLE:
+        logger.error("❌ Supabase пакет не установлен. Установи: pip install supabase")
+        return False
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.error("❌ Переменные SUPABASE_URL или SUPABASE_KEY не заданы в Render!")
+        return False
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Тестовый запрос
+        supabase.table("users").select("user_id").limit(1).execute()
+        logger.info("✅ Supabase подключена: " + SUPABASE_URL[:30] + "...")
+        return True
+    except Exception as e:
+        logger.error("❌ Ошибка подключения к Supabase: " + str(e))
+        return False
 
 def get_user(user_id):
     """Получает настройки пользователя"""
+    if not supabase:
+        return None
     try:
         response = supabase.table("users").select("*").eq("user_id", user_id).execute()
         if response.data and len(response.data) > 0:
@@ -83,6 +103,8 @@ def get_user(user_id):
 
 def create_user(user_id):
     """Создаёт нового пользователя"""
+    if not supabase:
+        return
     try:
         supabase.table("users").insert({
             "user_id": user_id,
@@ -94,11 +116,13 @@ def create_user(user_id):
         }).execute()
         logger.info("✅ Пользователь создан: " + str(user_id))
     except Exception as e:
-        if "duplicate" not in str(e).lower():  # Игнорируем дубликаты
+        if "duplicate" not in str(e).lower():
             logger.error("Ошибка create_user: " + str(e))
 
 def update_user(user_id, **kwargs):
     """Обновляет настройки пользователя"""
+    if not supabase:
+        return
     try:
         data = {}
         for key, value in kwargs.items():
@@ -110,29 +134,23 @@ def update_user(user_id, **kwargs):
         logger.error("Ошибка update_user: " + str(e))
 
 def is_user_checking(user_id):
-    """Проверяет, запущен ли уже /check у пользователя"""
     user = get_user(user_id)
     return user and user.get("is_checking", False)
 
 def set_checking_status(user_id, is_checking):
-    """Устанавливает статус проверки"""
     update_user(user_id, is_checking=is_checking)
 
 def check_cooldown(user_id):
-    """Проверяет кулдаун. Возвращает (можно_ли_использовать, секунд_осталось)"""
     user = get_user(user_id)
     if not user:
         return True, 0
-    
     elapsed = time.time() - (user.get("last_check", 0) or 0)
     if elapsed >= COOLDOWN_SECONDS:
         return True, 0
-    
     remaining = int(COOLDOWN_SECONDS - elapsed)
     return False, remaining
 
 def update_last_check(user_id):
-    """Обновляет время последнего использования /check"""
     update_user(user_id, last_check=time.time())
 
 # ================= ЗАПРОСЫ =================
@@ -250,6 +268,9 @@ async def _send_loras_to_chat(message, all_loras, total_pages, user_id):
 
 async def _send_loras_as_file(message, all_loras, total_pages, user_id):
     user = get_user(user_id)
+    if not user:
+        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
+        return
     content = make_export_file(all_loras, user["min_days"], user["tags"])
     file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\n"
@@ -272,6 +293,7 @@ async def cmd_help(message: Message):
     create_user(user_id)
     is_owner = (user_id == OWNER_ID_INT)
     
+    # === ВСЕ < и > ЗАМЕНЕНЫ НА &lt; и &gt; ДЛЯ HTML ===
     txt = EMOJI["info"] + " <b>Справка:</b>\n\n"
     txt += "<b>" + EMOJI["search"] + " Основные:</b>\n"
     txt += "/check — Проверить лоры по твоим настройкам\n"
@@ -279,16 +301,16 @@ async def cmd_help(message: Message):
     txt += "/help — Эта справка\n\n"
     txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n"
     txt += "/setdays N — Порог дней (0=все)\n"
-    txt += "/addtag <тег> — Добавить тег\n"
-    txt += "/rmtag <тег> — Удалить тег\n"
+    txt += "/addtag &lt;тег&gt; — Добавить тег\n"  # ← &lt; и &gt;
+    txt += "/rmtag &lt;тег&gt; — Удалить тег\n"    # ← &lt; и &gt;
     txt += "/tags — Твои теги\n"
     txt += "/setschedule ЧЧ:ММ — Расписание (опционально)\n\n"
     
     if is_owner:
         txt += "<b>" + EMOJI["stop"] + " Владелец:</b>\n"
-        txt += "/stop <пароль> — Остановить бота\n"
+        txt += "/stop &lt;пароль&gt; — Остановить бота\n"  # ← &lt; и &gt;
         txt += "/start — Запустить бота\n"
-        txt += "/broadcast <текст> — Рассылка всем\n\n"
+        txt += "/broadcast &lt;текст&gt; — Рассылка всем\n\n"  # ← &lt; и &gt;
     
     txt += "<i>⏱️ Кулдаун /check: " + str(COOLDOWN_SECONDS) + " сек</i>"
     await message.answer(txt, parse_mode="HTML")
@@ -316,6 +338,11 @@ async def cmd_check(message: Message):
         await message.answer(EMOJI["search"] + " <b>Проверка запущена!</b>\n\nЭто займёт некоторое время...", parse_mode="HTML")
         
         user = get_user(user_id)
+        if not user:
+            await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
+            set_checking_status(user_id, False)
+            return
+        
         logger.info("=== ПРОВЕРКА === User: " + str(user_id) + " | Теги: " + str(user["tags"]))
         
         if user["tags"]:
@@ -378,6 +405,9 @@ async def cmd_addtag(message: Message):
     
     new_tag = parts[1].strip().lower()
     user = get_user(user_id)
+    if not user:
+        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
+        return
     
     if any(t.lower() == new_tag for t in user["tags"]):
         await message.answer(EMOJI["warning"] + " Тег уже в списке", parse_mode="HTML")
@@ -399,6 +429,10 @@ async def cmd_rmtag(message: Message):
     
     tag_to_remove = parts[1].strip().lower()
     user = get_user(user_id)
+    if not user:
+        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
+        return
+    
     tag = next((t for t in user["tags"] if t.lower() == tag_to_remove), None)
     
     if not tag or len(user["tags"]) <= 1:
@@ -414,9 +448,12 @@ async def cmd_tags(message: Message):
     user_id = message.from_user.id
     create_user(user_id)
     user = get_user(user_id)
+    if not user:
+        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
+        return
     
     if not user["tags"]:
-        await message.answer(EMOJI["tag"] + " <b>Твои теги:</b>\n<i>нет</i>\n\nИспользуй /addtag <тег>", parse_mode="HTML")
+        await message.answer(EMOJI["tag"] + " <b>Твои теги:</b>\n<i>нет</i>\n\nИспользуй /addtag &lt;тег&gt;", parse_mode="HTML")
         return
     
     txt = EMOJI["tag"] + " <b>Твои теги:</b>\n" + "\n".join(f"{i}. <code>{t}</code>" for i,t in enumerate(user["tags"],1))
@@ -440,6 +477,10 @@ async def cmd_status(message: Message):
     user_id = message.from_user.id
     create_user(user_id)
     user = get_user(user_id)
+    if not user:
+        await message.answer(EMOJI["error"] + " Ошибка загрузки настроек", parse_mode="HTML")
+        return
+    
     is_owner = (user_id == OWNER_ID_INT)
     
     txt = EMOJI["settings"] + " <b>Твои настройки:</b>\n"
@@ -521,6 +562,10 @@ async def cmd_broadcast(message: Message):
         await message.answer(EMOJI["warning"] + " Используй: <code>/broadcast &lt;текст&gt;</code>", parse_mode="HTML")
         return
     
+    if not supabase:
+        await message.answer(EMOJI["error"] + " База данных не подключена", parse_mode="HTML")
+        return
+    
     try:
         response = supabase.table("users").select("user_id").execute()
         users = response.data
@@ -585,7 +630,9 @@ async def periodic_check():
                         logger.error("Ошибка отправки: " + str(e))
 
 async def on_startup():
+    # Инициализируем Supabase
     init_supabase()
+    # Создаём владельца
     create_user(OWNER_ID_INT)
     logger.info("🚀 Bot started. Owner: " + str(OWNER_ID_INT))
     if bot_running:
