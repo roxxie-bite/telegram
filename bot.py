@@ -509,7 +509,7 @@ async def run_web_server():
 
 async def main():
     await run_web_server()
-    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT))Ф
+    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT))
     # Держим сервер запущенным
     while True:
         await asyncio.sleep(3600)
