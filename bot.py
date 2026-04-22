@@ -270,6 +270,7 @@ async def send_loras_as_file(message, loras, total_pages, min_days, tags):
         stats += "• Страниц: <b>" + str(total_pages) + "</b>\n• Лор: <b>" + str(len(loras)) + "</b>\n"
         stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Макс: <b>" + str(mx["days"]) + "</b> дней"
         await message.answer(stats, parse_mode="HTML")
+
 # ================= КОНВЕРТАЦИЯ ТЕГОВ E621 =================
 def convert_e621_tags(tag_string):
     """
@@ -318,7 +319,7 @@ async def handle_conversion_input(m: Message):
     """Обрабатывает ввод тегов от пользователя"""
     user_id = m.from_user.id
     
-    # Если это не владелец — игнорируем (но убираем из списка ожидания)
+    # Если это не владелец — игнорируем
     if user_id != OWNER_ID_INT:
         awaiting_conversion.discard(user_id)
         return
@@ -330,21 +331,14 @@ async def handle_conversion_input(m: Message):
         # Конвертируем
         result = convert_e621_tags(tag_input)
         
-        # Показываем результат
-        await m.answer(
-            f"{EMOJI['check']} <b>Готово!</b>\n\n"
-            f"📥 Вход: <code>{tag_input}</code>\n\n"
-            f"📤 Выход: <code>{result}</code>\n\n"
-            f"<i>Тапни по коду чтобы скопировать 👆</i>",
-            parse_mode="HTML"
-        )
+        # Показываем ТОЛЬКО результат
+        await m.answer(f"<code>{result}</code>", parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка конвертации: " + str(e))
-        await m.answer(f"{EMOJI['error']} Ошибка при конвертации", parse_mode="HTML")
+        await m.answer(f"{EMOJI['error']} Ошибка", parse_mode="HTML")
     finally:
-        # Убираем пользователя из списка ожидания
         awaiting_conversion.discard(user_id)
-
+        
         
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
