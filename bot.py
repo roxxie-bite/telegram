@@ -36,6 +36,7 @@ EMOJI = {
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 user_settings = {}  # Настройки владельца в памяти: {user_id: {min_days, tags, ...}}
+awaiting_conversion = set() 
 # =============================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -269,8 +270,82 @@ async def send_loras_as_file(message, loras, total_pages, min_days, tags):
         stats += "• Страниц: <b>" + str(total_pages) + "</b>\n• Лор: <b>" + str(len(loras)) + "</b>\n"
         stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Макс: <b>" + str(mx["days"]) + "</b> дней"
         await message.answer(stats, parse_mode="HTML")
+# ================= КОНВЕРТАЦИЯ ТЕГОВ E621 =================
+def convert_e621_tags(tag_string):
+    """
+    Конвертирует e621-теги в обычный формат
+    Вход:  "anthro female red_eyes loona_(helluva_boss)"
+    Выход: "anthro, female, red eyes, loona \(helluva boss\)"
+    """
+    # Убираем скобки если есть
+    tag_string = tag_string.strip().strip('[]')
+    
+    # Разбиваем по пробелам
+    tags = tag_string.split()
+    
+    # Обрабатываем каждый тег
+    converted = []
+    for tag in tags:
+        # Заменяем _ на пробел
+        tag = tag.replace('_', ' ')
+        # Экранируем скобки
+        tag = tag.replace('(', r'\(').replace(')', r'\)')
+        converted.append(tag)
+    
+    return ', '.join(converted)
 
 # ================= КОМАНДЫ =================
+
+# ================= КОМАНДА /convert =================
+@dp.message(Command("convert"))
+async def cmd_convert_start(m: Message):
+    """Запускает процесс конвертации тегов"""
+    if m.from_user.id != OWNER_ID_INT:
+        await cmd_start(m)
+        return
+    
+    awaiting_conversion.add(m.from_user.id)
+    await m.answer(
+        "🔄 <b>Введите теги для конвертации:</b>\n\n"
+        "🇷🇺 Пример: <code>anthro female red_eyes</code>\n"
+        "🇬🇧 Example: <code>anthro female red_eyes</code>\n\n"
+        "<i>Просто отправь теги следующим сообщением</i>",
+        parse_mode="HTML"
+    )
+
+@dp.message(lambda m: m.from_user.id in awaiting_conversion)
+async def handle_conversion_input(m: Message):
+    """Обрабатывает ввод тегов от пользователя"""
+    user_id = m.from_user.id
+    
+    # Если это не владелец — игнорируем (но убираем из списка ожидания)
+    if user_id != OWNER_ID_INT:
+        awaiting_conversion.discard(user_id)
+        return
+    
+    # Получаем текст сообщения
+    tag_input = m.text.strip()
+    
+    try:
+        # Конвертируем
+        result = convert_e621_tags(tag_input)
+        
+        # Показываем результат
+        await m.answer(
+            f"{EMOJI['check']} <b>Готово!</b>\n\n"
+            f"📥 Вход: <code>{tag_input}</code>\n\n"
+            f"📤 Выход: <code>{result}</code>\n\n"
+            f"<i>Тапни по коду чтобы скопировать 👆</i>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error("Ошибка конвертации: " + str(e))
+        await m.answer(f"{EMOJI['error']} Ошибка при конвертации", parse_mode="HTML")
+    finally:
+        # Убираем пользователя из списка ожидания
+        awaiting_conversion.discard(user_id)
+
+        
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT:
