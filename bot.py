@@ -447,16 +447,22 @@ async def cmd_stop(message: Message):
     logger.warning("🛑 Бот остановлен владельцем")
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
-    if message.from_user.id != OWNER_ID_INT:
+async def cmd_start(m: Message):
+    """Старт для всех: владелец → команды, другие → сообщение"""
+    
+    # 👑 ВЛАДЕЛЕЦ
+    if m.from_user.id == OWNER_ID_INT:
+        global bot_running
+        if not bot_running:
+            bot_running = True
+            logger.info("🔄 Bot resumed by owner")
+        await m.answer(f"{EMOJI['check']} <b>Бот активен!</b>\n/help — команды", parse_mode="HTML")
         return
-    global bot_running
-    if bot_running:
-        await message.answer(EMOJI["info"] + " Бот уже активен!", parse_mode="HTML")
-        return
-    bot_running = True
-    await message.answer(EMOJI["check"] + " <b>Бот запущен!</b>", parse_mode="HTML")
-    logger.info("🔄 Бот запущен владельцем")
+    
+    # 👥 ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ — простое двуязычное сообщение
+    ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
+    en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
+    await m.answer(ru + "\n\n" + en, parse_mode="HTML")
 
 @dp.message()
 async def silent_ignore(message: Message):
@@ -503,7 +509,7 @@ async def run_web_server():
 
 async def main():
     await run_web_server()
-    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT))
+    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT))Ф
     # Держим сервер запущенным
     while True:
         await asyncio.sleep(3600)
