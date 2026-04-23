@@ -24,6 +24,7 @@ DEFAULT_TAGS = []
 MAX_PAGES = 50
 EXPORT_THRESHOLD = 50
 COOLDOWN_SECONDS = 20
+FORWARDED_FILE = "forwarded.json"  # ← JSON-хранилище для пересланных сообщений
 
 # === ЭМОДЗИ ===
 EMOJI = {
@@ -35,8 +36,9 @@ EMOJI = {
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
-user_settings = {}  # Настройки владельца в памяти: {user_id: {min_days, tags, ...}}
-awaiting_conversion = set() 
+user_settings = {}
+awaiting_conversion = set()
+forwarded_messages = {}  # ← {message_id: user_id} для пересланных сообщений
 # =============================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -49,9 +51,36 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ================= JSON ХРАНИЛИЩЕ =================
+def load_forwarded():
+    """Загружает пересланные сообщения из JSON"""
+    global forwarded_messages
+    try:
+        if os.path.exists(FORWARDED_FILE):
+            with open(FORWARDED_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Ключи в JSON — строки, конвертим в int
+            forwarded_messages = {int(k): v for k, v in data.items()}
+            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений")
+        else:
+            forwarded_messages = {}
+            logger.info("📦 Файл пересылок не найден, создан новый")
+    except Exception as e:
+        logger.error("❌ Ошибка загрузки JSON: " + str(e))
+        forwarded_messages = {}
+
+def save_forwarded():
+    """Сохраняет пересланные сообщения в JSON"""
+    try:
+        # Конвертим ключи в строки для JSON
+        data = {str(k): v for k, v in forwarded_messages.items()}
+        with open(FORWARDED_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error("❌ Ошибка сохранения JSON: " + str(e))
+
 # ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =================
 def get_settings(user_id):
-    """Получает настройки пользователя (или дефолтные)"""
     if user_id not in user_settings:
         user_settings[user_id] = {
             "min_days": DEFAULT_MIN_DAYS,
@@ -63,13 +92,11 @@ def get_settings(user_id):
     return user_settings[user_id]
 
 def update_settings(user_id, **kwargs):
-    """Обновляет настройки пользователя"""
     settings = get_settings(user_id)
     settings.update(kwargs)
     user_settings[user_id] = settings
 
 def check_cooldown(user_id):
-    """Проверяет кулдаун"""
     settings = get_settings(user_id)
     elapsed = time.time() - settings.get("last_check", 0)
     if elapsed >= COOLDOWN_SECONDS:
@@ -92,7 +119,6 @@ def fetch_with_retry(url, max_retries=3):
 
 # ================= ПАРСЕР =================
 def parse_loras_from_html(html, min_days):
-    """Парсит лоры из HTML, фильтрует по min_days"""
     if html is None:
         return []
     try:
@@ -101,33 +127,19 @@ def parse_loras_from_html(html, min_days):
         for head in soup.find_all("p", class_="lora_head"):
             try:
                 text = head.get_text()
-                # Ищем ID
                 id_match = re.search(r"#️⃣\s*(\d+)", text)
                 if not id_match:
                     continue
                 lora_id = id_match.group(1)
-                
-                # Ищем дни
                 days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
                 if not days_match:
                     continue
                 lora_days = int(days_match.group(1))
-                
-                # Ищем название
                 name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
                 lora_name = name_match.group(1).strip() if name_match else "Unknown"
-                
-                # Ссылка
                 lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
-                
-                # Фильтр по дням
                 if lora_days >= min_days:
-                    results.append({
-                        "id": lora_id,
-                        "days": lora_days,
-                        "name": lora_name,
-                        "url": lora_url
-                    })
+                    results.append({"id": lora_id, "days": lora_days, "name": lora_name, "url": lora_url})
             except Exception as e:
                 logger.warning("Ошибка парсинга: " + str(e))
                 continue
@@ -138,77 +150,52 @@ def parse_loras_from_html(html, min_days):
 
 # ================= ПОИСК ПО СТРАНИЦАМ =================
 def find_loras_by_tag(tag, min_days):
-    """Ищет лоры по конкретному тегу через сайт"""
-    all_results = []
-    pages_scanned = 0
-    
+    all_results, pages_scanned = [], 0
     for page in range(1, MAX_PAGES + 1):
         if not bot_running:
             break
-        
-        # Формируем URL с тегом
         if page == 1:
             url = BASE_URL + "&t=" + tag
         else:
             url = BASE_URL + "&t=" + tag + "&c=" + str(page)
-        
         logger.info("=== Тег: " + tag + " | Страница: " + str(page) + " ===")
         html = fetch_with_retry(url)
-        
         if not html:
-            logger.warning("Страница не загрузилась")
             break
-        
         loras = parse_loras_from_html(html, min_days)
         pages_scanned += 1
-        
         if loras:
             all_results.extend(loras)
             logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
         else:
-            # Если на странице нет лор — возможно, это последняя страница
             logger.info("Стр. " + str(page) + ": лор не найдено")
-            # Но продолжаем, т.к. на следующих страницах могут быть лоры с этим тегом
-            # Останавливаемся только если несколько страниц подряд пустые
-            if page > 3:  # после 3 пустых страниц — стоп
+            if page > 3:
                 break
-        
         if page < MAX_PAGES:
             time.sleep(1.0)
-    
     logger.info("=== Тег " + tag + " готов === Лор: " + str(len(all_results)) + " | Стр: " + str(pages_scanned))
     return all_results, pages_scanned
 
 def find_all_loras(min_days):
-    """Ищет ВСЕ лоры без фильтра по тегу"""
-    all_results = []
-    pages_scanned = 0
-    
+    all_results, pages_scanned = [], 0
     for page in range(1, MAX_PAGES + 1):
         if not bot_running:
             break
-        
         url = BASE_URL if page == 1 else BASE_URL + "&c=" + str(page)
         logger.info("=== Все лоры | Страница: " + str(page) + " ===")
-        
         html = fetch_with_retry(url)
         if not html:
             break
-        
         loras = parse_loras_from_html(html, min_days)
         pages_scanned += 1
-        
         if loras:
             all_results.extend(loras)
             logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
-        
         if not loras and page > 1:
             logger.info("Стр. " + str(page) + ": лор не найдено → завершаю")
             break
-        
         if page < MAX_PAGES:
             time.sleep(1.0)
-    
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
 
@@ -244,7 +231,6 @@ async def send_loras_to_chat(message, loras, total_pages):
             await asyncio.sleep(0.5)
         else:
             await asyncio.sleep(0.2)
-    
     if loras:
         avg = sum(l["days"] for l in loras) // len(loras)
         mx = max(loras, key=lambda x: x["days"])
@@ -262,7 +248,6 @@ async def send_loras_as_file(message, loras, total_pages, min_days, tags):
     if tags:
         caption += "\nТеги: " + ", ".join(tags)
     await message.answer_document(document=file, caption=caption, parse_mode="HTML")
-    
     if loras:
         avg = sum(l["days"] for l in loras) // len(loras)
         mx = max(loras, key=lambda x: x["days"])
@@ -273,38 +258,102 @@ async def send_loras_as_file(message, loras, total_pages, min_days, tags):
 
 # ================= КОНВЕРТАЦИЯ ТЕГОВ E621 =================
 def convert_e621_tags(tag_string):
-    """
+    r"""
     Конвертирует e621-теги в обычный формат
     Вход:  "anthro female red_eyes loona_(helluva_boss)"
-    Выход: "anthro, female, red eyes, loona \(helluva boss\)"
+    Выход: "anthro, female, red eyes, loona \\(helluva boss\\)"
     """
-    # Убираем скобки если есть
     tag_string = tag_string.strip().strip('[]')
-    
-    # Разбиваем по пробелам
     tags = tag_string.split()
-    
-    # Обрабатываем каждый тег
     converted = []
     for tag in tags:
-        # Заменяем _ на пробел
         tag = tag.replace('_', ' ')
-        # Экранируем скобки
-        tag = tag.replace('(', r'\(').replace(')', r'\)')
+        tag = tag.replace('(', '\\(').replace(')', '\\)')
         converted.append(tag)
-    
     return ', '.join(converted)
 
-# ================= КОМАНДЫ =================
+# ================= ОБРАТНАЯ СВЯЗЬ (МЕДИА + JSON) =================
+@dp.message(lambda m: m.from_user.id != OWNER_ID_INT)
+async def handle_user_message(m: Message):
+    """Пересылает ЛЮБЫЕ сообщения от пользователей (текст, фото, видео и т.д.)"""
+    user_id = m.from_user.id
+    username = m.from_user.username or "без username"
+    full_name = m.from_user.full_name
+    
+    try:
+        # Пересылаем сообщение как есть (сохраняет тип: фото, видео, голосовое и т.д.)
+        forwarded = await m.forward(chat_id=OWNER_ID_INT)
+        
+        # Сохраняем связь и сохраняем в JSON
+        forwarded_messages[forwarded.message_id] = user_id
+        save_forwarded()
+        
+        # Отправляем информацию о пользователе (отдельным сообщением)
+        user_info = (
+            f"📬 <b>Сообщение от:</b>\n"
+            f"• Имя: {full_name}\n"
+            f"• Username: @{username}\n"
+            f"• ID: <code>{user_id}</code>\n\n"
+            f"<i>Ответьте на пересланное сообщение чтобы ответить</i>"
+        )
+        await bot.send_message(chat_id=OWNER_ID_INT, text=user_info, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error("Ошибка пересылки: " + str(e))
 
-# ================= КОМАНДА /convert =================
+@dp.message(lambda m: m.from_user.id == OWNER_ID_INT and m.reply_to_message)
+async def handle_owner_reply(m: Message):
+    """Обрабатывает ответ владельца (поддерживает текст + медиа)"""
+    if not m.reply_to_message:
+        return
+    
+    reply_msg_id = m.reply_to_message.message_id
+    
+    if reply_msg_id not in forwarded_messages:
+        return  # Не пересланное сообщение
+    
+    user_id = forwarded_messages[reply_msg_id]
+    
+    try:
+        # Если есть текст — отправляем с заголовком
+        if m.text:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"📬 {m.text}",
+                parse_mode="HTML"
+            )
+        
+        # Если есть медиа — пересылаем как есть
+        if m.photo:
+            await bot.send_photo(chat_id=user_id, photo=m.photo[-1].file_id, caption=m.caption or "")
+        elif m.video:
+            await bot.send_video(chat_id=user_id, video=m.video.file_id, caption=m.caption or "")
+        elif m.voice:
+            await bot.send_voice(chat_id=user_id, voice=m.voice.file_id)
+        elif m.audio:
+            await bot.send_audio(chat_id=user_id, audio=m.audio.file_id)
+        elif m.document:
+            await bot.send_document(chat_id=user_id, document=m.document.file_id)
+        elif m.sticker:
+            await bot.send_sticker(chat_id=user_id, sticker=m.sticker.file_id)
+        
+        # Подтверждение владельцу
+        await m.answer(f"{EMOJI['check']} Ответ отправлен", parse_mode="HTML")
+        
+        # Удаляем и сохраняем
+        del forwarded_messages[reply_msg_id]
+        save_forwarded()
+        
+    except Exception as e:
+        logger.error("Ошибка отправки ответа: " + str(e))
+        await m.answer(f"{EMOJI['error']} Не удалось отправить", parse_mode="HTML")
+
+# ================= КОМАНДЫ =================
 @dp.message(Command("convert"))
 async def cmd_convert_start(m: Message):
-    """Запускает процесс конвертации тегов"""
     if m.from_user.id != OWNER_ID_INT:
         await cmd_start(m)
         return
-    
     awaiting_conversion.add(m.from_user.id)
     await m.answer(
         "🔄 <b>Введите теги для конвертации:</b>\n\n"
@@ -316,30 +365,20 @@ async def cmd_convert_start(m: Message):
 
 @dp.message(lambda m: m.from_user.id in awaiting_conversion)
 async def handle_conversion_input(m: Message):
-    """Обрабатывает ввод тегов от пользователя"""
     user_id = m.from_user.id
-    
-    # Если это не владелец — игнорируем
     if user_id != OWNER_ID_INT:
         awaiting_conversion.discard(user_id)
         return
-    
-    # Получаем текст сообщения
     tag_input = m.text.strip()
-    
     try:
-        # Конвертируем
         result = convert_e621_tags(tag_input)
-        
-        # Показываем ТОЛЬКО результат
         await m.answer(f"<code>{result}</code>", parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка конвертации: " + str(e))
         await m.answer(f"{EMOJI['error']} Ошибка", parse_mode="HTML")
     finally:
         awaiting_conversion.discard(user_id)
-        
-        
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT:
@@ -368,32 +407,21 @@ async def cmd_check(message: Message):
     if not bot_running:
         await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
         return
-    
     user_id = message.from_user.id
     settings = get_settings(user_id)
-    
-    # Проверка: не запущен ли уже check
     if settings.get("is_checking"):
         await message.answer(EMOJI["lock"] + " Проверка уже запущена!", parse_mode="HTML")
         return
-    
-    # Проверка кулдауна
     can_use, remaining = check_cooldown(user_id)
     if not can_use:
         await message.answer(EMOJI["clock"] + " Кулдаун! Повтори через <b>" + str(remaining) + "</b> сек.", parse_mode="HTML")
         return
-    
     try:
-        # Блокируем команду
         update_settings(user_id, is_checking=True)
         await message.answer(EMOJI["search"] + " Поиск запущен...", parse_mode="HTML")
-        
         min_days = settings["min_days"]
         tags = settings["tags"]
-        
-        # Ищем лоры
         if tags:
-            # Есть теги — ищем по каждому
             logger.info("=== Поиск по тегам: " + ", ".join(tags) + " ===")
             all_loras, total_pages = [], 0
             for tag in tags:
@@ -401,29 +429,20 @@ async def cmd_check(message: Message):
                 all_loras.extend(loras)
                 total_pages += pages
         else:
-            # Нет тегов — ищем все лоры
             logger.info("=== Поиск всех лор ===")
             all_loras, total_pages = find_all_loras(min_days)
-        
         if not all_loras:
             await message.answer(EMOJI["check"] + " Лоры не найдены.")
             update_settings(user_id, is_checking=False, last_check=time.time())
             return
-        
-        # Сортируем: сначала самые старые
         all_loras.sort(key=lambda x: x["days"], reverse=True)
-        
-        # Отправляем
         if len(all_loras) > EXPORT_THRESHOLD:
             await message.answer(EMOJI["file"] + " Лор много (<b>" + str(len(all_loras)) + "</b>), отправляю файлом...", parse_mode="HTML")
             await send_loras_as_file(message, all_loras, total_pages, min_days, tags)
         else:
             await send_loras_to_chat(message, all_loras, total_pages)
-        
-        # Обновляем кулдаун
         update_settings(user_id, last_check=time.time())
         logger.info("✅ Поиск завершён: " + str(len(all_loras)) + " лор")
-        
     except Exception as e:
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
         await message.answer(EMOJI["error"] + " Ошибка: " + str(e)[:100], parse_mode="HTML")
@@ -517,9 +536,6 @@ async def cmd_stop(message: Message):
 
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
-    """Старт для всех: владелец → команды, другие → сообщение"""
-    
-    # 👑 ВЛАДЕЛЕЦ
     if m.from_user.id == OWNER_ID_INT:
         global bot_running
         if not bot_running:
@@ -527,18 +543,14 @@ async def cmd_start(m: Message):
             logger.info("🔄 Bot resumed by owner")
         await m.answer(f"{EMOJI['check']} <b>Бот активен!</b>\n/help — команды", parse_mode="HTML")
         return
-    
-    # 👥 ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ — простое двуязычное сообщение
     ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
     en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
     await m.answer(ru + "\n\n" + en, parse_mode="HTML")
 
 @dp.message()
 async def silent_ignore(message: Message):
-    # Игнорируем все сообщения не от владельца
     if message.from_user.id != OWNER_ID_INT:
         return
-    # Отвечаем владельцу на неизвестные команды
     await message.answer(EMOJI["info"] + " Неизвестная команда. /help — справка", parse_mode="HTML")
 
 # ================= WEBHOOK SERVER =================
@@ -561,15 +573,12 @@ async def run_web_server():
     app.router.add_post(webhook_path, webhook_handler)
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
-    
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info("🌐 Server on port " + str(port))
-    
-    # Устанавливаем вебхук
     ext_url = os.getenv("RENDER_EXTERNAL_URL")
     if ext_url and bot_running:
         wh_url = ext_url + webhook_path
@@ -577,9 +586,10 @@ async def run_web_server():
         logger.info("✅ Webhook: " + wh_url)
 
 async def main():
+    # Загружаем JSON при старте
+    load_forwarded()
     await run_web_server()
     logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT))
-    # Держим сервер запущенным
     while True:
         await asyncio.sleep(3600)
 
