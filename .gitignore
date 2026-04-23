@@ -54,3 +54,7 @@ htmlcov/
 # Coverage
 coverage/
 ```
+
+forwarded.json
+user_data.json
+config.json
