@@ -5,7 +5,7 @@ import logging
 import requests
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -14,14 +14,21 @@ from aiohttp import web
 
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
-    """Отправляет логи в Telegram (настраиваемый уровень)"""
+    """Отправляет логи в Telegram с поддержкой динамического уровня"""
     
     def __init__(self, bot_token, chat_id, min_level=logging.INFO):
         super().__init__(level=min_level)
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.last_send = 0
-        self.cooldown = 3  # Не чаще 3 секунд
+        self.cooldown = 3
+        self.min_level = min_level
+    
+    def set_level(self, level):
+        """Динамически меняет уровень логирования"""
+        self.setLevel(level)
+        self.min_level = level
+        logger.info(f"📊 Уровень логов изменён на: {logging.getLevelName(level)}")
     
     def emit(self, record):
         try:
@@ -29,10 +36,13 @@ class TelegramLogHandler(logging.Handler):
             if now - self.last_send < self.cooldown:
                 return
             
+            # Время по Москве
+            moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M:%S')
+            
             # Форматируем сообщение
-            level_emoji = {"INFO": "ℹ️", "WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}.get(record.levelname, "📋")
+            level_emoji = {"DEBUG": "🔍", "INFO": "ℹ️", "WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}.get(record.levelname, "📋")
             msg = f"{level_emoji} <b>{record.levelname}:</b>\n\n"
-            msg += f"⏰ {datetime.now().strftime('%H:%M:%S')}\n"
+            msg += f"🕐 МСК {moscow_time}\n"
             msg += f"📋 <code>{record.getMessage()}</code>"
             
             # Отправляем в Telegram
@@ -55,7 +65,7 @@ STOP_PASSWORD = os.getenv("STOP_PASSWORD", "stop123")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 LOG_BOT_TOKEN = os.getenv("LOG_BOT_TOKEN")
 LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # INFO, WARNING, ERROR
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 SITE_BASE = "https://lynther.sytes.net"
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
@@ -71,7 +81,7 @@ EMOJI = {
     "brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", "search": "🔍",
     "stats": "📊", "settings": "⚙️", "tag": "🏷️", "clock": "⏰", "check": "✅",
     "warning": "⚠️", "error": "❌", "info": "ℹ️", "file": "📄", "stop": "🛑",
-    "restart": "🔄", "lock": "🔒", "users": "👥"
+    "restart": "🔄", "lock": "🔒", "users": "👥", "log": "📜"
 }
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
@@ -79,13 +89,25 @@ bot_running = True
 user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
-known_users = {}  # ← {user_id: {name, username, first_seen, last_seen, messages_count}}
+known_users = {}
+log_handler = None  # ← Ссылка на хендлер для динамического изменения уровня
 
 # =============================================
 
 # Настройка уровня логирования
 log_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
-logging.basicConfig(level=log_level, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# Форматтер с временем по Москве
+class MoscowFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        ct = datetime.fromtimestamp(record.created, tz=timezone(timedelta(hours=3)))
+        if datefmt:
+            s = ct.strftime(datefmt)
+        else:
+            s = ct.strftime("%Y-%m-%d %H:%M:%S")
+        return s
+
+logging.basicConfig(level=log_level, format="%(asctime)s МСК | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN or not OWNER_ID:
@@ -98,19 +120,21 @@ dp = Dispatcher()
 # ================= ИНИЦИАЛИЗАЦИЯ ЛОГ-БОТА =================
 def init_log_bot():
     """Инициализирует отправку логов в Telegram"""
+    global log_handler
     if LOG_BOT_TOKEN and LOG_CHAT_ID:
         try:
-            handler = TelegramLogHandler(LOG_BOT_TOKEN, LOG_CHAT_ID, min_level=log_level)
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            logger.addHandler(handler)
+            log_handler = TelegramLogHandler(LOG_BOT_TOKEN, LOG_CHAT_ID, min_level=log_level)
+            log_handler.setFormatter(MoscowFormatter("%(message)s"))
+            logger.addHandler(log_handler)
             logger.info("✅ Лог-бот подключён (уровень: " + LOG_LEVEL + ")")
             
-            # Уведомление о запуске
+            # Уведомление о запуске с временем по Москве
+            moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
             url = f"https://api.telegram.org/bot{LOG_BOT_TOKEN}/sendMessage"
             data = {
                 "chat_id": LOG_CHAT_ID,
                 "text": "🟢 <b>Бот запущен!</b>\n\n" +
-                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" +
+                        f"🕐 МСК {moscow_time}\n" +
                         f"🌐 Render: {os.getenv('RENDER_EXTERNAL_URL', 'N/A')}\n" +
                         f"📊 Лог-уровень: {LOG_LEVEL}",
                 "parse_mode": "HTML"
@@ -121,6 +145,49 @@ def init_log_bot():
             logger.warning("⚠️ Лог-бот не подключён: " + str(e))
     else:
         logger.warning("⚠️ LOG_BOT_TOKEN или LOG_CHAT_ID не заданы")
+
+# ================= УПРАВЛЕНИЕ УРОВНЕМ ЛОГОВ =================
+@dp.message(Command("loglevel"))
+async def cmd_loglevel(m: Message):
+    """Меняет уровень логирования: /loglevel info|warning|error|debug|all"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split()
+    if len(parts) != 2:
+        await m.answer(
+            f"{EMOJI['log']} <b>Уровень логов:</b>\n\n"
+            f"<code>/loglevel debug</code> — все логи (включая отладку)\n"
+            f"<code>/loglevel info</code> — INFO и выше (рекомендуется)\n"
+            f"<code>/loglevel warning</code> — только предупреждения и ошибки\n"
+            f"<code>/loglevel error</code> — только критические ошибки",
+            parse_mode="HTML"
+        )
+        return
+    
+    level_name = parts[1].upper()
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "ALL": logging.DEBUG,  # alias
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL
+    }
+    
+    if level_name not in level_map:
+        await m.answer(f"{EMOJI['warning']} Неверный уровень. Доступно: debug, info, warning, error", parse_mode="HTML")
+        return
+    
+    # Меняем уровень в консольном логгере
+    logging.getLogger().setLevel(level_map[level_name])
+    
+    # Меняем уровень в телеграм-хендлере
+    if log_handler:
+        log_handler.set_level(level_map[level_name])
+    
+    await m.answer(f"{EMOJI['check']} Уровень логов изменён на: <b>{level_name}</b>", parse_mode="HTML")
+    logger.info(f"📊 Уровень логов изменён пользователем на: {level_name}")
 
 # ================= JSON ХРАНИЛИЩЕ =================
 def load_forwarded():
@@ -146,13 +213,11 @@ def save_forwarded():
         logger.error("❌ Ошибка сохранения forwarded.json: " + str(e))
 
 def load_users():
-    """Загружает известных пользователей из JSON"""
     global known_users
     try:
         if os.path.exists(USERS_FILE):
             with open(USERS_FILE, "r", encoding="utf-8") as f:
                 known_users = json.load(f)
-            # Конвертим ключи в int
             known_users = {int(k): v for k, v in known_users.items()}
             logger.info(f"👥 Загружено {len(known_users)} пользователей")
         else:
@@ -162,9 +227,7 @@ def load_users():
         known_users = {}
 
 def save_users():
-    """Сохраняет известных пользователей в JSON"""
     try:
-        # Конвертим ключи в строки для JSON
         data = {str(k): v for k, v in known_users.items()}
         with open(USERS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -172,7 +235,6 @@ def save_users():
         logger.error("❌ Ошибка сохранения users.json: " + str(e))
 
 def track_user(user_id, username=None, full_name=None):
-    """Отслеживает пользователя (вызывать при каждом сообщении)"""
     now = time.time()
     if user_id not in known_users:
         known_users[user_id] = {
@@ -194,7 +256,6 @@ def track_user(user_id, username=None, full_name=None):
     save_users()
 
 def mark_user_forwarded(user_id):
-    """Помечает, что пользователь пересылал сообщения"""
     if user_id in known_users:
         known_users[user_id]["forwarded"] = True
         save_users()
@@ -332,7 +393,7 @@ def format_message(lora):
 def make_export_file(loras, min_days, tags):
     lines = [
         "# Loonie Bot Export",
-        "# Дата: " + datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "# Дата: " + datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M"),
         "# Порог: >= " + str(min_days) + " дней",
         "# Теги: " + (", ".join(tags) if tags else "все"),
         "# Лор: " + str(len(loras)),
@@ -362,7 +423,7 @@ async def send_loras_to_chat(message, loras, total_pages):
 
 async def send_loras_as_file(message, loras, total_pages, min_days, tags):
     content = make_export_file(loras, min_days, tags)
-    file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
+    file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now(timezone(timedelta(hours=3))).strftime("%Y%m%d_%H%M") + ".txt")
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\n"
     caption += "Лор: " + str(len(loras)) + "\nПорог: >= " + str(min_days) + " дней"
     if tags:
@@ -376,7 +437,7 @@ async def send_loras_as_file(message, loras, total_pages, min_days, tags):
         stats += "• Среднее: <b>" + str(avg) + "</b> дней\n• Макс: <b>" + str(mx["days"]) + "</b> дней"
         await message.answer(stats, parse_mode="HTML")
 
-# ================= КОНВЕРТАЦИЯ ТЕГОВ E621 =================
+# ================= КОНВЕРТАЦИЯ ТЕГОВ =================
 def convert_e621_tags(tag_string):
     r"""
     Конвертирует e621-теги в обычный формат
@@ -393,25 +454,25 @@ def convert_e621_tags(tag_string):
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(lambda m: m.from_user.id != OWNER_ID_INT)
 async def handle_user_message(m: Message):
-    """Пересылает сообщения от пользователей + отслеживает их"""
     user_id = m.from_user.id
     username = m.from_user.username or None
     full_name = m.from_user.full_name
     
-    # Отслеживаем пользователя
     track_user(user_id, username, full_name)
     
     try:
         forwarded = await m.forward(chat_id=OWNER_ID_INT)
         forwarded_messages[forwarded.message_id] = user_id
         save_forwarded()
-        mark_user_forwarded(user_id)  # Помечаем что пересылал
+        mark_user_forwarded(user_id)
         
+        moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M')
         user_info = (
             f"📬 <b>Сообщение от:</b>\n"
             f"• Имя: {full_name}\n"
             f"• Username: @{username or 'нет'}\n"
-            f"• ID: <code>{user_id}</code>\n\n"
+            f"• ID: <code>{user_id}</code>\n"
+            f"• Время: 🕐 МСК {moscow_time}\n\n"
             f"<i>Ответьте на пересланное сообщение чтобы ответить</i>"
         )
         await bot.send_message(chat_id=OWNER_ID_INT, text=user_info, parse_mode="HTML")
@@ -421,7 +482,6 @@ async def handle_user_message(m: Message):
 
 @dp.message(lambda m: m.from_user.id == OWNER_ID_INT and m.reply_to_message)
 async def handle_owner_reply(m: Message):
-    """Обрабатывает ответ владельца"""
     if not m.reply_to_message:
         return
     reply_msg_id = m.reply_to_message.message_id
@@ -453,16 +513,13 @@ async def handle_owner_reply(m: Message):
 # ================= КОМАНДА /users =================
 @dp.message(Command("users"))
 async def cmd_users(m: Message):
-    """Показывает всех пользователей, кто писал боту"""
     if m.from_user.id != OWNER_ID_INT:
         await cmd_start(m)
         return
-    
     if not known_users:
         await m.answer(f"{EMOJI['info']} Пока никто не писал боту", parse_mode="HTML")
         return
     
-    # Сортируем: сначала кто пересылал, потом по количеству сообщений
     sorted_users = sorted(
         known_users.items(),
         key=lambda x: (not x[1].get("forwarded", False), -x[1].get("messages_count", 0))
@@ -473,8 +530,8 @@ async def cmd_users(m: Message):
     for user_id, data in sorted_users:
         name = data.get("full_name", "Unknown")
         username = data.get("username")
-        first = datetime.fromtimestamp(data["first_seen"]).strftime("%d.%m")
-        last = datetime.fromtimestamp(data["last_seen"]).strftime("%d.%m")
+        first = datetime.fromtimestamp(data["first_seen"], tz=timezone(timedelta(hours=3))).strftime("%d.%m")
+        last = datetime.fromtimestamp(data["last_seen"], tz=timezone(timedelta(hours=3))).strftime("%d.%m")
         msgs = data.get("messages_count", 1)
         fwd = "📬" if data.get("forwarded") else ""
         
@@ -483,7 +540,6 @@ async def cmd_users(m: Message):
             user_line += f" (@{username})"
         user_line += f" | 💬 {msgs} | 📅 {first}–{last}\n"
         
-        # Проверяем длину, чтобы не превысить лимит Telegram
         if len(txt) + len(user_line) > 4000:
             txt += "\n<i>...и ещё</i>"
             break
@@ -523,6 +579,7 @@ async def cmd_help(message: Message):
     txt = EMOJI["info"] + " <b>Справка:</b>\n\n"
     txt += "<b>" + EMOJI["search"] + " Основные:</b>\n/check — Найти лоры\n/status — Настройки\n/help — Справка\n\n"
     txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег&gt; — Добавить тег\n/rmtag &lt;тег&gt; — Удалить тег\n/tags — Теги\n\n"
+    txt += "<b>" + EMOJI["log"] + " Логи:</b>\n/loglevel &lt;уровень&gt; — info/warning/error/debug\n\n"
     txt += "<b>" + EMOJI["users"] + " Пользователи:</b>\n/users — Показать всех, кто писал боту\n\n"
     txt += "<b>" + EMOJI["stop"] + " Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить\n\n"
     txt += "<i>⏱️ Кулдаун: " + str(COOLDOWN_SECONDS) + " сек</i>"
@@ -639,13 +696,17 @@ async def cmd_status(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
     settings = get_settings(message.from_user.id)
+    moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
     txt = EMOJI["settings"] + " <b>Настройки:</b>\n"
+    txt += f"🕐 МСК {moscow_time}\n"
     txt += EMOJI["days"] + " Порог: <b>" + ("все лоры" if settings["min_days"]==0 else ">=" + str(settings["min_days"]) + " дней") + "</b>\n"
     txt += EMOJI["tag"] + " Теги: <b>" + (", ".join(settings["tags"]) if settings["tags"] else "нет (все лоры)") + "</b>\n"
     can_use, remaining = check_cooldown(message.from_user.id)
     txt += "⏱️ Кулдаун: <b>" + ("готов" if can_use else str(remaining) + " сек") + "</b>\n"
     txt += EMOJI["check" if bot_running else "stop"] + " Бот: <b>" + ("Активен" if bot_running else "ОСТАНОВЛЕН") + "</b>"
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
+    if log_handler:
+        txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
     await message.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("stop"))
@@ -713,13 +774,13 @@ async def run_web_server():
         logger.info("✅ Webhook: " + wh_url)
 
 async def main():
-    # Инициализируем лог-бота и загружаем данные
     init_log_bot()
     load_forwarded()
     load_users()
     
     await run_web_server()
-    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT) + " | Users: " + str(len(known_users)))
+    moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
+    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT) + " | Users: " + str(len(known_users)) + " | Time: МСК " + moscow_time)
     
     while True:
         await asyncio.sleep(3600)
