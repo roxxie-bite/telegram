@@ -408,6 +408,17 @@ def convert_e621_tags(tag_string):
 # ================= ОТСЛЕЖИВАНИЕ ПОЛЬЗОВАТЕЛЕЙ =================
 def track_user(user_id, username=None, full_name=None):
     """Отслеживает пользователя (вызывать при каждом сообщении)"""
+    # Гарантируем, что user_id — это целое число
+    if not isinstance(user_id, int):
+        if hasattr(user_id, 'from_user'):
+            user_id = user_id.from_user.id
+        elif isinstance(user_id, str):
+            try:
+                user_id = int(user_id)
+            except (ValueError, TypeError):
+                logger.error(f"❌ Неверный user_id: {user_id}")
+                return
+    
     now = time.time()
     if user_id not in known_users:
         known_users[user_id] = {
@@ -430,19 +441,29 @@ def track_user(user_id, username=None, full_name=None):
 
 def mark_user_forwarded(user_id):
     """Помечает, что пользователь пересылал сообщения"""
+    # Тоже гарантируем тип
+    if not isinstance(user_id, int):
+        if hasattr(user_id, 'from_user'):
+            user_id = user_id.from_user.id
+        elif isinstance(user_id, str):
+            try:
+                user_id = int(user_id)
+            except:
+                return
     if user_id in known_users:
         known_users[user_id]["forwarded"] = True
         save_users()
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
-@dp.message(lambda m: m.from_user.id != OWNER_ID_INT)
-async def handle_user_message(m: Message):
-    user_id = m.from_user.id
-    username = m.from_user.username or None
-    full_name = m.from_user.full_name
+# Используем F-фильтр aiogram 3.x вместо lambda (правильный способ)
+@dp.message(F.from_user.id != OWNER_ID_INT)
+async def handle_user_message(message: Message):
+    user_id = message.from_user.id  # Это точно int
+    username = message.from_user.username or None
+    full_name = message.from_user.full_name
     track_user(user_id, username, full_name)
     try:
-        forwarded = await m.forward(chat_id=OWNER_ID_INT)
+        forwarded = await message.forward(chat_id=OWNER_ID_INT)
         forwarded_messages[forwarded.message_id] = user_id
         save_forwarded()
         mark_user_forwarded(user_id)
@@ -452,29 +473,28 @@ async def handle_user_message(m: Message):
     except Exception as e:
         logger.error("Ошибка пересылки: " + str(e))
 
-@dp.message(lambda m: m.from_user.id == OWNER_ID_INT and m.reply_to_message)
-async def handle_owner_reply(m: Message):
-    if not m.reply_to_message: return
-    reply_msg_id = m.reply_to_message.message_id
+@dp.message(F.from_user.id == OWNER_ID_INT, F.reply_to_message)
+async def handle_owner_reply(message: Message):
+    if not message.reply_to_message: return
+    reply_msg_id = message.reply_to_message.message_id
     if reply_msg_id not in forwarded_messages: return
     user_id = forwarded_messages[reply_msg_id]
     try:
-        if m.text:
-            await bot.send_message(chat_id=user_id, text=f"📬 {m.text}", parse_mode="HTML")
-        if m.photo: await bot.send_photo(chat_id=user_id, photo=m.photo[-1].file_id, caption=m.caption or "")
-        elif m.video: await bot.send_video(chat_id=user_id, video=m.video.file_id, caption=m.caption or "")
-        elif m.voice: await bot.send_voice(chat_id=user_id, voice=m.voice.file_id)
-        elif m.audio: await bot.send_audio(chat_id=user_id, audio=m.audio.file_id)
-        elif m.document: await bot.send_document(chat_id=user_id, document=m.document.file_id)
-        elif m.sticker: await bot.send_sticker(chat_id=user_id, sticker=m.sticker.file_id)
-        await m.answer(f"{EMOJI['check']} Ответ отправлен", parse_mode="HTML")
+        if message.text:
+            await bot.send_message(chat_id=user_id, text=f"📬 {message.text}", parse_mode="HTML")
+        if message.photo: await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption or "")
+        elif message.video: await bot.send_video(chat_id=user_id, video=message.video.file_id, caption=message.caption or "")
+        elif message.voice: await bot.send_voice(chat_id=user_id, voice=message.voice.file_id)
+        elif message.audio: await bot.send_audio(chat_id=user_id, audio=message.audio.file_id)
+        elif message.document: await bot.send_document(chat_id=user_id, document=message.document.file_id)
+        elif message.sticker: await bot.send_sticker(chat_id=user_id, sticker=message.sticker.file_id)
+        await message.answer(f"{EMOJI['check']} Ответ отправлен", parse_mode="HTML")
         del forwarded_messages[reply_msg_id]
         save_forwarded()
     except Exception as e:
         logger.error("Ошибка отправки ответа: " + str(e))
-        await m.answer(f"{EMOJI['error']} Не удалось отправить", parse_mode="HTML")
+        await message.answer(f"{EMOJI['error']} Не удалось отправить", parse_mode="HTML")
 
-        
 # ================= КОМАНДЫ =================
 @dp.message(Command("users"))
 async def cmd_users(m: Message):
