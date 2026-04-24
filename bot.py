@@ -12,6 +12,13 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
 
+# Пытаемся импортировать pymongo
+try:
+    from pymongo import MongoClient
+    MONGO_AVAILABLE = True
+except ImportError:
+    MONGO_AVAILABLE = False
+
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
     """Отправляет логи в Telegram с поддержкой динамического уровня"""
@@ -66,6 +73,7 @@ MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 LOG_BOT_TOKEN = os.getenv("LOG_BOT_TOKEN")
 LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+MONGO_URI = os.getenv("MONGO_URI")  # ← Новая переменная для MongoDB
 SITE_BASE = "https://lynther.sytes.net"
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
@@ -81,7 +89,7 @@ EMOJI = {
     "brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", "search": "🔍",
     "stats": "📊", "settings": "⚙️", "tag": "🏷️", "clock": "⏰", "check": "✅",
     "warning": "⚠️", "error": "❌", "info": "ℹ️", "file": "📄", "stop": "🛑",
-    "restart": "🔄", "lock": "🔒", "users": "👥", "log": "📜"
+    "restart": "🔄", "lock": "🔒", "users": "👥", "log": "📜", "db": "🗄️"
 }
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
@@ -90,7 +98,9 @@ user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
-log_handler = None  # ← Ссылка на хендлер для динамического изменения уровня
+log_handler = None
+mongo_client = None
+db = None  # ← MongoDB database object
 
 # =============================================
 
@@ -117,94 +127,67 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= ИНИЦИАЛИЗАЦИЯ ЛОГ-БОТА =================
-def init_log_bot():
-    """Инициализирует отправку логов в Telegram"""
-    global log_handler
-    if LOG_BOT_TOKEN and LOG_CHAT_ID:
-        try:
-            log_handler = TelegramLogHandler(LOG_BOT_TOKEN, LOG_CHAT_ID, min_level=log_level)
-            log_handler.setFormatter(MoscowFormatter("%(message)s"))
-            logger.addHandler(log_handler)
-            logger.info("✅ Лог-бот подключён (уровень: " + LOG_LEVEL + ")")
-            
-            # Уведомление о запуске с временем по Москве
-            moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
-            url = f"https://api.telegram.org/bot{LOG_BOT_TOKEN}/sendMessage"
-            data = {
-                "chat_id": LOG_CHAT_ID,
-                "text": "🟢 <b>Бот запущен!</b>\n\n" +
-                        f"🕐 МСК {moscow_time}\n" +
-                        f"🌐 Render: {os.getenv('RENDER_EXTERNAL_URL', 'N/A')}\n" +
-                        f"📊 Лог-уровень: {LOG_LEVEL}",
-                "parse_mode": "HTML"
-            }
-            requests.post(url, json=data, timeout=10)
-            
-        except Exception as e:
-            logger.warning("⚠️ Лог-бот не подключён: " + str(e))
-    else:
-        logger.warning("⚠️ LOG_BOT_TOKEN или LOG_CHAT_ID не заданы")
+# ================= MONGODB ИНИЦИАЛИЗАЦИЯ =================
+def init_mongo():
+    """Инициализирует MongoDB подключение"""
+    global mongo_client, db
+    if not MONGO_AVAILABLE:
+        logger.warning("⚠️ pymongo не установлен — работаю в режиме без БД")
+        return False
+    if not MONGO_URI:
+        logger.warning("⚠️ MONGO_URI не задан — работаю в режиме без БД")
+        return False
+    try:
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        # Тест подключения
+        mongo_client.admin.command('ping')
+        db = mongo_client.get_database("loonie_bot")
+        # Создаём коллекции с индексами
+        db.forwarded.create_index("message_id", unique=True)
+        db.users.create_index("user_id", unique=True)
+        logger.info("✅ MongoDB подключена")
+        return True
+    except Exception as e:
+        logger.error("❌ Ошибка подключения к MongoDB: " + str(e))
+        mongo_client = None
+        db = None
+        return False
 
-# ================= УПРАВЛЕНИЕ УРОВНЕМ ЛОГОВ =================
-@dp.message(Command("loglevel"))
-async def cmd_loglevel(m: Message):
-    """Меняет уровень логирования: /loglevel info|warning|error|debug|all"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split()
-    if len(parts) != 2:
-        await m.answer(
-            f"{EMOJI['log']} <b>Уровень логов:</b>\n\n"
-            f"<code>/loglevel debug</code> — все логи (включая отладку)\n"
-            f"<code>/loglevel info</code> — INFO и выше (рекомендуется)\n"
-            f"<code>/loglevel warning</code> — только предупреждения и ошибки\n"
-            f"<code>/loglevel error</code> — только критические ошибки",
-            parse_mode="HTML"
-        )
-        return
-    
-    level_name = parts[1].upper()
-    level_map = {
-        "DEBUG": logging.DEBUG,
-        "ALL": logging.DEBUG,  # alias
-        "INFO": logging.INFO,
-        "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL
-    }
-    
-    if level_name not in level_map:
-        await m.answer(f"{EMOJI['warning']} Неверный уровень. Доступно: debug, info, warning, error", parse_mode="HTML")
-        return
-    
-    # Меняем уровень в консольном логгере
-    logging.getLogger().setLevel(level_map[level_name])
-    
-    # Меняем уровень в телеграм-хендлере
-    if log_handler:
-        log_handler.set_level(level_map[level_name])
-    
-    await m.answer(f"{EMOJI['check']} Уровень логов изменён на: <b>{level_name}</b>", parse_mode="HTML")
-    logger.info(f"📊 Уровень логов изменён пользователем на: {level_name}")
-
-# ================= JSON ХРАНИЛИЩЕ =================
+# ================= ХРАНИЛИЩЕ: MongoDB + fallback на память/файл =================
 def load_forwarded():
+    """Загружает пересланные сообщения"""
     global forwarded_messages
+    if db:
+        try:
+            for doc in db.forwarded.find():
+                forwarded_messages[doc["message_id"]] = doc["user_id"]
+            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из MongoDB")
+            return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка загрузки из MongoDB: " + str(e))
+    # Fallback: локальный файл
     try:
         if os.path.exists(FORWARDED_FILE):
             with open(FORWARDED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             forwarded_messages = {int(k): v for k, v in data.items()}
-            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений")
-        else:
-            forwarded_messages = {}
+            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из файла")
     except Exception as e:
         logger.error("❌ Ошибка загрузки forwarded.json: " + str(e))
         forwarded_messages = {}
 
 def save_forwarded():
+    """Сохраняет пересланные сообщения"""
+    if db:
+        try:
+            # Очищаем и записываем заново (простой подход для небольшого объёма)
+            db.forwarded.delete_many({})
+            for msg_id, user_id in forwarded_messages.items():
+                db.forwarded.insert_one({"message_id": msg_id, "user_id": user_id})
+            return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка сохранения в MongoDB: " + str(e))
+    # Fallback: локальный файл
     try:
         data = {str(k): v for k, v in forwarded_messages.items()}
         with open(FORWARDED_FILE, "w", encoding="utf-8") as f:
@@ -213,20 +196,41 @@ def save_forwarded():
         logger.error("❌ Ошибка сохранения forwarded.json: " + str(e))
 
 def load_users():
+    """Загружает известных пользователей"""
     global known_users
+    if db:
+        try:
+            for doc in db.users.find():
+                known_users[doc["user_id"]] = doc["data"]
+            logger.info(f"👥 Загружено {len(known_users)} пользователей из MongoDB")
+            return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка загрузки users из MongoDB: " + str(e))
+    # Fallback: локальный файл
     try:
         if os.path.exists(USERS_FILE):
             with open(USERS_FILE, "r", encoding="utf-8") as f:
-                known_users = json.load(f)
-            known_users = {int(k): v for k, v in known_users.items()}
-            logger.info(f"👥 Загружено {len(known_users)} пользователей")
-        else:
-            known_users = {}
+                data = json.load(f)
+            known_users = {int(k): v for k, v in data.items()}
+            logger.info(f"👥 Загружено {len(known_users)} пользователей из файла")
     except Exception as e:
         logger.error("❌ Ошибка загрузки users.json: " + str(e))
         known_users = {}
 
 def save_users():
+    """Сохраняет известных пользователей"""
+    if db:
+        try:
+            for user_id, data in known_users.items():
+                db.users.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"data": data, "updated_at": datetime.now(timezone(timedelta(hours=3)))}},
+                    upsert=True
+                )
+            return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка сохранения users в MongoDB: " + str(e))
+    # Fallback: локальный файл
     try:
         data = {str(k): v for k, v in known_users.items()}
         with open(USERS_FILE, "w", encoding="utf-8") as f:
@@ -235,6 +239,7 @@ def save_users():
         logger.error("❌ Ошибка сохранения users.json: " + str(e))
 
 def track_user(user_id, username=None, full_name=None):
+    """Отслеживает пользователя"""
     now = time.time()
     if user_id not in known_users:
         known_users[user_id] = {
@@ -256,11 +261,12 @@ def track_user(user_id, username=None, full_name=None):
     save_users()
 
 def mark_user_forwarded(user_id):
+    """Помечает, что пользователь пересылал сообщения"""
     if user_id in known_users:
         known_users[user_id]["forwarded"] = True
         save_users()
 
-# ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =================
+# ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ (в памяти) =================
 def get_settings(user_id):
     if user_id not in user_settings:
         user_settings[user_id] = {
@@ -547,6 +553,40 @@ async def cmd_users(m: Message):
     
     await m.answer(txt, parse_mode="HTML")
 
+# ================= КОМАНДА /loglevel =================
+@dp.message(Command("loglevel"))
+async def cmd_loglevel(m: Message):
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    parts = m.text.split()
+    if len(parts) != 2:
+        await m.answer(
+            f"{EMOJI['log']} <b>Уровень логов:</b>\n\n"
+            f"<code>/loglevel debug</code> — все логи (включая отладку)\n"
+            f"<code>/loglevel info</code> — INFO и выше (рекомендуется)\n"
+            f"<code>/loglevel warning</code> — только предупреждения и ошибки\n"
+            f"<code>/loglevel error</code> — только критические ошибки",
+            parse_mode="HTML"
+        )
+        return
+    level_name = parts[1].upper()
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "ALL": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL
+    }
+    if level_name not in level_map:
+        await m.answer(f"{EMOJI['warning']} Неверный уровень. Доступно: debug, info, warning, error", parse_mode="HTML")
+        return
+    logging.getLogger().setLevel(level_map[level_name])
+    if log_handler:
+        log_handler.set_level(level_map[level_name])
+    await m.answer(f"{EMOJI['check']} Уровень логов изменён на: <b>{level_name}</b>", parse_mode="HTML")
+    logger.info(f"📊 Уровень логов изменён пользователем на: {level_name}")
+
 # ================= ОСТАЛЬНЫЕ КОМАНДЫ =================
 @dp.message(Command("convert"))
 async def cmd_convert_start(m: Message):
@@ -581,8 +621,7 @@ async def cmd_help(message: Message):
     txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег&gt; — Добавить тег\n/rmtag &lt;тег&gt; — Удалить тег\n/tags — Теги\n\n"
     txt += "<b>" + EMOJI["log"] + " Логи:</b>\n/loglevel &lt;уровень&gt; — info/warning/error/debug\n\n"
     txt += "<b>" + EMOJI["users"] + " Пользователи:</b>\n/users — Показать всех, кто писал боту\n\n"
-    txt += "<b>" + EMOJI["stop"] + " Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить\n\n"
-    txt += "<i>⏱️ Кулдаун: " + str(COOLDOWN_SECONDS) + " сек</i>"
+    txt += "<b>" + EMOJI["stop"] + " Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить"
     await message.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("check"))
@@ -707,6 +746,10 @@ async def cmd_status(message: Message):
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     if log_handler:
         txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
+    if db:
+        txt += f"\n{EMOJI['db']} БД: <b>MongoDB подключена</b>"
+    else:
+        txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
     await message.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("stop"))
@@ -774,13 +817,16 @@ async def run_web_server():
         logger.info("✅ Webhook: " + wh_url)
 
 async def main():
+    # Инициализация
     init_log_bot()
+    mongo_ok = init_mongo()
     load_forwarded()
     load_users()
     
     await run_web_server()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
-    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT) + " | Users: " + str(len(known_users)) + " | Time: МСК " + moscow_time)
+    db_status = "✅ MongoDB" if mongo_ok else "❌ память"
+    logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time} | DB: {db_status}")
     
     while True:
         await asyncio.sleep(3600)
