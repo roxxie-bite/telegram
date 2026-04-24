@@ -404,6 +404,37 @@ def convert_e621_tags(tag_string):
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(lambda m: m.from_user.id != OWNER_ID_INT)
+
+# ================= ОТСЛЕЖИВАНИЕ ПОЛЬЗОВАТЕЛЕЙ =================
+def track_user(user_id, username=None, full_name=None):
+    """Отслеживает пользователя (вызывать при каждом сообщении)"""
+    now = time.time()
+    if user_id not in known_users:
+        known_users[user_id] = {
+            "username": username,
+            "full_name": full_name,
+            "first_seen": now,
+            "last_seen": now,
+            "messages_count": 0,
+            "forwarded": False
+        }
+        logger.info(f"🆕 Новый пользователь: {full_name} (@{username}) [{user_id}]")
+    else:
+        known_users[user_id]["last_seen"] = now
+        known_users[user_id]["messages_count"] += 1
+        if username:
+            known_users[user_id]["username"] = username
+        if full_name:
+            known_users[user_id]["full_name"] = full_name
+    save_users()
+
+def mark_user_forwarded(user_id):
+    """Помечает, что пользователь пересылал сообщения"""
+    if user_id in known_users:
+        known_users[user_id]["forwarded"] = True
+        save_users()
+
+
 async def handle_user_message(m: Message):
     user_id = m.from_user.id
     username = m.from_user.username or None
