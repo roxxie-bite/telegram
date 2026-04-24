@@ -3,5 +3,6 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 aiohttp>=3.9.0
 pymongo>=4.6.0
+"pymongo[srv]"
 dnspython>=2.4.0
 certifi>=2023.0.0
