@@ -402,6 +402,9 @@ def convert_e621_tags(tag_string):
     converted = [tag.replace('_', ' ').replace('(', '\\(').replace(')', '\\)') for tag in tags]
     return ', '.join(converted)
 
+
+
+
 # ================= ОТСЛЕЖИВАНИЕ ПОЛЬЗОВАТЕЛЕЙ =================
 def track_user(user_id, username=None, full_name=None):
     """Отслеживает пользователя (вызывать при каждом сообщении)"""
@@ -431,10 +434,8 @@ def mark_user_forwarded(user_id):
         known_users[user_id]["forwarded"] = True
         save_users()
 
-
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(lambda m: m.from_user.id != OWNER_ID_INT)
-
 async def handle_user_message(m: Message):
     user_id = m.from_user.id
     username = m.from_user.username or None
@@ -473,6 +474,7 @@ async def handle_owner_reply(m: Message):
         logger.error("Ошибка отправки ответа: " + str(e))
         await m.answer(f"{EMOJI['error']} Не удалось отправить", parse_mode="HTML")
 
+        
 # ================= КОМАНДЫ =================
 @dp.message(Command("users"))
 async def cmd_users(m: Message):
