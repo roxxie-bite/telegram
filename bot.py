@@ -110,23 +110,47 @@ class TelegramLogHandler(logging.Handler):
 
 # ================= MONGODB ИНИЦИАЛИЗАЦИЯ =================
 def init_mongo():
+    """Инициализирует MongoDB подключение с Stable API"""
     global mongo_client, db
+    
     if not MONGO_AVAILABLE:
         logger.warning("⚠️ pymongo не установлен — работаю в режиме без БД")
         return False
+    
     if not MONGO_URI:
         logger.warning("⚠️ MONGO_URI не задан — работаю в режиме без БД")
         return False
+    
     try:
-        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        # Импортируем ServerApi для Stable API
+        from pymongo.server_api import ServerApi
+        
+        # Создаём клиент с обязательным указанием версии API
+        mongo_client = MongoClient(
+            MONGO_URI,
+            server_api=ServerApi('1'),  # ← Ключевое исправление!
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=10000
+        )
+        
+        # Тест подключения с пингом
         mongo_client.admin.command('ping')
+        
+        # Получаем базу данных
         db = mongo_client.get_database("loonie_bot")
+        
+        # Создаём индексы (идемпотентно)
         db.forwarded.create_index("message_id", unique=True)
         db.users.create_index("user_id", unique=True)
-        logger.info("✅ MongoDB подключена")
+        
+        logger.info("✅ MongoDB подключена (Stable API v1)")
         return True
+        
     except Exception as e:
-        logger.error("❌ Ошибка подключения к MongoDB: " + str(e))
+        error_msg = str(e)
+        # Логируем только первые 300 символов ошибки
+        logger.error("❌ Ошибка подключения к MongoDB: " + error_msg[:300])
         mongo_client = None
         db = None
         return False
