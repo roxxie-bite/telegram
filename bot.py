@@ -12,11 +12,50 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
 
+# ================= TELEGRAM LOG HANDLER =================
+class TelegramLogHandler(logging.Handler):
+    """Отправляет логи в Telegram (настраиваемый уровень)"""
+    
+    def __init__(self, bot_token, chat_id, min_level=logging.INFO):
+        super().__init__(level=min_level)
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.last_send = 0
+        self.cooldown = 3  # Не чаще 3 секунд
+    
+    def emit(self, record):
+        try:
+            now = time.time()
+            if now - self.last_send < self.cooldown:
+                return
+            
+            # Форматируем сообщение
+            level_emoji = {"INFO": "ℹ️", "WARNING": "⚠️", "ERROR": "❌", "CRITICAL": "🚨"}.get(record.levelname, "📋")
+            msg = f"{level_emoji} <b>{record.levelname}:</b>\n\n"
+            msg += f"⏰ {datetime.now().strftime('%H:%M:%S')}\n"
+            msg += f"📋 <code>{record.getMessage()}</code>"
+            
+            # Отправляем в Telegram
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            data = {
+                "chat_id": self.chat_id,
+                "text": msg,
+                "parse_mode": "HTML"
+            }
+            requests.post(url, json=data, timeout=10)
+            self.last_send = now
+            
+        except Exception as e:
+            print(f"Failed to send log to Telegram: {e}")
+
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 STOP_PASSWORD = os.getenv("STOP_PASSWORD", "stop123")
 MIN_DAYS_ENV = os.getenv("MIN_DAYS")
+LOG_BOT_TOKEN = os.getenv("LOG_BOT_TOKEN")
+LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # INFO, WARNING, ERROR
 SITE_BASE = "https://lynther.sytes.net"
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
@@ -24,24 +63,29 @@ DEFAULT_TAGS = []
 MAX_PAGES = 50
 EXPORT_THRESHOLD = 50
 COOLDOWN_SECONDS = 20
-FORWARDED_FILE = "forwarded.json"  # ← JSON-хранилище для пересланных сообщений
+FORWARDED_FILE = "forwarded.json"
+USERS_FILE = "users.json"
 
 # === ЭМОДЗИ ===
 EMOJI = {
     "brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", "search": "🔍",
     "stats": "📊", "settings": "⚙️", "tag": "🏷️", "clock": "⏰", "check": "✅",
     "warning": "⚠️", "error": "❌", "info": "ℹ️", "file": "📄", "stop": "🛑",
-    "restart": "🔄", "lock": "🔒"
+    "restart": "🔄", "lock": "🔒", "users": "👥"
 }
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 user_settings = {}
 awaiting_conversion = set()
-forwarded_messages = {}  # ← {message_id: user_id} для пересланных сообщений
+forwarded_messages = {}
+known_users = {}  # ← {user_id: {name, username, first_seen, last_seen, messages_count}}
+
 # =============================================
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+# Настройка уровня логирования
+log_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
+logging.basicConfig(level=log_level, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN or not OWNER_ID:
@@ -51,33 +95,109 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ================= ИНИЦИАЛИЗАЦИЯ ЛОГ-БОТА =================
+def init_log_bot():
+    """Инициализирует отправку логов в Telegram"""
+    if LOG_BOT_TOKEN and LOG_CHAT_ID:
+        try:
+            handler = TelegramLogHandler(LOG_BOT_TOKEN, LOG_CHAT_ID, min_level=log_level)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger.addHandler(handler)
+            logger.info("✅ Лог-бот подключён (уровень: " + LOG_LEVEL + ")")
+            
+            # Уведомление о запуске
+            url = f"https://api.telegram.org/bot{LOG_BOT_TOKEN}/sendMessage"
+            data = {
+                "chat_id": LOG_CHAT_ID,
+                "text": "🟢 <b>Бот запущен!</b>\n\n" +
+                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" +
+                        f"🌐 Render: {os.getenv('RENDER_EXTERNAL_URL', 'N/A')}\n" +
+                        f"📊 Лог-уровень: {LOG_LEVEL}",
+                "parse_mode": "HTML"
+            }
+            requests.post(url, json=data, timeout=10)
+            
+        except Exception as e:
+            logger.warning("⚠️ Лог-бот не подключён: " + str(e))
+    else:
+        logger.warning("⚠️ LOG_BOT_TOKEN или LOG_CHAT_ID не заданы")
+
 # ================= JSON ХРАНИЛИЩЕ =================
 def load_forwarded():
-    """Загружает пересланные сообщения из JSON"""
     global forwarded_messages
     try:
         if os.path.exists(FORWARDED_FILE):
             with open(FORWARDED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Ключи в JSON — строки, конвертим в int
             forwarded_messages = {int(k): v for k, v in data.items()}
             logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений")
         else:
             forwarded_messages = {}
-            logger.info("📦 Файл пересылок не найден, создан новый")
     except Exception as e:
-        logger.error("❌ Ошибка загрузки JSON: " + str(e))
+        logger.error("❌ Ошибка загрузки forwarded.json: " + str(e))
         forwarded_messages = {}
 
 def save_forwarded():
-    """Сохраняет пересланные сообщения в JSON"""
     try:
-        # Конвертим ключи в строки для JSON
         data = {str(k): v for k, v in forwarded_messages.items()}
         with open(FORWARDED_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        logger.error("❌ Ошибка сохранения JSON: " + str(e))
+        logger.error("❌ Ошибка сохранения forwarded.json: " + str(e))
+
+def load_users():
+    """Загружает известных пользователей из JSON"""
+    global known_users
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                known_users = json.load(f)
+            # Конвертим ключи в int
+            known_users = {int(k): v for k, v in known_users.items()}
+            logger.info(f"👥 Загружено {len(known_users)} пользователей")
+        else:
+            known_users = {}
+    except Exception as e:
+        logger.error("❌ Ошибка загрузки users.json: " + str(e))
+        known_users = {}
+
+def save_users():
+    """Сохраняет известных пользователей в JSON"""
+    try:
+        # Конвертим ключи в строки для JSON
+        data = {str(k): v for k, v in known_users.items()}
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error("❌ Ошибка сохранения users.json: " + str(e))
+
+def track_user(user_id, username=None, full_name=None):
+    """Отслеживает пользователя (вызывать при каждом сообщении)"""
+    now = time.time()
+    if user_id not in known_users:
+        known_users[user_id] = {
+            "username": username,
+            "full_name": full_name,
+            "first_seen": now,
+            "last_seen": now,
+            "messages_count": 0,
+            "forwarded": False
+        }
+        logger.info(f"🆕 Новый пользователь: {full_name} (@{username}) [{user_id}]")
+    else:
+        known_users[user_id]["last_seen"] = now
+        known_users[user_id]["messages_count"] += 1
+        if username:
+            known_users[user_id]["username"] = username
+        if full_name:
+            known_users[user_id]["full_name"] = full_name
+    save_users()
+
+def mark_user_forwarded(user_id):
+    """Помечает, что пользователь пересылал сообщения"""
+    if user_id in known_users:
+        known_users[user_id]["forwarded"] = True
+        save_users()
 
 # ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =================
 def get_settings(user_id):
@@ -260,8 +380,6 @@ async def send_loras_as_file(message, loras, total_pages, min_days, tags):
 def convert_e621_tags(tag_string):
     r"""
     Конвертирует e621-теги в обычный формат
-    Вход:  "anthro female red_eyes loona_(helluva_boss)"
-    Выход: "anthro, female, red eyes, loona \\(helluva boss\\)"
     """
     tag_string = tag_string.strip().strip('[]')
     tags = tag_string.split()
@@ -272,27 +390,27 @@ def convert_e621_tags(tag_string):
         converted.append(tag)
     return ', '.join(converted)
 
-# ================= ОБРАТНАЯ СВЯЗЬ (МЕДИА + JSON) =================
+# ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(lambda m: m.from_user.id != OWNER_ID_INT)
 async def handle_user_message(m: Message):
-    """Пересылает ЛЮБЫЕ сообщения от пользователей (текст, фото, видео и т.д.)"""
+    """Пересылает сообщения от пользователей + отслеживает их"""
     user_id = m.from_user.id
-    username = m.from_user.username or "без username"
+    username = m.from_user.username or None
     full_name = m.from_user.full_name
     
+    # Отслеживаем пользователя
+    track_user(user_id, username, full_name)
+    
     try:
-        # Пересылаем сообщение как есть (сохраняет тип: фото, видео, голосовое и т.д.)
         forwarded = await m.forward(chat_id=OWNER_ID_INT)
-        
-        # Сохраняем связь и сохраняем в JSON
         forwarded_messages[forwarded.message_id] = user_id
         save_forwarded()
+        mark_user_forwarded(user_id)  # Помечаем что пересылал
         
-        # Отправляем информацию о пользователе (отдельным сообщением)
         user_info = (
             f"📬 <b>Сообщение от:</b>\n"
             f"• Имя: {full_name}\n"
-            f"• Username: @{username}\n"
+            f"• Username: @{username or 'нет'}\n"
             f"• ID: <code>{user_id}</code>\n\n"
             f"<i>Ответьте на пересланное сообщение чтобы ответить</i>"
         )
@@ -303,27 +421,16 @@ async def handle_user_message(m: Message):
 
 @dp.message(lambda m: m.from_user.id == OWNER_ID_INT and m.reply_to_message)
 async def handle_owner_reply(m: Message):
-    """Обрабатывает ответ владельца (поддерживает текст + медиа)"""
+    """Обрабатывает ответ владельца"""
     if not m.reply_to_message:
         return
-    
     reply_msg_id = m.reply_to_message.message_id
-    
     if reply_msg_id not in forwarded_messages:
-        return  # Не пересланное сообщение
-    
+        return
     user_id = forwarded_messages[reply_msg_id]
-    
     try:
-        # Если есть текст — отправляем с заголовком
         if m.text:
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"📬 {m.text}",
-                parse_mode="HTML"
-            )
-        
-        # Если есть медиа — пересылаем как есть
+            await bot.send_message(chat_id=user_id, text=f"📬 {m.text}", parse_mode="HTML")
         if m.photo:
             await bot.send_photo(chat_id=user_id, photo=m.photo[-1].file_id, caption=m.caption or "")
         elif m.video:
@@ -336,32 +443,62 @@ async def handle_owner_reply(m: Message):
             await bot.send_document(chat_id=user_id, document=m.document.file_id)
         elif m.sticker:
             await bot.send_sticker(chat_id=user_id, sticker=m.sticker.file_id)
-        
-        # Подтверждение владельцу
         await m.answer(f"{EMOJI['check']} Ответ отправлен", parse_mode="HTML")
-        
-        # Удаляем и сохраняем
         del forwarded_messages[reply_msg_id]
         save_forwarded()
-        
     except Exception as e:
         logger.error("Ошибка отправки ответа: " + str(e))
         await m.answer(f"{EMOJI['error']} Не удалось отправить", parse_mode="HTML")
 
-# ================= КОМАНДЫ =================
+# ================= КОМАНДА /users =================
+@dp.message(Command("users"))
+async def cmd_users(m: Message):
+    """Показывает всех пользователей, кто писал боту"""
+    if m.from_user.id != OWNER_ID_INT:
+        await cmd_start(m)
+        return
+    
+    if not known_users:
+        await m.answer(f"{EMOJI['info']} Пока никто не писал боту", parse_mode="HTML")
+        return
+    
+    # Сортируем: сначала кто пересылал, потом по количеству сообщений
+    sorted_users = sorted(
+        known_users.items(),
+        key=lambda x: (not x[1].get("forwarded", False), -x[1].get("messages_count", 0))
+    )
+    
+    txt = f"{EMOJI['users']} <b>Пользователи ({len(sorted_users)}):</b>\n\n"
+    
+    for user_id, data in sorted_users:
+        name = data.get("full_name", "Unknown")
+        username = data.get("username")
+        first = datetime.fromtimestamp(data["first_seen"]).strftime("%d.%m")
+        last = datetime.fromtimestamp(data["last_seen"]).strftime("%d.%m")
+        msgs = data.get("messages_count", 1)
+        fwd = "📬" if data.get("forwarded") else ""
+        
+        user_line = f"{fwd} <code>{user_id}</code> — {name}"
+        if username:
+            user_line += f" (@{username})"
+        user_line += f" | 💬 {msgs} | 📅 {first}–{last}\n"
+        
+        # Проверяем длину, чтобы не превысить лимит Telegram
+        if len(txt) + len(user_line) > 4000:
+            txt += "\n<i>...и ещё</i>"
+            break
+        txt += user_line
+    
+    await m.answer(txt, parse_mode="HTML")
+
+# ================= ОСТАЛЬНЫЕ КОМАНДЫ =================
 @dp.message(Command("convert"))
 async def cmd_convert_start(m: Message):
     if m.from_user.id != OWNER_ID_INT:
         await cmd_start(m)
         return
     awaiting_conversion.add(m.from_user.id)
-    await m.answer(
-        "🔄 <b>Введите теги для конвертации:</b>\n\n"
-        "🇷🇺 Пример: <code>anthro female red_eyes</code>\n"
-        "🇬🇧 Example: <code>anthro female red_eyes</code>\n\n"
-        "<i>Просто отправь теги следующим сообщением</i>",
-        parse_mode="HTML"
-    )
+    await m.answer("🔄 <b>Введите теги для конвертации:</b>\n\nПример: <code>anthro female red_eyes</code>\n\n<i>Отправь теги следующим сообщением</i>", parse_mode="HTML")
 
 @dp.message(lambda m: m.from_user.id in awaiting_conversion)
 async def handle_conversion_input(m: Message):
@@ -383,20 +520,11 @@ async def handle_conversion_input(m: Message):
 async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         return
-    settings = get_settings(message.from_user.id)
     txt = EMOJI["info"] + " <b>Справка:</b>\n\n"
-    txt += "<b>" + EMOJI["search"] + " Основные:</b>\n"
-    txt += "/check — Найти лоры по твоим настройкам\n"
-    txt += "/status — Показать настройки\n"
-    txt += "/help — Эта справка\n\n"
-    txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n"
-    txt += "/setdays N — Порог дней (0 = все)\n"
-    txt += "/addtag &lt;тег&gt; — Добавить тег для поиска\n"
-    txt += "/rmtag &lt;тег&gt; — Удалить тег\n"
-    txt += "/tags — Показать активные теги\n\n"
-    txt += "<b>" + EMOJI["stop"] + " Управление:</b>\n"
-    txt += "/stop &lt;пароль&gt; — Остановить бота\n"
-    txt += "/start — Запустить бота\n\n"
+    txt += "<b>" + EMOJI["search"] + " Основные:</b>\n/check — Найти лоры\n/status — Настройки\n/help — Справка\n\n"
+    txt += "<b>" + EMOJI["settings"] + " Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег&gt; — Добавить тег\n/rmtag &lt;тег&gt; — Удалить тег\n/tags — Теги\n\n"
+    txt += "<b>" + EMOJI["users"] + " Пользователи:</b>\n/users — Показать всех, кто писал боту\n\n"
+    txt += "<b>" + EMOJI["stop"] + " Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить\n\n"
     txt += "<i>⏱️ Кулдаун: " + str(COOLDOWN_SECONDS) + " сек</i>"
     await message.answer(txt, parse_mode="HTML")
 
@@ -422,14 +550,12 @@ async def cmd_check(message: Message):
         min_days = settings["min_days"]
         tags = settings["tags"]
         if tags:
-            logger.info("=== Поиск по тегам: " + ", ".join(tags) + " ===")
             all_loras, total_pages = [], 0
             for tag in tags:
                 loras, pages = find_loras_by_tag(tag, min_days)
                 all_loras.extend(loras)
                 total_pages += pages
         else:
-            logger.info("=== Поиск всех лор ===")
             all_loras, total_pages = find_all_loras(min_days)
         if not all_loras:
             await message.answer(EMOJI["check"] + " Лоры не найдены.")
@@ -519,6 +645,7 @@ async def cmd_status(message: Message):
     can_use, remaining = check_cooldown(message.from_user.id)
     txt += "⏱️ Кулдаун: <b>" + ("готов" if can_use else str(remaining) + " сек") + "</b>\n"
     txt += EMOJI["check" if bot_running else "stop"] + " Бот: <b>" + ("Активен" if bot_running else "ОСТАНОВЛЕН") + "</b>"
+    txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     await message.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("stop"))
@@ -586,10 +713,14 @@ async def run_web_server():
         logger.info("✅ Webhook: " + wh_url)
 
 async def main():
-    # Загружаем JSON при старте
+    # Инициализируем лог-бота и загружаем данные
+    init_log_bot()
     load_forwarded()
+    load_users()
+    
     await run_web_server()
-    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT))
+    logger.info("🚀 Bot started! Owner: " + str(OWNER_ID_INT) + " | Users: " + str(len(known_users)))
+    
     while True:
         await asyncio.sleep(3600)
 
