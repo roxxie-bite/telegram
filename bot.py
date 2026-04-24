@@ -180,10 +180,10 @@ def init_log_bot():
     else:
         logger.warning("⚠️ LOG_BOT_TOKEN или LOG_CHAT_ID не заданы")
 
-# ================= ХРАНИЛИЩЕ =================
+# ================= ХРАНИЛИЩЕ (исправлено: db is not None) =================
 def load_forwarded():
     global forwarded_messages
-    if db:
+    if db is not None:  # ← ИСПРАВЛЕНО: было "if db:"
         try:
             for doc in db.forwarded.find():
                 forwarded_messages[doc["message_id"]] = doc["user_id"]
@@ -201,7 +201,7 @@ def load_forwarded():
         forwarded_messages = {}
 
 def save_forwarded():
-    if db:
+    if db is not None:  # ← ИСПРАВЛЕНО
         try:
             db.forwarded.delete_many({})
             for msg_id, user_id in forwarded_messages.items():
@@ -218,7 +218,7 @@ def save_forwarded():
 
 def load_users():
     global known_users
-    if db:
+    if db is not None:  # ← ИСПРАВЛЕНО
         try:
             for doc in db.users.find():
                 known_users[doc["user_id"]] = doc["data"]
@@ -236,7 +236,7 @@ def load_users():
         known_users = {}
 
 def save_users():
-    if db:
+    if db is not None:  # ← ИСПРАВЛЕНО
         try:
             for user_id, data in known_users.items():
                 db.users.update_one(
@@ -253,27 +253,6 @@ def save_users():
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error("❌ Ошибка сохранения users.json: " + str(e))
-
-def track_user(user_id, username=None, full_name=None):
-    now = time.time()
-    if user_id not in known_users:
-        known_users[user_id] = {
-            "username": username, "full_name": full_name,
-            "first_seen": now, "last_seen": now,
-            "messages_count": 0, "forwarded": False
-        }
-        logger.info(f"🆕 Новый пользователь: {full_name} (@{username}) [{user_id}]")
-    else:
-        known_users[user_id]["last_seen"] = now
-        known_users[user_id]["messages_count"] += 1
-        if username: known_users[user_id]["username"] = username
-        if full_name: known_users[user_id]["full_name"] = full_name
-    save_users()
-
-def mark_user_forwarded(user_id):
-    if user_id in known_users:
-        known_users[user_id]["forwarded"] = True
-        save_users()
 
 # ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =================
 def get_settings(user_id):
