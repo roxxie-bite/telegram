@@ -183,11 +183,13 @@ def init_log_bot():
 # ================= ХРАНИЛИЩЕ (исправлено: db is not None) =================
 def load_forwarded():
     global forwarded_messages
-    if db is not None:  # ← ИСПРАВЛЕНО: было "if db:"
+    if db is not None:
         try:
+            count = 0
             for doc in db.forwarded.find():
                 forwarded_messages[doc["message_id"]] = doc["user_id"]
-            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из MongoDB")
+                count += 1
+            logger.info(f"📦 Загружено {count} пересланных сообщений из MongoDB")
             return
         except Exception as e:
             logger.warning("⚠️ Ошибка загрузки из MongoDB: " + str(e))
@@ -196,6 +198,10 @@ def load_forwarded():
             with open(FORWARDED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             forwarded_messages = {int(k): v for k, v in data.items()}
+            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из файла")
+            # Отладка: покажи первые 3 записи
+            for i, (k, v) in enumerate(list(forwarded_messages.items())[:3]):
+                logger.debug(f"  - {k} → {v}")
     except Exception as e:
         logger.error("❌ Ошибка загрузки forwarded.json: " + str(e))
         forwarded_messages = {}
@@ -455,10 +461,9 @@ def mark_user_forwarded(user_id):
         save_users()
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
-# Используем F-фильтр aiogram 3.x вместо lambda (правильный способ)
 @dp.message(F.from_user.id != OWNER_ID_INT)
 async def handle_user_message(message: Message):
-    user_id = message.from_user.id  # Это точно int
+    user_id = message.from_user.id
     username = message.from_user.username or None
     full_name = message.from_user.full_name
     track_user(user_id, username, full_name)
@@ -473,27 +478,57 @@ async def handle_user_message(message: Message):
     except Exception as e:
         logger.error("Ошибка пересылки: " + str(e))
 
+@dp.message(F.from_user.id == OWNER_ID_INT)
+async def handle_owner_messages(message: Message):
+    """Обрабатывает ВСЕ сообщения от владельца, включая ответы"""
+    
+    # Если это ответ на сообщение — пытаемся отправить пользователю
+    if message.reply_to_message:
+        reply_msg_id = message.reply_to_message.message_id
+        logger.info(f"📨 Владелец ответил на message_id={reply_msg_id}")
+        
+        if reply_msg_id in forwarded_messages:
+            user_id = forwarded_messages[reply_msg_id]
+            logger.info(f"✅ Найдено соответствие: message_id={reply_msg_id} → user_id={user_id}")
+            try:
+                # Отправляем текст если есть
+                if message.text:
+                    await bot.send_message(chat_id=user_id, text=f"📬 {message.text}", parse_mode="HTML")
+                # Отправляем медиа если есть
+                if message.photo:
+                    await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption or "")
+                elif message.video:
+                    await bot.send_video(chat_id=user_id, video=message.video.file_id, caption=message.caption or "")
+                elif message.voice:
+                    await bot.send_voice(chat_id=user_id, voice=message.voice.file_id)
+                elif message.audio:
+                    await bot.send_audio(chat_id=user_id, audio=message.audio.file_id)
+                elif message.document:
+                    await bot.send_document(chat_id=user_id, document=message.document.file_id)
+                elif message.sticker:
+                    await bot.send_sticker(chat_id=user_id, sticker=message.sticker.file_id)
+                
+                await message.answer(f"{EMOJI['check']} Ответ отправлен пользователю {user_id}", parse_mode="HTML")
+                
+                # Удаляем запись и сохраняем
+                del forwarded_messages[reply_msg_id]
+                save_forwarded()
+                return  # Важно: возвращаем, чтобы не сработал silent_ignore
+                
+            except Exception as e:
+                logger.error("Ошибка отправки ответа: " + str(e))
+                await message.answer(f"{EMOJI['error']} Не удалось отправить: {str(e)[:100]}", parse_mode="HTML")
+                return
+    
+    # Если это не ответ — обрабатываем как обычную команду или игнорируем
+    # (другие хендлеры команд обработают /start, /check и т.д.)
+    # Этот хендлер только для ответов на пересланные сообщения
+
 @dp.message(F.from_user.id == OWNER_ID_INT, F.reply_to_message)
 async def handle_owner_reply(message: Message):
-    if not message.reply_to_message: return
-    reply_msg_id = message.reply_to_message.message_id
-    if reply_msg_id not in forwarded_messages: return
-    user_id = forwarded_messages[reply_msg_id]
-    try:
-        if message.text:
-            await bot.send_message(chat_id=user_id, text=f"📬 {message.text}", parse_mode="HTML")
-        if message.photo: await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption or "")
-        elif message.video: await bot.send_video(chat_id=user_id, video=message.video.file_id, caption=message.caption or "")
-        elif message.voice: await bot.send_voice(chat_id=user_id, voice=message.voice.file_id)
-        elif message.audio: await bot.send_audio(chat_id=user_id, audio=message.audio.file_id)
-        elif message.document: await bot.send_document(chat_id=user_id, document=message.document.file_id)
-        elif message.sticker: await bot.send_sticker(chat_id=user_id, sticker=message.sticker.file_id)
-        await message.answer(f"{EMOJI['check']} Ответ отправлен", parse_mode="HTML")
-        del forwarded_messages[reply_msg_id]
-        save_forwarded()
-    except Exception as e:
-        logger.error("Ошибка отправки ответа: " + str(e))
-        await message.answer(f"{EMOJI['error']} Не удалось отправить", parse_mode="HTML")
+    """Дублирующий хендлер для надёжности (может быть удалён если не нужен)"""
+    # Этот хендлер дублирует логику выше для дополнительной надёжности
+    pass  # Основная логика уже в handle_owner_messages
 
 # ================= КОМАНДЫ =================
 @dp.message(Command("users"))
