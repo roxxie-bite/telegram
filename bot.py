@@ -38,6 +38,24 @@ COOLDOWN_SECONDS = 20
 FORWARDED_FILE = "forwarded.json"
 USERS_FILE = "users.json"
 
+# ================= ПРЕМИУМ ЭМОДЗИ =================
+def premium_emoji(emoji_id: str, fallback: str = "⭐") -> str:
+    """
+    Возвращает HTML-код премиум-эмодзи
+    Пример: premium_emoji("5325819430553263482", "🤩")
+    """
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+# === Пресеты популярных премиум-эмодзи ===
+PREMIUM_EMOJI = {
+    "sparkle": premium_emoji("5325819430553263482", "🤩"),  # ✨ Сверкающая звёздочка
+    "fire": premium_emoji("5364703953407018920", "🔥"),     # 🔥 Огонь
+    "heart": premium_emoji("5364703953407018919", "❤️"),    # ❤️ Сердце
+    "star": premium_emoji("5364703953407018921", "⭐"),      # ⭐ Звезда
+    "cool": premium_emoji("5364703953407018922", "😎"),      # 😎 Крутой
+    "party": premium_emoji("5364703953407018923", "🎉"),     # 🎉 Праздник
+}
+
 # === ЭМОДЗИ ===
 EMOJI = {
     "brain": "🧠", "id": "🆔", "days": "🕸️", "delete": "🗑️", "search": "🔍",
@@ -473,7 +491,7 @@ async def handle_user_message(message: Message):
         save_forwarded()
         mark_user_forwarded(user_id)
         moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M')
-        user_info = f"📬 <b>Сообщение от:</b>\n• Имя: {full_name}\n• Username: @{username or 'нет'}\n• ID: <code>{user_id}</code>\n• Время: 🕐 МСК {moscow_time}\n\n<i>Ответьте на пересланное сообщение чтобы ответить</i>"
+        user_info = f"<b>Сообщение от:</b>\n• Имя: {full_name}\n• Username: @{username or 'нет'}\n• ID: <code>{user_id}</code>\n• Время: 🕐 МСК {moscow_time}\n\n<i>Ответьте на пересланное сообщение чтобы ответить</i>"
         await bot.send_message(chat_id=OWNER_ID_INT, text=user_info, parse_mode="HTML")
     except Exception as e:
         logger.error("Ошибка пересылки: " + str(e))
@@ -490,7 +508,7 @@ async def handle_owner_reply(message: Message):
         try:
             # Отправляем текст если есть
             if message.text:
-                await bot.send_message(chat_id=user_id, text=f"📬 {message.text}", parse_mode="HTML")
+                await bot.send_message(chat_id=user_id, text=f"{PREMIUM_EMOJI['sparkle']} {message.text}", parse_mode="HTML")
             # Отправляем медиа если есть
             if message.photo:
                 await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption or "")
@@ -693,7 +711,7 @@ async def cmd_status(message: Message):
     if log_handler: txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
     # ← ИСПРАВЛЕНО НИЖЕ:
     if db is not None:  # ← Было "if db:", стало "if db is not None:"
-        txt += f"\n{EMOJI['db']} БД: <b>MongoDB подключена</b>"
+        txt += f"\n{PREMIUM_EMOJI['sparkle']} БД: <b>MongoDB подключена</b>"
     else:
         txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
     await message.answer(txt, parse_mode="HTML")
