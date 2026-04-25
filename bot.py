@@ -478,48 +478,47 @@ async def handle_user_message(message: Message):
     except Exception as e:
         logger.error("Ошибка пересылки: " + str(e))
 
-@dp.message(F.from_user.id == OWNER_ID_INT)
-async def handle_owner_messages(message: Message):
-    """Обрабатывает ВСЕ сообщения от владельца, включая ответы"""
+@dp.message(F.from_user.id == OWNER_ID_INT, F.reply_to_message)
+async def handle_owner_reply(message: Message):
+    """Обрабатывает ТОЛЬКО ответы владельца на пересланные сообщения"""
+    reply_msg_id = message.reply_to_message.message_id
+    logger.info(f"📨 Владелец ответил на message_id={reply_msg_id}")
     
-    # Если это ответ на сообщение — пытаемся отправить пользователю
-    if message.reply_to_message:
-        reply_msg_id = message.reply_to_message.message_id
-        logger.info(f"📨 Владелец ответил на message_id={reply_msg_id}")
-        
-        if reply_msg_id in forwarded_messages:
-            user_id = forwarded_messages[reply_msg_id]
-            logger.info(f"✅ Найдено соответствие: message_id={reply_msg_id} → user_id={user_id}")
-            try:
-                # Отправляем текст если есть
-                if message.text:
-                    await bot.send_message(chat_id=user_id, text=f"📬 {message.text}", parse_mode="HTML")
-                # Отправляем медиа если есть
-                if message.photo:
-                    await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption or "")
-                elif message.video:
-                    await bot.send_video(chat_id=user_id, video=message.video.file_id, caption=message.caption or "")
-                elif message.voice:
-                    await bot.send_voice(chat_id=user_id, voice=message.voice.file_id)
-                elif message.audio:
-                    await bot.send_audio(chat_id=user_id, audio=message.audio.file_id)
-                elif message.document:
-                    await bot.send_document(chat_id=user_id, document=message.document.file_id)
-                elif message.sticker:
-                    await bot.send_sticker(chat_id=user_id, sticker=message.sticker.file_id)
-                
-                await message.answer(f"{EMOJI['check']} Ответ отправлен пользователю {user_id}", parse_mode="HTML")
-                
-                # Удаляем запись и сохраняем
-                del forwarded_messages[reply_msg_id]
-                save_forwarded()
-                return  # Важно: возвращаем, чтобы не сработал silent_ignore
-                
-            except Exception as e:
-                logger.error("Ошибка отправки ответа: " + str(e))
-                await message.answer(f"{EMOJI['error']} Не удалось отправить: {str(e)[:100]}", parse_mode="HTML")
-                return
-    
+    if reply_msg_id in forwarded_messages:
+        user_id = forwarded_messages[reply_msg_id]
+        logger.info(f"✅ Найдено соответствие: message_id={reply_msg_id} → user_id={user_id}")
+        try:
+            # Отправляем текст если есть
+            if message.text:
+                await bot.send_message(chat_id=user_id, text=f"📬 {message.text}", parse_mode="HTML")
+            # Отправляем медиа если есть
+            if message.photo:
+                await bot.send_photo(chat_id=user_id, photo=message.photo[-1].file_id, caption=message.caption or "")
+            elif message.video:
+                await bot.send_video(chat_id=user_id, video=message.video.file_id, caption=message.caption or "")
+            elif message.voice:
+                await bot.send_voice(chat_id=user_id, voice=message.voice.file_id)
+            elif message.audio:
+                await bot.send_audio(chat_id=user_id, audio=message.audio.file_id)
+            elif message.document:
+                await bot.send_document(chat_id=user_id, document=message.document.file_id)
+            elif message.sticker:
+                await bot.send_sticker(chat_id=user_id, sticker=message.sticker.file_id)
+            
+            await message.answer(f"{EMOJI['check']} Ответ отправлен пользователю {user_id}", parse_mode="HTML")
+            
+            # Удаляем запись и сохраняем
+            del forwarded_messages[reply_msg_id]
+            save_forwarded()
+            return  # Важно: возвращаем, чтобы не сработал silent_ignore
+            
+        except Exception as e:
+            logger.error("Ошибка отправки ответа: " + str(e))
+            await message.answer(f"{EMOJI['error']} Не удалось отправить: {str(e)[:100]}", parse_mode="HTML")
+            return
+    else:
+        # Если message_id не найден — просто игнорируем, пусть сработают другие хендлеры
+        logger.info(f"⚠️ message_id={reply_msg_id} не найден в forwarded_messages")
     # Если это не ответ — обрабатываем как обычную команду или игнорируем
     # (другие хендлеры команд обработают /start, /check и т.д.)
     # Этот хендлер только для ответов на пересланные сообщения
@@ -723,7 +722,15 @@ async def cmd_start(m: Message):
 
 @dp.message()
 async def silent_ignore(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
+    """Обрабатывает все необработанные сообщения"""
+    if message.from_user.id != OWNER_ID_INT:
+        # Для обычных пользователей — показываем обратную связь
+        ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
+        en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
+        await message.answer(ru + "\n\n" + en, parse_mode="HTML")
+        return
+    
+    # Для владельца — показываем справку по неизвестным командам
     await message.answer(EMOJI["info"] + " Неизвестная команда. /help — справка", parse_mode="HTML")
 
 # ================= WEBHOOK SERVER =================
