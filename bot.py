@@ -657,8 +657,11 @@ async def cmd_status(message: Message):
     txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     if log_handler: txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
-    if db: txt += f"\n{EMOJI['db']} БД: <b>MongoDB подключена</b>"
-    else: txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
+    # ← ИСПРАВЛЕНО НИЖЕ:
+    if db is not None:  # ← Было "if db:", стало "if db is not None:"
+        txt += f"\n{EMOJI['db']} БД: <b>MongoDB подключена</b>"
+    else:
+        txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
     await message.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("stop"))
