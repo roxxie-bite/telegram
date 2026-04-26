@@ -73,7 +73,8 @@ known_users = {}
 log_handler = None
 mongo_client = None
 db = None
-
+last_search_results = None  # ← Кэш последних найденных лор (<50)
+last_search_meta = None     # ← Метаданные последнего поиска
 # =============================================
 
 # Настройка логирования
@@ -638,19 +639,40 @@ async def cmd_check(message: Message):
                 all_loras.extend(loras); total_pages += pages
         else:
             all_loras, total_pages = find_all_loras(min_days)
-        if not all_loras: await message.answer(EMOJI["check"] + " Лоры не найдены."); update_settings(user_id, is_checking=False, last_check=time.time()); return
+        if not all_loras: 
+            await message.answer(EMOJI["check"] + " Лоры не найдены.")
+            update_settings(user_id, is_checking=False, last_check=time.time())
+            return
         all_loras.sort(key=lambda x: x["days"], reverse=True)
+        
+        # 📤 Отправляем результаты
         if len(all_loras) > EXPORT_THRESHOLD:
             await message.answer(EMOJI["file"] + f" Лор много (<b>{len(all_loras)}</b>), отправляю файлом...", parse_mode="HTML")
             await send_loras_as_file(message, all_loras, total_pages, min_days, tags)
         else:
             await send_loras_to_chat(message, all_loras, total_pages)
+        
+        # 🗄️ Сохраняем в кэш если лор <50 (для /export) — ВЫНОСИМ ЗА ПРЕДЕЛЫ if/else
+        if len(all_loras) < 50:
+            global last_search_results, last_search_meta
+            last_search_results = all_loras.copy()
+            last_search_meta = {
+                "min_days": min_days,
+                "tags": tags.copy(),
+                "pages": total_pages,
+                "timestamp": datetime.now(timezone(timedelta(hours=3)))
+            }
+            logger.info(f"💾 Сохранено {len(all_loras)} лор в кэш для /export")
+        
+        # ⏱️ Обновляем кулдаун (ОДИН РАЗ)
         update_settings(user_id, last_check=time.time())
         logger.info("✅ Поиск завершён: " + str(len(all_loras)) + " лор")
     except Exception as e:
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
         await message.answer(EMOJI["error"] + " Ошибка: " + str(e)[:100], parse_mode="HTML")
-    finally: update_settings(user_id, is_checking=False)
+    finally: 
+        update_settings(user_id, is_checking=False)
+
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
@@ -695,6 +717,43 @@ async def cmd_tags(message: Message):
     if not settings["tags"]: await message.answer(EMOJI["tag"] + " <b>Теги:</b>\n<i>нет</i>\n\nИспользуй /addtag &lt;тег&gt;", parse_mode="HTML"); return
     txt = EMOJI["tag"] + " <b>Теги:</b>\n" + "\n".join(f"{i}. <code>{t}</code>" for i,t in enumerate(settings["tags"], 1))
     await message.answer(txt, parse_mode="HTML")
+
+@dp.message(Command("export"))
+async def cmd_export(m: Message):
+    """Экспортирует лоры из последнего поиска в файл (только если <50 лор)"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    global last_search_results, last_search_meta
+    
+    if not last_search_results or not last_search_meta:
+        await m.answer(
+            f"{EMOJI['warning']} Нет данных для экспорта.\n"
+            f"Сначала выполните <code>/check</code> с результатом <50 лор.",
+            parse_mode="HTML"
+        )
+        return
+    
+    content = make_export_file(
+        last_search_results,
+        last_search_meta["min_days"],
+        last_search_meta["tags"]
+    )
+    
+    timestamp = last_search_meta["timestamp"].strftime("%Y%m%d_%H%M")
+    filename = f"loonie_export_{timestamp}.txt"
+    file = BufferedInputFile(file=content, filename=filename)
+    
+    caption = f"{PREMIUM_EMOJI['sparkle']} <b>Экспорт лор</b>\n"
+    caption += f"📅 {last_search_meta['timestamp'].strftime('%d.%m %H:%M')} МСК\n"
+    caption += f"📊 Лор: {len(last_search_results)}\n"
+    caption += f"🎯 Порог: >= {last_search_meta['min_days']} дней"
+    if last_search_meta["tags"]:
+        caption += f"\n🏷️ Теги: {', '.join(last_search_meta['tags'])}"
+    caption += f"\n\n<i>Файл готов к использованию с /dellora</i>"
+    
+    await m.answer_document(document=file, caption=caption, parse_mode="HTML")
+    logger.info(f"📤 Экспортировано {len(last_search_results)} лор в файл {filename}")
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
