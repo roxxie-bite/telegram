@@ -728,10 +728,10 @@ async def cmd_export(m: Message):
     
     if not last_search_results or not last_search_meta:
         await m.answer(
-            f"{EMOJI['warning']} Нет данных для экспорта.\n"
-            f"Сначала выполните <code>/check</code> с результатом <50 лор.",
-            parse_mode="HTML"
-        )
+    f"{EMOJI['warning']} Нет данных для экспорта.\n"
+    f"Сначала выполните <code>/check</code> с результатом &lt;50 лор.",
+    parse_mode="HTML"
+    )
         return
     
     content = make_export_file(
