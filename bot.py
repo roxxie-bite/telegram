@@ -727,11 +727,12 @@ async def cmd_export(m: Message):
     global last_search_results, last_search_meta
     
     if not last_search_results or not last_search_meta:
+        # ← ИСПРАВЛЕНО: &lt; вместо <
         await m.answer(
-    f"{EMOJI['warning']} Нет данных для экспорта.\n"
-    f"Сначала выполните <code>/check</code> с результатом &lt;50 лор.",
-    parse_mode="HTML"
-    )
+            f"{EMOJI['warning']} Нет данных для экспорта.\n"
+            f"Сначала выполните <code>/check</code> с результатом &lt;50 лор.",
+            parse_mode="HTML"
+        )
         return
     
     content = make_export_file(
@@ -754,6 +755,7 @@ async def cmd_export(m: Message):
     
     await m.answer_document(document=file, caption=caption, parse_mode="HTML")
     logger.info(f"📤 Экспортировано {len(last_search_results)} лор в файл {filename}")
+
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
