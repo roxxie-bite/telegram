@@ -482,6 +482,9 @@ def mark_user_forwarded(user_id):
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
 async def handle_user_message(message: Message):
+    if message.text and message.text.strip() == "/start":
+        track_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+        return  
     user_id = message.from_user.id
     username = message.from_user.username or None
     full_name = message.from_user.full_name
@@ -791,6 +794,7 @@ async def cmd_stop(message: Message):
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
     if m.from_user.id == OWNER_ID_INT:
+        
         global bot_running
         if not bot_running: bot_running = True; logger.info("🔄 Bot resumed by owner")
         await m.answer(f"{EMOJI['check']} <b>Бот активен!</b>\n/help — команды", parse_mode="HTML")
