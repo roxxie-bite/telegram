@@ -576,6 +576,68 @@ async def cmd_users(m: Message):
         txt += user_line
     await m.answer(txt, parse_mode="HTML")
 
+
+@dp.message(Command("write", "sms"))
+async def cmd_write(m: Message):
+    """Отправляет сообщение пользователю по ID: /write <user_id> <текст>"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split(maxsplit=2)  # split: /write, id, message
+    
+    if len(parts) < 3:
+        await m.answer(
+            f"{EMOJI['warning']} <b>Использование:</b>\n"
+            f"<code>/write &lt;user_id&gt; &lt;сообщение&gt;</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/write 123456789 Привет! Это тестовое сообщение.</code>\n\n"
+            f"<i>Используй /users чтобы узнать ID пользователей</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        target_user_id = int(parts[1])
+        message_text = parts[2]
+        
+        # Проверяем, есть ли пользователь в known_users
+        if target_user_id not in known_users:
+            await m.answer(
+                f"{EMOJI['warning']} Пользователь <code>{target_user_id}</code> не найден в базе.\n"
+                f"<i>Он никогда не писал боту или данные были сброшены</i>",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получаем инфо о пользователе для лога
+        user_info = known_users[target_user_id]
+        username = user_info.get("username", "нет")
+        name = user_info.get("full_name", "Unknown")
+        
+        # Отправляем сообщение пользователю (ТОЛЬКО эмодзи + текст, без заголовка)
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=f"{PREMIUM_EMOJI['sparkle']} {message_text}",
+            parse_mode="HTML"
+        )
+        
+        # Подтверждение владельцу
+        await m.answer(
+            f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n"
+            f"👤 Пользователь: {name} (@{username})\n"
+            f"🆔 ID: <code>{target_user_id}</code>\n"
+            f"📝 Текст: <i>{message_text[:50]}{'...' if len(message_text) > 50 else ''}</i>",
+            parse_mode="HTML"
+        )
+        
+        logger.info(f"📤 Сообщение отправлено пользователю {target_user_id} ({name})")
+        
+    except ValueError:
+        await m.answer(f"{EMOJI['error']} Неверный формат user_id. Используй числа.", parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка отправки сообщения: " + str(e))
+        await m.answer(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
 @dp.message(Command("loglevel"))
 async def cmd_loglevel(m: Message):
     if m.from_user.id != OWNER_ID_INT: return
