@@ -5,6 +5,7 @@ import logging
 import requests
 import time
 import json
+import html
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
@@ -63,6 +64,13 @@ EMOJI = {
     "warning": "⚠️", "error": "❌", "info": "ℹ️", "file": "📄", "stop": "🛑",
     "restart": "🔄", "lock": "🔒", "users": "👥", "log": "📜", "db": "🗄️"
 }
+
+def safe_html_text(text: str) -> str:
+    """
+    Экранирует спецсимволы для безопасной отправки с parse_mode="HTML"
+    Сохраняет эмодзи и обычные символы, но защищает от ошибок парсинга
+    """
+    return html.escape(text)
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
@@ -741,9 +749,10 @@ async def cmd_broadcast(m: Message):
     for user_id, user_data in known_users.items():
         try:
             username = user_data.get("username", "нет")
+            safe_text = safe_html_text(message_text)
             await bot.send_message(
                 chat_id=user_id,
-                text=f"{PREMIUM_EMOJI['star']} {message_text}",
+                text=f"{PREMIUM_EMOJI['star']} {safe_text}",
                 parse_mode="HTML"
             )
             sent_count += 1
