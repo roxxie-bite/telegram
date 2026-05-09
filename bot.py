@@ -433,7 +433,6 @@ def convert_e621_tags(tag_string):
 # ================= ОТСЛЕЖИВАНИЕ ПОЛЬЗОВАТЕЛЕЙ =================
 def track_user(user_id, username=None, full_name=None):
     """Отслеживает пользователя (вызывать при каждом сообщении)"""
-    # Гарантируем, что user_id — это целое число
     if not isinstance(user_id, int):
         if hasattr(user_id, 'from_user'):
             user_id = user_id.from_user.id
@@ -452,7 +451,9 @@ def track_user(user_id, username=None, full_name=None):
             "first_seen": now,
             "last_seen": now,
             "messages_count": 0,
-            "forwarded": False
+            "forwarded": False,
+            "blocked": False,  # ← Добавлено: по умолчанию не заблокирован
+            "unsubscribed": False  # ← Для будущей отписки от рассылок
         }
         logger.info(f"🆕 Новый пользователь: {full_name} (@{username}) [{user_id}]")
     else:
@@ -466,7 +467,6 @@ def track_user(user_id, username=None, full_name=None):
 
 def mark_user_forwarded(user_id):
     """Помечает, что пользователь пересылал сообщения"""
-    # Тоже гарантируем тип
     if not isinstance(user_id, int):
         if hasattr(user_id, 'from_user'):
             user_id = user_id.from_user.id
@@ -482,13 +482,22 @@ def mark_user_forwarded(user_id):
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
 async def handle_user_message(message: Message):
+    user_id = message.from_user.id  # ← Сначала определяем!
+    
+    # ❗ Проверяем, не заблокирован ли пользователь
+    if user_id in known_users and known_users[user_id].get("blocked", False):
+        logger.info(f"🚫 Игнорировано сообщение от заблокированного пользователя {user_id}")
+        return
+    
+    # ❗ Если это команда /start — НЕ пересылаем
     if message.text and message.text.strip() == "/start":
-        track_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-        return  
-    user_id = message.from_user.id
+        track_user(user_id, message.from_user.username, message.from_user.full_name)
+        return
+    
     username = message.from_user.username or None
     full_name = message.from_user.full_name
     track_user(user_id, username, full_name)
+    
     try:
         forwarded = await message.forward(chat_id=OWNER_ID_INT)
         forwarded_messages[forwarded.message_id] = user_id
@@ -637,6 +646,212 @@ async def cmd_write(m: Message):
     except Exception as e:
         logger.error("Ошибка отправки сообщения: " + str(e))
         await m.answer(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(m: Message):
+    """Рассылка сообщения всем пользователям: /broadcast <текст>"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    # Получаем текст сообщения (после команды)
+    parts = m.text.split(maxsplit=1)
+    
+    if len(parts) < 2:
+        await m.answer(
+            f"{EMOJI['warning']} <b>Использование:</b>\n"
+            f"<code>/broadcast &lt;текст сообщения&gt;</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/broadcast Всем привет! Обновление бота уже доступно!</code>\n\n"
+            f"<i>Сообщение будет отправлено всем {len(known_users)} пользователям</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    message_text = parts[1]
+    total_users = len(known_users)
+    
+    if total_users == 0:
+        await m.answer(f"{EMOJI['info']} Пока нет пользователей для рассылки.", parse_mode="HTML")
+        return
+    
+    # Отправляем сообщение с подтверждением
+    await m.answer(
+        f"{EMOJI['info']} <b>Рассылка запущена!</b>\n\n"
+        f"👥 Получателей: <b>{total_users}</b>\n"
+        f"📝 Текст: <i>{message_text[:100]}{'...' if len(message_text) > 100 else ''}</i>\n\n"
+        f"<i>Отчёт будет отправлен после завершения</i>",
+        parse_mode="HTML"
+    )
+    
+    # Счётчики для отчёта
+    sent_count = 0
+    failed_count = 0
+    blocked_count = 0
+    
+    # Отправляем сообщение каждому пользователю
+    for user_id, user_data in known_users.items():
+        try:
+            username = user_data.get("username", "нет")
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"{PREMIUM_EMOJI['star']} {message_text}",
+                parse_mode="HTML"
+            )
+            sent_count += 1
+            logger.info(f"📤 Рассылка: отправлено пользователю {user_id} (@{username})")
+            await asyncio.sleep(0.1)  # Небольшая задержка чтобы не спамить API
+        except Exception as e:
+            error_str = str(e).lower()
+            if "blocked" in error_str or "bot was blocked" in error_str:
+                blocked_count += 1
+                logger.warning(f"🚫 Рассылка: пользователь {user_id} заблокировал бота")
+            else:
+                failed_count += 1
+                logger.error(f"❌ Рассылка: ошибка отправки пользователю {user_id}: {e}")
+    
+    # Отправляем отчёт владельцу
+    report = (
+        f"{EMOJI['check']} <b>Рассылка завершена!</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"✅ Отправлено: <b>{sent_count}</b>\n"
+        f"🚫 Заблокировано: <b>{blocked_count}</b>\n"
+        f"❌ Ошибок: <b>{failed_count}</b>\n"
+        f"👥 Всего: <b>{total_users}</b>\n\n"
+        f"📝 Текст: <i>{message_text[:100]}{'...' if len(message_text) > 100 else ''}</i>"
+    )
+    
+    await m.answer(report, parse_mode="HTML")
+    logger.info(f"📊 Рассылка завершена: {sent_count}/{total_users} успешно")
+
+@dp.message(Command("block"))
+async def cmd_block(m: Message):
+    """Заблокировать пользователя: /block <user_id>"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split()
+    
+    if len(parts) < 2:
+        await m.answer(
+            f"{EMOJI['warning']} <b>Использование:</b>\n"
+            f"<code>/block &lt;user_id&gt;</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/block 123456789</code>\n\n"
+            f"<i>Используй /users чтобы узнать ID</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        target_user_id = int(parts[1])
+        
+        if target_user_id not in known_users:
+            await m.answer(
+                f"{EMOJI['warning']} Пользователь <code>{target_user_id}</code> не найден в базе.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Блокируем пользователя
+        known_users[target_user_id]["blocked"] = True
+        save_users()
+        
+        user_info = known_users[target_user_id]
+        username = user_info.get("username", "нет")
+        name = user_info.get("full_name", "Unknown")
+        
+        await m.answer(
+            f"{EMOJI['check']} <b>Пользователь заблокирован!</b>\n\n"
+            f"👤 {name} (@{username})\n"
+            f"🆔 ID: <code>{target_user_id}</code>\n\n"
+            f"<i>Теперь его сообщения будут игнорироваться</i>",
+            parse_mode="HTML"
+        )
+        logger.info(f"🚫 Заблокирован пользователь {target_user_id} ({name})")
+        
+    except ValueError:
+        await m.answer(f"{EMOJI['error']} Неверный формат user_id. Используй числа.", parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка блокировки: " + str(e))
+        await m.answer(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
+@dp.message(Command("unblock"))
+async def cmd_unblock(m: Message):
+    """Разблокировать пользователя: /unblock <user_id>"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split()
+    
+    if len(parts) < 2:
+        await m.answer(
+            f"{EMOJI['warning']} <b>Использование:</b>\n"
+            f"<code>/unblock &lt;user_id&gt;</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/unblock 123456789</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        target_user_id = int(parts[1])
+        
+        if target_user_id not in known_users:
+            await m.answer(
+                f"{EMOJI['warning']} Пользователь <code>{target_user_id}</code> не найден в базе.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Разблокируем пользователя
+        known_users[target_user_id]["blocked"] = False
+        save_users()
+        
+        user_info = known_users[target_user_id]
+        username = user_info.get("username", "нет")
+        name = user_info.get("full_name", "Unknown")
+        
+        await m.answer(
+            f"{EMOJI['check']} <b>Пользователь разблокирован!</b>\n\n"
+            f"👤 {name} (@{username})\n"
+            f"🆔 ID: <code>{target_user_id}</code>\n\n"
+            f"<i>Теперь его сообщения будут обрабатываться</i>",
+            parse_mode="HTML"
+        )
+        logger.info(f"✅ Разблокирован пользователь {target_user_id} ({name})")
+        
+    except ValueError:
+        await m.answer(f"{EMOJI['error']} Неверный формат user_id. Используй числа.", parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка разблокировки: " + str(e))
+        await m.answer(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
+@dp.message(Command("blocked"))
+async def cmd_blocked(m: Message):
+    """Показать список заблокированных пользователей"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    blocked_users = [
+        (uid, data) for uid, data in known_users.items() 
+        if data.get("blocked", False)
+    ]
+    
+    if not blocked_users:
+        await m.answer(f"{EMOJI['info']} Нет заблокированных пользователей.", parse_mode="HTML")
+        return
+    
+    txt = f"{EMOJI['lock']} <b>Заблокированные ({len(blocked_users)}):</b>\n\n"
+    
+    for user_id, data in blocked_users:
+        name = data.get("full_name", "Unknown")
+        username = data.get("username", "нет")
+        first = datetime.fromtimestamp(data["first_seen"], tz=timezone(timedelta(hours=3))).strftime("%d.%m")
+        txt += f"🆔 <code>{user_id}</code> — {name} (@{username}) | 📅 {first}\n"
+    
+    txt += f"\n<i>Используй /unblock &lt;id&gt; чтобы разблокировать</i>"
+    await m.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("loglevel"))
 async def cmd_loglevel(m: Message):
