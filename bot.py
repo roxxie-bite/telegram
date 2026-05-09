@@ -752,7 +752,7 @@ async def cmd_broadcast(m: Message):
             safe_text = safe_html_text(message_text)
             await bot.send_message(
                 chat_id=user_id,
-                text=f"{PREMIUM_EMOJI['star']} {safe_text}",
+                text=f"💥 {safe_text}",
                 parse_mode="HTML"
             )
             sent_count += 1
