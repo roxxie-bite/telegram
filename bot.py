@@ -279,6 +279,52 @@ def save_users():
     except Exception as e:
         logger.error("❌ Ошибка сохранения users.json: " + str(e))
 
+
+# ================= НАСТРОЙКИ В БД =================
+SETTINGS_COLLECTION = "bot_settings"
+OWNER_SETTINGS_ID = "owner"  # Фиксированный ID для настроек владельца
+
+def load_settings():
+    """Загружает настройки владельца из БД"""
+    global user_settings
+    if db is not None:
+        try:
+            doc = db[SETTINGS_COLLECTION].find_one({"_id": OWNER_SETTINGS_ID})
+            if doc:
+                # Загружаем настройки для владельца
+                owner_id = OWNER_ID_INT
+                user_settings[owner_id] = {
+                    "min_days": doc.get("min_days", DEFAULT_MIN_DAYS),
+                    "tags": doc.get("tags", DEFAULT_TAGS.copy()),
+                    "schedule": doc.get("schedule", []),
+                    "last_check": doc.get("last_check", 0),
+                    "is_checking": doc.get("is_checking", False)
+                }
+                logger.info(f"⚙️ Загружены настройки владельца из MongoDB")
+                return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка загрузки настроек из MongoDB: " + str(e))
+    
+    # Fallback: настройки по умолчанию (уже в памяти)
+    logger.info("⚙️ Используем настройки по умолчанию")
+
+def save_settings(user_id):
+    """Сохраняет настройки пользователя в БД"""
+    if db is not None and user_id == OWNER_ID_INT:
+        try:
+            settings = user_settings.get(user_id, {})
+            db[SETTINGS_COLLECTION].update_one(
+                {"_id": OWNER_SETTINGS_ID},
+                {"$set": {
+                    **settings,
+                    "updated_at": datetime.now(timezone(timedelta(hours=3)))
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            logger.warning("⚠️ Ошибка сохранения настроек в MongoDB: " + str(e))
+
+
 # ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =================
 def get_settings(user_id):
     if user_id not in user_settings:
@@ -292,6 +338,8 @@ def update_settings(user_id, **kwargs):
     settings = get_settings(user_id)
     settings.update(kwargs)
     user_settings[user_id] = settings
+    if db is not None and user_id == OWNER_ID_INT:
+        save_settings(user_id)
 
 def check_cooldown(user_id):
     settings = get_settings(user_id)
@@ -1131,6 +1179,7 @@ async def main():
     mongo_ok = init_mongo()
     load_forwarded()
     load_users()
+    load_settings()
     
     await run_web_server()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
