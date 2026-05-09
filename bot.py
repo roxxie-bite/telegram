@@ -212,11 +212,15 @@ def load_forwarded():
     global forwarded_messages
     if db is not None:
         try:
-            count = 0
+            cutoff = datetime.now(timezone(timedelta(hours=3))) - timedelta(hours=168)
+            result = db.forwarded.delete_many({"timestamp": {"$lt": cutoff.isoformat()}})
+            if result.deleted_count > 0:
+                logger.info(f"🧹 Удалено {result.deleted_count} старых записей forwarded")
+            
+            # Загружаем оставшиеся
             for doc in db.forwarded.find():
                 forwarded_messages[doc["message_id"]] = doc["user_id"]
-                count += 1
-            logger.info(f"📦 Загружено {count} пересланных сообщений из MongoDB")
+            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из MongoDB")
             return
         except Exception as e:
             logger.warning("⚠️ Ошибка загрузки из MongoDB: " + str(e))
@@ -926,6 +930,39 @@ async def cmd_loglevel(m: Message):
     if log_handler: log_handler.set_level(level_map[level_name])
     await m.answer(f"{EMOJI['check']} Уровень логов изменён на: <b>{level_name}</b>", parse_mode="HTML")
     logger.info(f"📊 Уровень логов изменён пользователем на: {level_name}")
+
+@dp.message(Command("dbstats"))
+async def cmd_dbstats(m: Message):
+    """Показывает статистику использования MongoDB"""
+    if m.from_user.id != OWNER_ID_INT or db is None:
+        return
+    
+    try:
+        stats = db.command("dbstats")
+        users_count = db.users.count_documents({})
+        forwarded_count = db.forwarded.count_documents({})
+        settings_count = db[SETTINGS_COLLECTION].count_documents({})
+        
+        # Конвертируем байты в читаемый формат
+        def format_size(bytes_val):
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if bytes_val < 1024:
+                    return f"{bytes_val:.1f} {unit}"
+                bytes_val /= 1024
+            return f"{bytes_val:.1f} TB"
+        
+        txt = f"{EMOJI['db']} <b>Статистика MongoDB:</b>\n\n"
+        txt += f"💾 Всего занято: <b>{format_size(stats['storageSize'])}</b>\n"
+        txt += f"📊 Всего документов: <b>{stats['objects']}</b>\n"
+        txt += f"👥 Пользователей: <b>{users_count}</b>\n"
+        txt += f"📬 Forwarded: <b>{forwarded_count}</b>\n"
+        txt += f"⚙️ Настроек: <b>{settings_count}</b>\n\n"
+        txt += f"<i>Лимит тарифа: 512 MB</i>"
+        
+        await m.answer(txt, parse_mode="HTML")
+    except Exception as e:
+        await m.answer(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
 
 @dp.message(Command("convert"))
 async def cmd_convert_start(m: Message):
