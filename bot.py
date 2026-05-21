@@ -54,7 +54,6 @@ MUSIC_STATUS_CHAT_ID = os.getenv("MUSIC_STATUS_CHAT_ID")
 MUSIC_CHECK_INTERVAL = int(os.getenv("MUSIC_CHECK_INTERVAL", "20")) if os.getenv("MUSIC_CHECK_INTERVAL") else 20
 music_tracking_enabled = False
 music_task = None
-ym_client = None
 current_music_message_id = None
 last_track_id = None
 music_message_timestamp = None
@@ -626,80 +625,51 @@ async def cmd_test_music(m: Message):
             f"Проверь логи сервера и убедись, что токен Яндекс.Музыки корректен.",
             parse_mode="HTML"
         )
-# ================= YANDEX MUSIC (Ynison API)
-def init_yandex_music():
-    global ym_client
-    if not YANDEX_MUSIC_AVAILABLE:
-        logger.warning("⚠️ yandex-music не установлен")
-        return False
-    if not YANDEX_MUSIC_TOKEN:
-        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
-        return False
-    try:
-        ym_client = Client(YANDEX_MUSIC_TOKEN).init()
-        logger.info("✅ Яндекс.Музыка подключена")
-        return True
-    except Exception as e:
-        logger.error("❌ Ошибка подключения: " + str(e))
-        return False
+
+# ================= YANDEX MUSIC (Ynison API) =================
 
 def get_current_track():
-    """Получает текущий трек. Работает с yandex-music 2.3.0 - 3.x.x"""
-    global ym_client
-    if not ym_client:
+    """Получает текущий трек через Ynison Simple API (yandex-music>=3.0.0)"""
+    global YANDEX_MUSIC_TOKEN
+    
+    if not YANDEX_MUSIC_TOKEN:
+        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
         return None
 
     try:
-        # 1. Диагностика версии (для логов)
-        import yandex_music
-        logger.debug(f"📦 Версия yandex-music: {getattr(yandex_music, '__version__', 'unknown')}")
-
-        # 2. Получаем очередь (адаптивно под версии)
-        queue = None
-        queue_id = None
-
-        # Способ A: v2.3+ (через контекст)
-        if hasattr(ym_client, 'get_queue_context'):
-            try:
-                ctx = ym_client.get_queue_context()
-                queue_id = getattr(ctx, 'queue_id', None) or getattr(ctx, 'id', None)
-                if queue_id and hasattr(ym_client, 'get_queue'):
-                    queue = ym_client.get_queue(queue_id)
-            except Exception as e:
-                logger.debug(f"get_queue_context не сработал: {e}")
-
-        # Способ B: Старые версии (прямой вызов)
-        if not queue and hasattr(ym_client, 'get_queue'):
-            try:
-                queue = ym_client.get_queue()
-            except Exception as e:
-                logger.debug(f"get_queue() без ID не сработал: {e}")
-
-        # Если очередь не получена
-        if not queue or not getattr(queue, 'tracks', None):
+        from yandex_music.ynison import simple
+        track = simple.get_current_track(YANDEX_MUSIC_TOKEN)
+        
+        if not track:
+            logger.debug("🎵 Ничего не играет (Ynison вернул None)")
             return None
 
-        # 3. Извлекаем объект трека
-        first_item = queue.tracks[0]
-        track_obj = getattr(first_item, 'track', first_item)
-        if not track_obj:
-            return None
-
-        # 4. Парсим данные безопасно
-        title = getattr(track_obj, 'title', 'Unknown Title')
-        artists_attr = getattr(track_obj, 'artists', [])
-        artists = ", ".join([a.name for a in artists_attr]) if artists_attr else "Unknown Artist"
+        title = getattr(track, 'title', getattr(track, 'name', 'Unknown Title'))
+        
+        artists_attr = getattr(track, 'artists', [])
+        if artists_attr:
+            if isinstance(artists_attr, list):
+                artists = ", ".join([getattr(a, 'name', str(a)) for a in artists_attr])
+            else:
+                artists = str(artists_attr)
+        else:
+            artists = "Unknown Artist"
 
         cover_url = None
-        cover = getattr(track_obj, 'cover', None)
+        cover = getattr(track, 'cover', None)
         if cover:
             if hasattr(cover, 'get_url'):
                 cover_url = cover.get_url('200x200')
-            elif getattr(cover, 'uri', None):
+            elif isinstance(cover, str):
+                if cover.startswith('http'):
+                    cover_url = cover.replace('%%', '200x200')
+                else:
+                    cover_url = f"https://{cover.replace('%%', '200x200')}"
+            elif hasattr(cover, 'uri'):
                 uri = cover.uri
                 cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
 
-        track_id = getattr(track_obj, 'id', getattr(track_obj, 'track_id', 0))
+        track_id = getattr(track, 'id', getattr(track, 'track_id', 0))
         if hasattr(track_id, '__iter__') and not isinstance(track_id, str):
             track_id = ":".join(map(str, track_id)) if len(track_id) > 1 else str(track_id[0])
 
@@ -711,20 +681,14 @@ def get_current_track():
             "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
         }
 
-    except ImportError as ie:
-        logger.error(f"❌ Ошибка импорта: {ie}. Проверь установку пакета.")
+    except ImportError:
+        logger.error("❌ Модуль yandex_music.ynison не найден. Требуется yandex-music>=3.0.0")
         return None
     except Exception as e:
-        # Если всё упало, выведем доступные методы для точной отладки
-        try:
-            available = [m for m in dir(ym_client) if 'queue' in m.lower() and not m.startswith('_')]
-            logger.error(f"💥 Ошибка получения трека. Доступные методы с 'queue': {available}")
-        except:
-            pass
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"💥 Ошибка получения трека через Ynison: {e}")
         return None
 
-# ⚠️ ВАЖНО: update_music_status должна быть ОБЪЯВЛЕНА ПЕРЕД start_music_tracking!
+# ⚠️ update_music_status должна быть ОБЪЯВЛЕНА ПЕРЕД start_music_tracking!
 async def update_music_status():
     global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
     try:
@@ -733,6 +697,7 @@ async def update_music_status():
         logger.error("❌ MUSIC_STATUS_CHAT_ID должен быть числом")
         return
     logger.info(f"🎵 Цикл запущен. Чат: {target_chat_id}")
+    
     while music_tracking_enabled:
         try:
             track = get_current_track()
@@ -740,7 +705,7 @@ async def update_music_status():
                 await asyncio.sleep(MUSIC_CHECK_INTERVAL)
                 continue
             if track["id"] != last_track_id or current_music_message_id is None:
-                logger.info(f"🔄 Трек: {track['title']}")
+                logger.info(f"🔄 Трек: {track['title']} — {track['artists']}")
                 now = time.time()
                 is_old = music_message_timestamp and (now - music_message_timestamp > 172800)
                 try:
@@ -753,8 +718,10 @@ async def update_music_status():
                             await bot.edit_message_caption(chat_id=target_chat_id, message_id=current_music_message_id, caption=track["text"], parse_mode="HTML")
                     else:
                         if current_music_message_id:
-                            try: await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
-                            except: pass
+                            try:
+                                await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
+                            except:
+                                pass
                         if track["cover_url"]:
                             msg = await bot.send_photo(chat_id=target_chat_id, photo=track["cover_url"], caption=track["text"], parse_mode="HTML")
                         else:
@@ -773,15 +740,17 @@ async def update_music_status():
     logger.info("⏹️ Цикл остановлен")
 
 async def start_music_tracking():
-    global music_tracking_enabled, music_task
+    global music_tracking_enabled, music_task, YANDEX_MUSIC_TOKEN
     if music_tracking_enabled:
-        logger.warning("⚠️ Уже запущено")
+        logger.warning("⚠️ Отслеживание музыки уже запущено")
         return False
-    if not init_yandex_music():
+    # ✅ ПРОВЕРКА ТОКЕНА (вместо init_yandex_music)
+    if not YANDEX_MUSIC_TOKEN:
+        logger.error("❌ YANDEX_MUSIC_TOKEN не задан")
         return False
     music_tracking_enabled = True
-    music_task = asyncio.create_task(update_music_status())  # ← Теперь функция уже определена выше!
-    logger.info("🎵 Отслеживание запущено")
+    music_task = asyncio.create_task(update_music_status())
+    logger.info("🎵 Отслеживание музыки запущено")
     return True
 
 async def stop_music_tracking():
@@ -791,11 +760,16 @@ async def stop_music_tracking():
     music_tracking_enabled = False
     if music_task:
         music_task.cancel()
-        try: await music_task
-        except asyncio.CancelledError: pass
-    logger.info("⏹️ Отслеживание остановлено")
+        try:
+            await music_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("⏹️ Отслеживание музыки остановлено")
 
 # ================= КОНЕЦ БЛОКА МУЗЫКИ =================
+
+
+
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
 async def handle_user_message(message: Message):
