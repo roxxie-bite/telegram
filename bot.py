@@ -561,48 +561,36 @@ def mark_user_forwarded(user_id):
 
 
 # ================= YANDEX MUSIC FUNCTIONS =================
+# ================= YANDEX MUSIC FUNCTIONS (Ynison API v3.0+) =================
+
 def init_yandex_music():
-    """Инициализирует клиент Яндекс.Музыки"""
+    """Инициализирует клиент Яндекс.Музыки (для совместимости)"""
     global ym_client
     if not YANDEX_MUSIC_AVAILABLE:
         logger.warning("⚠️ Библиотека yandex-music не установлена")
         return False
-    
     if not YANDEX_MUSIC_TOKEN:
         logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
         return False
-    
     try:
         ym_client = Client(YANDEX_MUSIC_TOKEN).init()
-        logger.info("✅ Яндекс.Музыка подключена")
+        logger.info("✅ Яндекс.Музыка клиент инициализирован")
         return True
     except Exception as e:
-        logger.error("❌ Ошибка подключения к Яндекс.Музыке: " + str(e))
+        logger.error("❌ Ошибка инициализации Яндекс.Музыки: " + str(e))
         return False
 
 def get_current_track():
-    """Получает текущий трек через Ynison API (работает в yandex-music>=3.0.0)"""
-    global ym_client, YANDEX_MUSIC_TOKEN
-    
+    """Получает текущий трек через Ynison API (yandex-music>=3.0.0)"""
+    global YANDEX_MUSIC_TOKEN
     if not YANDEX_MUSIC_TOKEN:
-        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
         return None
-
     try:
-        # Импортируем Ynison только при вызове (чтобы не ломать, если библиотека старая)
         from yandex_music.ynison import simple
-        
-        # Получаем трек через Ynison (просто и надёжно)
         track = simple.get_current_track(YANDEX_MUSIC_TOKEN)
-        
         if not track:
-            logger.debug("🎵 Ничего не играет или трек не определён")
             return None
-
-        # Извлекаем данные
         title = getattr(track, 'title', getattr(track, 'name', 'Unknown Title'))
-        
-        # Артисты могут быть списком или строкой
         artists_attr = getattr(track, 'artists', None)
         if artists_attr:
             if isinstance(artists_attr, list):
@@ -611,13 +599,10 @@ def get_current_track():
                 artists = str(artists_attr)
         else:
             artists = "Unknown Artist"
-
-        # Обложка
         cover_url = None
         cover = getattr(track, 'cover', None) or getattr(track, 'cover_uri', None)
         if cover:
             if isinstance(cover, str):
-                # Если это уже URL или URI
                 if cover.startswith('http'):
                     cover_url = cover.replace('%%', '200x200')
                 else:
@@ -627,13 +612,9 @@ def get_current_track():
             elif hasattr(cover, 'uri'):
                 uri = cover.uri
                 cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
-
-        # Уникальный идентификатор трека
         track_id = getattr(track, 'id', getattr(track, 'track_id', 0))
         if hasattr(track_id, '__iter__') and not isinstance(track_id, str):
-            # Если ID — это кортеж (альбом:трек), объединяем
             track_id = ":".join(map(str, track_id)) if len(track_id) > 1 else str(track_id[0])
-
         return {
             "id": str(track_id),
             "title": title,
@@ -641,25 +622,79 @@ def get_current_track():
             "cover_url": cover_url,
             "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
         }
-
     except ImportError:
         logger.error("❌ Модуль yandex_music.ynison не найден. Требуется yandex-music>=3.0.0")
         return None
     except Exception as e:
         logger.error(f"Ошибка получения трека через Ynison: {e}")
         return None
-        
+
+async def update_music_status():
+    """Основной цикл обновления статуса музыки в канале"""
+    global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
+    
+    try:
+        target_chat_id = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else OWNER_ID_INT
+    except (ValueError, TypeError):
+        logger.error("❌ MUSIC_STATUS_CHAT_ID должен быть числом (например: -1001234567890)")
+        return
+
+    logger.info(f"🎵 Цикл музыки запущен. Целевой чат: {target_chat_id}")
+    
+    while music_tracking_enabled:
+        try:
+            track = get_current_track()
+            if not track:
+                await asyncio.sleep(MUSIC_CHECK_INTERVAL)
+                continue
+            
+            if track["id"] != last_track_id or current_music_message_id is None:
+                logger.info(f"🔄 Новый трек: {track['title']} — {track['artists']}")
+                now = time.time()
+                is_message_old = music_message_timestamp and (now - music_message_timestamp > 172800)
+                
+                try:
+                    if current_music_message_id and not is_message_old:
+                        if track["cover_url"]:
+                            from aiogram.types import InputMediaPhoto
+                            media = InputMediaPhoto(media=track["cover_url"], caption=track["text"], parse_mode="HTML")
+                            await bot.edit_message_media(chat_id=target_chat_id, message_id=current_music_message_id, media=media)
+                        else:
+                            await bot.edit_message_caption(chat_id=target_chat_id, message_id=current_music_message_id, caption=track["text"], parse_mode="HTML")
+                        logger.debug("✅ Сообщение отредактировано")
+                    else:
+                        if current_music_message_id:
+                            try:
+                                await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
+                            except:
+                                pass
+                        if track["cover_url"]:
+                            msg = await bot.send_photo(chat_id=target_chat_id, photo=track["cover_url"], caption=track["text"], parse_mode="HTML")
+                        else:
+                            msg = await bot.send_message(chat_id=target_chat_id, text=track["text"], parse_mode="HTML")
+                        current_music_message_id = msg.message_id
+                        music_message_timestamp = now
+                        logger.info(f"✅ Новое сообщение отправлено. ID: {current_music_message_id}")
+                    last_track_id = track["id"]
+                except Exception as send_err:
+                    logger.error(f"❌ Ошибка отправки/редактирования: {send_err}")
+                    current_music_message_id = None
+                    music_message_timestamp = None
+            await asyncio.sleep(MUSIC_CHECK_INTERVAL)
+        except Exception as e:
+            logger.error(f"💥 Ошибка в цикле музыки: {e}", exc_info=True)
+            await asyncio.sleep(MUSIC_CHECK_INTERVAL)
+    
+    logger.info("⏹️ Цикл музыки остановлен")
+
 async def start_music_tracking():
     """Запускает отслеживание музыки"""
     global music_tracking_enabled, music_task
-    
     if music_tracking_enabled:
         logger.warning("⚠️ Отслеживание музыки уже запущено")
         return False
-    
     if not init_yandex_music():
         return False
-    
     music_tracking_enabled = True
     music_task = asyncio.create_task(update_music_status())
     logger.info("🎵 Отслеживание музыки запущено")
@@ -668,10 +703,8 @@ async def start_music_tracking():
 async def stop_music_tracking():
     """Останавливает отслеживание музыки"""
     global music_tracking_enabled, music_task
-    
     if not music_tracking_enabled:
         return
-    
     music_tracking_enabled = False
     if music_task:
         music_task.cancel()
@@ -679,77 +712,7 @@ async def stop_music_tracking():
             await music_task
         except asyncio.CancelledError:
             pass
-    
     logger.info("⏹️ Отслеживание музыки остановлено")
-
-@dp.message(Command("testmusic"))
-async def cmd_test_music(m: Message):
-    if m.from_user.id != OWNER_ID_INT:
-        return
-
-    await m.answer("🔍 <b>Запускаю диагностику модуля Яндекс.Музыки...</b>", parse_mode="HTML")
-    
-    diagnostics = []
-    
-    try:
-        # 1. Проверяем инициализацию клиента
-        if not ym_client:
-            diagnostics.append("⚠️ Клиент не был запущен. Инициализирую...")
-            if not init_yandex_music():
-                await m.answer("❌ <b>Ошибка:</b> Не удалось инициализировать клиент Яндекс.Музыки.\nПроверь переменную `YANDEX_MUSIC_TOKEN` и логи сервера.", parse_mode="HTML")
-                return
-            diagnostics.append("✅ Клиент успешно подключён к API")
-        else:
-            diagnostics.append("✅ Клиент уже активен")
-
-        # 2. Пытаемся получить текущий трек
-        track = get_current_track()
-        if not track:
-            diagnostics.append("⚠️ Трек не найден (возможно, ничего не играет или очередь ещё не синхронизирована)")
-            await m.answer(
-                "ℹ️ <b>Результат:</b> Сейчас трек не определяется.\n\n" +
-                "\n".join(diagnostics),
-                parse_mode="HTML"
-            )
-            return
-
-        diagnostics.append(f"✅ Трек получен: {track['title']} — {track['artists']}")
-        diagnostics.append(f"🆔 ID трека: {track['id']}")
-        diagnostics.append(f"🖼️ Обложка: {'Найдена' if track['cover_url'] else 'Отсутствует'}")
-
-        # 3. Отправляем тестовое сообщение владельцу в ЛС
-        target_chat = OWNER_ID_INT
-        caption = f"{track['text']}\n\n📝 <b>Диагностика:</b>\n" + "\n".join(diagnostics)
-        
-        if track["cover_url"]:
-            await bot.send_photo(
-                chat_id=target_chat,
-                photo=track["cover_url"],
-                caption=caption,
-                parse_mode="HTML"
-            )
-        else:
-            await bot.send_message(
-                chat_id=target_chat,
-                text=caption,
-                parse_mode="HTML"
-            )
-            
-        diagnostics.append("✅ Сообщение успешно отправлено в ЛС владельцу")
-        
-        await m.answer(
-            "✅ <b>Тест пройден!</b> Проверь личные сообщения от бота.\n\n" + "\n".join(diagnostics),
-            parse_mode="HTML"
-        )
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"❌ Ошибка тестирования музыки: {error_msg}")
-        await m.answer(
-            f"❌ <b>Критическая ошибка при тесте:</b>\n<code>{error_msg[:300]}</code>\n\n"
-            f"Проверь логи сервера и убедись, что токен Яндекс.Музыки корректен.",
-            parse_mode="HTML"
-        )
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
