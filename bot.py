@@ -13,12 +13,14 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
 
+# ================= YANDEX MUSIC INTEGRATION =================
 try:
     from yandex_music import Client
     YANDEX_MUSIC_AVAILABLE = True
 except ImportError:
     YANDEX_MUSIC_AVAILABLE = False
-    logger.warning("⚠️ yandex-music не установлен — функция отслеживания музыки недоступна")
+    print("⚠️ WARNING: yandex-music не установлен — функция отслеживания музыки недоступна")
+    print("   Чтобы исправить: добавь 'yandex-music>=2.3.0' в requirements.txt")
 
 # Пытаемся импортировать pymongo
 try:
