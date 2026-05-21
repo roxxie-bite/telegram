@@ -587,44 +587,37 @@ def get_current_track():
 
     try:
         queue = None
-        queue_methods = [
-            'get_queue', 'queue', 'get_current_queue', 
-            'get_queue_context', 'get_queue_tracks', 'queue_context'
-        ]
+        # Список всех возможных названий метода очереди в разных версиях библиотеки
+        queue_methods = ['get_queue', 'queue', 'get_current_queue', 'queue_context', 'get_queue_context']
 
-        # 1. Ищем рабочий метод очереди
         for method_name in queue_methods:
             if hasattr(ym_client, method_name):
                 try:
                     method = getattr(ym_client, method_name)
                     result = method()
                     
-                    # Некоторые методы возвращают ID, а не объект очереди
                     if result and hasattr(result, 'queue_id') and hasattr(ym_client, 'get_queue'):
                         queue = ym_client.get_queue(result.queue_id)
                     elif result and hasattr(result, 'tracks'):
                         queue = result
                     elif result and isinstance(result, list):
                         queue = type('Queue', (), {'tracks': result})()
-                    
+                        
                     if queue:
                         logger.info(f"✅ Использован метод очереди: {method_name}")
                         break
                 except Exception as e:
                     logger.debug(f"Метод {method_name} не сработал: {e}")
 
-        # 2. Если очередь не найдена → выводим доступные методы для отладки
         if not queue:
             available = [m for m in dir(ym_client) if 'queue' in m.lower() or 'track' in m.lower() and not m.startswith('_')]
-            logger.error(f"❌ Не удалось получить очередь. Доступные методы в Client: {available}")
+            logger.error(f"❌ Не удалось получить очередь. Доступные методы: {available}")
             return None
 
-        # 3. Извлекаем треки (структура отличается в версиях)
         tracks = getattr(queue, 'tracks', []) or getattr(queue, 'items', [])
         if not tracks:
             return None
 
-        # Берём первый трек (обычно текущий)
         first_item = tracks[0]
         track_obj = getattr(first_item, 'track', first_item)
         if not track_obj:
@@ -634,7 +627,6 @@ def get_current_track():
         artists_list = getattr(track_obj, 'artists', [])
         artists = ", ".join([a.name for a in artists_list]) if artists_list else "Unknown Artist"
 
-        # 4. Обложка
         cover_url = None
         cover = getattr(track_obj, 'cover', None)
         if cover:
@@ -654,133 +646,8 @@ def get_current_track():
 
     except Exception as e:
         logger.error(f"Ошибка получения трека: {e}")
-        return None    global ym_client
-    if not ym_client:
-        return None
-
-    try:
-        # 1. Получаем ID текущей очереди (в v2.x+ это делается через контекст)
-        ctx = ym_client.queue_context()
-        queue_id = getattr(ctx, 'queue_id', None) or getattr(ctx, 'id', None)
-        if not queue_id:
-            return None
-
-        # 2. Получаем саму очередь (метод queue() вместо get_queue())
-        queue = None
-        if hasattr(ym_client, 'queue'):
-            queue = ym_client.queue(queue_id)
-        elif hasattr(ym_client, 'get_queue'): # фоллбэк для старых версий
-            queue = ym_client.get_queue(queue_id)
-        else:
-            logger.warning("⚠️ В библиотеке нет методов queue/get_queue")
-            return None
-
-        if not queue or not getattr(queue, 'tracks', None):
-            return None
-
-        # 3. Извлекаем объект трека (структура может отличаться в разных версиях либы)
-        first_item = queue.tracks[0]
-        track_obj = getattr(first_item, 'track', first_item)
-        if not track_obj:
-            return None
-
-        title = getattr(track_obj, 'title', 'Unknown Title')
-        artists_list = getattr(track_obj, 'artists', [])
-        artists = ", ".join([a.name for a in artists_list]) if artists_list else "Unknown Artist"
-
-        cover_url = None
-        cover = getattr(track_obj, 'cover', None)
-        if cover:
-            if hasattr(cover, 'get_url'):
-                cover_url = cover.get_url('200x200')
-            elif getattr(cover, 'uri', None):
-                uri = cover.uri
-                cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
-
-        return {
-            "id": getattr(track_obj, 'id', 0),
-            "title": title,
-            "artists": artists,
-            "cover_url": cover_url,
-            "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
-        }
-    except Exception as e:
-        logger.error(f"Ошибка получения трека: {e}")
         return None
         
-async def update_music_status():
-    global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
-    
-    # Безопасное получение ID чата
-    try:
-        target_chat_id = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else OWNER_ID_INT
-    except ValueError:
-        logger.error("❌ MUSIC_STATUS_CHAT_ID должен быть числом (например: -1001234567890)")
-        return
-
-    logger.info(f"🎵 Цикл музыки запущен. Целевой чат: {target_chat_id}")
-    
-    while music_tracking_enabled:
-        try:
-            track = get_current_track()
-            
-            if not track:
-                logger.debug("🎵 Трек не найден (пауза, инкогнито или задержка API)")
-                await asyncio.sleep(MUSIC_CHECK_INTERVAL)
-                continue
-            
-            logger.info(f"🎶 API вернул трек: {track['title']} — {track['artists']}")
-            
-            # Отправляем/обновляем, если трек сменился ИЛИ сообщения ещё нет
-            if track["id"] != last_track_id or current_music_message_id is None:
-                logger.info("🔄 Смена трека или первый запуск. Готовлю сообщение...")
-                now = time.time()
-                is_message_old = music_message_timestamp and (now - music_message_timestamp > 172800)
-                
-                try:
-                    if current_music_message_id and not is_message_old:
-                        # РЕДАКТИРОВАНИЕ (aiogram 3.x синтаксис)
-                        if track["cover_url"]:
-                            media = InputMediaPhoto(media=track["cover_url"], caption=track["text"], parse_mode="HTML")
-                            await bot.edit_message_media(chat_id=target_chat_id, message_id=current_music_message_id, media=media)
-                        else:
-                            await bot.edit_message_caption(chat_id=target_chat_id, message_id=current_music_message_id, caption=track["text"], parse_mode="HTML")
-                        logger.info("✅ Сообщение успешно отредактировано")
-                    else:
-                        # СОЗДАНИЕ НОВОГО
-                        if current_music_message_id:
-                            try:
-                                await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
-                                logger.info("🗑️ Старое сообщение удалено")
-                            except Exception as del_err:
-                                logger.warning(f"⚠️ Не удалось удалить старое: {del_err}")
-                        
-                        # Отправка
-                        if track["cover_url"]:
-                            msg = await bot.send_photo(chat_id=target_chat_id, photo=track["cover_url"], caption=track["text"], parse_mode="HTML")
-                        else:
-                            msg = await bot.send_message(chat_id=target_chat_id, text=track["text"], parse_mode="HTML")
-                            
-                        current_music_message_id = msg.message_id
-                        music_message_timestamp = now
-                        logger.info(f"✅ Новое сообщение отправлено. ID: {current_music_message_id}")
-                    
-                    last_track_id = track["id"]
-                    
-                except Exception as send_err:
-                    logger.error(f"❌ Ошибка отправки/редактирования в чат {target_chat_id}: {send_err}")
-                    current_music_message_id = None
-                    music_message_timestamp = None
-            else:
-                logger.debug("⏭️ Трек не сменился, пропускаем")
-                
-        except Exception as e:
-            logger.error(f"💥 Критическая ошибка в цикле музыки: {e}", exc_info=True)
-        
-        await asyncio.sleep(MUSIC_CHECK_INTERVAL)
-    
-    logger.info("⏹️ Отслеживание музыки остановлено")
-
 async def start_music_tracking():
     """Запускает отслеживание музыки"""
     global music_tracking_enabled, music_task
