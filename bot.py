@@ -586,51 +586,53 @@ def get_current_track():
         return None
 
     try:
+        # 1. Получаем ID текущей очереди (в v2.x+ это делается через контекст)
+        ctx = ym_client.queue_context()
+        queue_id = getattr(ctx, 'queue_id', None) or getattr(ctx, 'id', None)
+        if not queue_id:
+            return None
+
+        # 2. Получаем саму очередь (метод queue() вместо get_queue())
         queue = None
-        
-        # 1. Пробуем современный способ (через контекст очереди)
-        if hasattr(ym_client, 'get_queue_context'):
-            try:
-                ctx = ym_client.get_queue_context()
-                queue_id = getattr(ctx, 'queue_id', None)
-                if queue_id and hasattr(ym_client, 'get_queue'):
-                    queue = ym_client.get_queue(queue_id)
-            except Exception:
-                pass
+        if hasattr(ym_client, 'queue'):
+            queue = ym_client.queue(queue_id)
+        elif hasattr(ym_client, 'get_queue'): # фоллбэк для старых версий
+            queue = ym_client.get_queue(queue_id)
+        else:
+            logger.warning("⚠️ В библиотеке нет методов queue/get_queue")
+            return None
 
-        # 2. Фоллбэк: прямой вызов (для старых версий)
-        if not queue and hasattr(ym_client, 'get_queue'):
-            try:
-                queue = ym_client.get_queue()
-            except Exception:
-                pass
-
-        # Если очередь не получена или пуста
         if not queue or not getattr(queue, 'tracks', None):
             return None
 
-        # Ищем текущий активный трек в очереди
-        for track_info in queue.tracks:
-            track = getattr(track_info, 'track', None)
-            if track and hasattr(track, 'title'):
-                title = track.title
-                artists = ", ".join([a.name for a in (track.artists or [])]) if track.artists else "Unknown Artist"
+        # 3. Извлекаем объект трека (структура может отличаться в разных версиях либы)
+        first_item = queue.tracks[0]
+        track_obj = getattr(first_item, 'track', first_item)
+        if not track_obj:
+            return None
 
-                cover_url = None
-                if getattr(track, 'cover', None):
-                    if hasattr(track.cover, 'get_url'):
-                        cover_url = track.cover.get_url('200x200')
-                    elif getattr(track.cover, 'uri', None):
-                        uri = track.cover.uri
-                        cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
+        title = getattr(track_obj, 'title', 'Unknown Title')
+        artists_list = getattr(track_obj, 'artists', [])
+        artists = ", ".join([a.name for a in artists_list]) if artists_list else "Unknown Artist"
 
-                return {
-                    "id": track.id,
-                    "title": title,
-                    "artists": artists,
-                    "cover_url": cover_url,
-                    "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
-                }
+        cover_url = None
+        cover = getattr(track_obj, 'cover', None)
+        if cover:
+            if hasattr(cover, 'get_url'):
+                cover_url = cover.get_url('200x200')
+            elif getattr(cover, 'uri', None):
+                uri = cover.uri
+                cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
+
+        return {
+            "id": getattr(track_obj, 'id', 0),
+            "title": title,
+            "artists": artists,
+            "cover_url": cover_url,
+            "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения трека: {e}")
         return None
         
     except Exception as e:
