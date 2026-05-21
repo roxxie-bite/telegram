@@ -586,6 +586,79 @@ def get_current_track():
         return None
 
     try:
+        queue = None
+        queue_methods = [
+            'get_queue', 'queue', 'get_current_queue', 
+            'get_queue_context', 'get_queue_tracks', 'queue_context'
+        ]
+
+        # 1. Ищем рабочий метод очереди
+        for method_name in queue_methods:
+            if hasattr(ym_client, method_name):
+                try:
+                    method = getattr(ym_client, method_name)
+                    result = method()
+                    
+                    # Некоторые методы возвращают ID, а не объект очереди
+                    if result and hasattr(result, 'queue_id') and hasattr(ym_client, 'get_queue'):
+                        queue = ym_client.get_queue(result.queue_id)
+                    elif result and hasattr(result, 'tracks'):
+                        queue = result
+                    elif result and isinstance(result, list):
+                        queue = type('Queue', (), {'tracks': result})()
+                    
+                    if queue:
+                        logger.info(f"✅ Использован метод очереди: {method_name}")
+                        break
+                except Exception as e:
+                    logger.debug(f"Метод {method_name} не сработал: {e}")
+
+        # 2. Если очередь не найдена → выводим доступные методы для отладки
+        if not queue:
+            available = [m for m in dir(ym_client) if 'queue' in m.lower() or 'track' in m.lower() and not m.startswith('_')]
+            logger.error(f"❌ Не удалось получить очередь. Доступные методы в Client: {available}")
+            return None
+
+        # 3. Извлекаем треки (структура отличается в версиях)
+        tracks = getattr(queue, 'tracks', []) or getattr(queue, 'items', [])
+        if not tracks:
+            return None
+
+        # Берём первый трек (обычно текущий)
+        first_item = tracks[0]
+        track_obj = getattr(first_item, 'track', first_item)
+        if not track_obj:
+            return None
+
+        title = getattr(track_obj, 'title', 'Unknown Title')
+        artists_list = getattr(track_obj, 'artists', [])
+        artists = ", ".join([a.name for a in artists_list]) if artists_list else "Unknown Artist"
+
+        # 4. Обложка
+        cover_url = None
+        cover = getattr(track_obj, 'cover', None)
+        if cover:
+            if hasattr(cover, 'get_url'):
+                cover_url = cover.get_url('200x200')
+            elif getattr(cover, 'uri', None):
+                uri = cover.uri
+                cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
+
+        return {
+            "id": getattr(track_obj, 'id', 0),
+            "title": title,
+            "artists": artists,
+            "cover_url": cover_url,
+            "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка получения трека: {e}")
+        return None    global ym_client
+    if not ym_client:
+        return None
+
+    try:
         # 1. Получаем ID текущей очереди (в v2.x+ это делается через контекст)
         ctx = ym_client.queue_context()
         queue_id = getattr(ctx, 'queue_id', None) or getattr(ctx, 'id', None)
