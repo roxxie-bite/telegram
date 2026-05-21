@@ -5,3 +5,4 @@ aiohttp>=3.9.0
 pymongo>=4.6.0
 dnspython>=2.4.0
 certifi>=2023.0.0
+yandex-music>=2.3.0
