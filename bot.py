@@ -636,85 +636,73 @@ def get_current_track():
         return None
         
 async def update_music_status():
-    """Основной цикл обновления статуса музыки"""
     global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
     
-    target_chat_id = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else OWNER_ID_INT
-    
-    logger.info("🎵 Запущено отслеживание музыки...")
+    # Безопасное получение ID чата
+    try:
+        target_chat_id = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else OWNER_ID_INT
+    except ValueError:
+        logger.error("❌ MUSIC_STATUS_CHAT_ID должен быть числом (например: -1001234567890)")
+        return
+
+    logger.info(f"🎵 Цикл музыки запущен. Целевой чат: {target_chat_id}")
     
     while music_tracking_enabled:
         try:
             track = get_current_track()
             
             if not track:
+                logger.debug("🎵 Трек не найден (пауза, инкогнито или задержка API)")
                 await asyncio.sleep(MUSIC_CHECK_INTERVAL)
                 continue
             
-            # Если трек не изменился — пропускаем
-            if track["id"] == last_track_id:
-                await asyncio.sleep(MUSIC_CHECK_INTERVAL)
-                continue
+            logger.info(f"🎶 API вернул трек: {track['title']} — {track['artists']}")
             
-            logger.info(f"🎶 Смена трека: {track['title']} — {track['artists']}")
-            
-            now = time.time()
-            is_message_old = music_message_timestamp and (now - music_message_timestamp > 172800)  # 48 часов
-            
-            try:
-                if current_music_message_id and not is_message_old:
-                    # Редактируем существующее сообщение
-                    if track["cover_url"]:
-                        await bot.edit_message_media(
-                            chat_id=target_chat_id,
-                            message_id=current_music_message_id,
-                            media=InputMediaPhoto(media=track["cover_url"]),
-                            caption=track["text"],
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await bot.edit_message_caption(
-                            chat_id=target_chat_id,
-                            message_id=current_music_message_id,
-                            caption=track["text"],
-                            parse_mode="HTML"
-                        )
-                    logger.debug("Сообщение с музыкой отредактировано")
-                else:
-                    # Удаляем старое и создаём новое
-                    if current_music_message_id:
-                        try:
-                            await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
-                        except:
-                            pass
-                    
-                    if track["cover_url"]:
-                        msg = await bot.send_photo(
-                            chat_id=target_chat_id,
-                            photo=track["cover_url"],
-                            caption=track["text"],
-                            parse_mode="HTML"
-                        )
-                    else:
-                        msg = await bot.send_message(
-                            chat_id=target_chat_id,
-                            text=track["text"],
-                            parse_mode="HTML"
-                        )
-                    
-                    current_music_message_id = msg.message_id
-                    music_message_timestamp = now
-                    logger.debug("Новое сообщение с музыкой отправлено")
+            # Отправляем/обновляем, если трек сменился ИЛИ сообщения ещё нет
+            if track["id"] != last_track_id or current_music_message_id is None:
+                logger.info("🔄 Смена трека или первый запуск. Готовлю сообщение...")
+                now = time.time()
+                is_message_old = music_message_timestamp and (now - music_message_timestamp > 172800)
                 
-                last_track_id = track["id"]
+                try:
+                    if current_music_message_id and not is_message_old:
+                        # РЕДАКТИРОВАНИЕ (aiogram 3.x синтаксис)
+                        if track["cover_url"]:
+                            media = InputMediaPhoto(media=track["cover_url"], caption=track["text"], parse_mode="HTML")
+                            await bot.edit_message_media(chat_id=target_chat_id, message_id=current_music_message_id, media=media)
+                        else:
+                            await bot.edit_message_caption(chat_id=target_chat_id, message_id=current_music_message_id, caption=track["text"], parse_mode="HTML")
+                        logger.info("✅ Сообщение успешно отредактировано")
+                    else:
+                        # СОЗДАНИЕ НОВОГО
+                        if current_music_message_id:
+                            try:
+                                await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
+                                logger.info("🗑️ Старое сообщение удалено")
+                            except Exception as del_err:
+                                logger.warning(f"⚠️ Не удалось удалить старое: {del_err}")
+                        
+                        # Отправка
+                        if track["cover_url"]:
+                            msg = await bot.send_photo(chat_id=target_chat_id, photo=track["cover_url"], caption=track["text"], parse_mode="HTML")
+                        else:
+                            msg = await bot.send_message(chat_id=target_chat_id, text=track["text"], parse_mode="HTML")
+                            
+                        current_music_message_id = msg.message_id
+                        music_message_timestamp = now
+                        logger.info(f"✅ Новое сообщение отправлено. ID: {current_music_message_id}")
+                    
+                    last_track_id = track["id"]
+                    
+                except Exception as send_err:
+                    logger.error(f"❌ Ошибка отправки/редактирования в чат {target_chat_id}: {send_err}")
+                    current_music_message_id = None
+                    music_message_timestamp = None
+            else:
+                logger.debug("⏭️ Трек не сменился, пропускаем")
                 
-            except Exception as e:
-                logger.error("Ошибка обновления сообщения: " + str(e))
-                current_music_message_id = None
-                music_message_timestamp = None
-        
         except Exception as e:
-            logger.error("Ошибка в цикле музыки: " + str(e))
+            logger.error(f"💥 Критическая ошибка в цикле музыки: {e}", exc_info=True)
         
         await asyncio.sleep(MUSIC_CHECK_INTERVAL)
     
