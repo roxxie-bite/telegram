@@ -13,6 +13,13 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
 
+try:
+    from yandex_music import Client
+    YANDEX_MUSIC_AVAILABLE = True
+except ImportError:
+    YANDEX_MUSIC_AVAILABLE = False
+    logger.warning("⚠️ yandex-music не установлен — функция отслеживания музыки недоступна")
+
 # Пытаемся импортировать pymongo
 try:
     from pymongo import MongoClient
@@ -30,6 +37,7 @@ LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 MONGO_URI = os.getenv("MONGO_URI")
 SITE_BASE = "https://lynther.sytes.net"
+
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
 DEFAULT_TAGS = []
@@ -38,6 +46,16 @@ EXPORT_THRESHOLD = 50
 COOLDOWN_SECONDS = 20
 FORWARDED_FILE = "forwarded.json"
 USERS_FILE = "users.json"
+# Yandex Music настройки
+YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN")
+MUSIC_STATUS_CHAT_ID = os.getenv("MUSIC_STATUS_CHAT_ID")
+MUSIC_CHECK_INTERVAL = int(os.getenv("MUSIC_CHECK_INTERVAL", "20")) if os.getenv("MUSIC_CHECK_INTERVAL") else 20
+music_tracking_enabled = False
+music_task = None
+ym_client = None
+current_music_message_id = None
+last_track_id = None
+music_message_timestamp = None
 
 # ================= ПРЕМИУМ ЭМОДЗИ =================
 def premium_emoji(emoji_id: str, fallback: str = "⭐") -> str:
@@ -539,6 +557,187 @@ def mark_user_forwarded(user_id):
         known_users[user_id]["forwarded"] = True
         save_users()
 
+
+# ================= YANDEX MUSIC FUNCTIONS =================
+def init_yandex_music():
+    """Инициализирует клиент Яндекс.Музыки"""
+    global ym_client
+    if not YANDEX_MUSIC_AVAILABLE:
+        logger.warning("⚠️ Библиотека yandex-music не установлена")
+        return False
+    
+    if not YANDEX_MUSIC_TOKEN:
+        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
+        return False
+    
+    try:
+        ym_client = Client(YANDEX_MUSIC_TOKEN).init()
+        logger.info("✅ Яндекс.Музыка подключена")
+        return True
+    except Exception as e:
+        logger.error("❌ Ошибка подключения к Яндекс.Музыке: " + str(e))
+        return False
+
+def get_current_track():
+    """Получает информацию о текущем треке"""
+    global ym_client
+    if not ym_client:
+        return None
+    
+    try:
+        queue = ym_client.get_queue()
+        if not queue or not queue.tracks:
+            return None
+        
+        for track_info in queue.tracks:
+            if hasattr(track_info, 'track') and track_info.track:
+                track = track_info.track
+                title = track.title
+                artists = ", ".join([artist.name for artist in track.artists]) if track.artists else "Unknown Artist"
+                
+                # Получаем обложку
+                cover_url = None
+                if track.cover:
+                    if hasattr(track.cover, 'get_url'):
+                        cover_url = track.cover.get_url('200x200')
+                    elif track.cover.uri:
+                        uri = track.cover.uri
+                        if uri.startswith('http'):
+                            cover_url = uri.replace('%%', '200x200')
+                        else:
+                            cover_url = f"https://{uri.replace('%%', '200x200')}"
+                
+                return {
+                    "id": track.id,
+                    "title": title,
+                    "artists": artists,
+                    "cover_url": cover_url,
+                    "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
+                }
+        return None
+    except Exception as e:
+        logger.error("Ошибка получения трека: " + str(e))
+        return None
+
+async def update_music_status():
+    """Основной цикл обновления статуса музыки"""
+    global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
+    
+    target_chat_id = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else OWNER_ID_INT
+    
+    logger.info("🎵 Запущено отслеживание музыки...")
+    
+    while music_tracking_enabled:
+        try:
+            track = get_current_track()
+            
+            if not track:
+                await asyncio.sleep(MUSIC_CHECK_INTERVAL)
+                continue
+            
+            # Если трек не изменился — пропускаем
+            if track["id"] == last_track_id:
+                await asyncio.sleep(MUSIC_CHECK_INTERVAL)
+                continue
+            
+            logger.info(f"🎶 Смена трека: {track['title']} — {track['artists']}")
+            
+            now = time.time()
+            is_message_old = music_message_timestamp and (now - music_message_timestamp > 172800)  # 48 часов
+            
+            try:
+                if current_music_message_id and not is_message_old:
+                    # Редактируем существующее сообщение
+                    if track["cover_url"]:
+                        await bot.edit_message_media(
+                            chat_id=target_chat_id,
+                            message_id=current_music_message_id,
+                            media=InputMediaPhoto(media=track["cover_url"]),
+                            caption=track["text"],
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await bot.edit_message_caption(
+                            chat_id=target_chat_id,
+                            message_id=current_music_message_id,
+                            caption=track["text"],
+                            parse_mode="HTML"
+                        )
+                    logger.debug("Сообщение с музыкой отредактировано")
+                else:
+                    # Удаляем старое и создаём новое
+                    if current_music_message_id:
+                        try:
+                            await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
+                        except:
+                            pass
+                    
+                    if track["cover_url"]:
+                        msg = await bot.send_photo(
+                            chat_id=target_chat_id,
+                            photo=track["cover_url"],
+                            caption=track["text"],
+                            parse_mode="HTML"
+                        )
+                    else:
+                        msg = await bot.send_message(
+                            chat_id=target_chat_id,
+                            text=track["text"],
+                            parse_mode="HTML"
+                        )
+                    
+                    current_music_message_id = msg.message_id
+                    music_message_timestamp = now
+                    logger.debug("Новое сообщение с музыкой отправлено")
+                
+                last_track_id = track["id"]
+                
+            except Exception as e:
+                logger.error("Ошибка обновления сообщения: " + str(e))
+                current_music_message_id = None
+                music_message_timestamp = None
+        
+        except Exception as e:
+            logger.error("Ошибка в цикле музыки: " + str(e))
+        
+        await asyncio.sleep(MUSIC_CHECK_INTERVAL)
+    
+    logger.info("⏹️ Отслеживание музыки остановлено")
+
+async def start_music_tracking():
+    """Запускает отслеживание музыки"""
+    global music_tracking_enabled, music_task
+    
+    if music_tracking_enabled:
+        logger.warning("⚠️ Отслеживание музыки уже запущено")
+        return False
+    
+    if not init_yandex_music():
+        return False
+    
+    music_tracking_enabled = True
+    music_task = asyncio.create_task(update_music_status())
+    logger.info("🎵 Отслеживание музыки запущено")
+    return True
+
+async def stop_music_tracking():
+    """Останавливает отслеживание музыки"""
+    global music_tracking_enabled, music_task
+    
+    if not music_tracking_enabled:
+        return
+    
+    music_tracking_enabled = False
+    if music_task:
+        music_task.cancel()
+        try:
+            await music_task
+        except asyncio.CancelledError:
+            pass
+    
+    logger.info("⏹️ Отслеживание музыки остановлено")
+
+
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
 async def handle_user_message(message: Message):
@@ -784,6 +983,105 @@ async def cmd_broadcast(m: Message):
     
     await m.answer(report, parse_mode="HTML")
     logger.info(f"📊 Рассылка завершена: {sent_count}/{total_users} успешно")
+
+# ================= MUSIC COMMANDS =================
+@dp.message(Command("music"))
+async def cmd_music_status(m: Message):
+    """Показать статус отслеживания музыки"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    status = " <b>Статус отслеживания музыки:</b>\n\n"
+    status += f"{'✅' if music_tracking_enabled else '❌'} Отслеживание: <b>{'Активно' if music_tracking_enabled else 'Остановлено'}</b>\n"
+    
+    if YANDEX_MUSIC_AVAILABLE:
+        status += f"✅ Библиотека: <b>yandex-music установлена</b>\n"
+    else:
+        status += f"❌ Библиотека: <b>yandex-music НЕ установлена</b>\n"
+        status += f"<i>Установи: pip install yandex-music</i>\n"
+    
+    if YANDEX_MUSIC_TOKEN:
+        status += f"✅ Токен: <b>задан</b>\n"
+    else:
+        status += f"❌ Токен: <b>НЕ задан</b>\n"
+        status += f"<i>Добавь YANDEX_MUSIC_TOKEN в переменные окружения</i>\n"
+    
+    if music_tracking_enabled and last_track_id:
+        status += f"\n🎶 Последний трек ID: <code>{last_track_id}</code>\n"
+    
+    status += "\n<b>Управление:</b>\n"
+    status += "/startmusic — Запустить отслеживание\n"
+    status += "/stopmusic — Остановить отслеживание"
+    
+    await m.answer(status, parse_mode="HTML")
+
+@dp.message(Command("startmusic"))
+async def cmd_start_music(m: Message):
+    """Запустить отслеживание музыки"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    await m.answer("⏳ Запускаю отслеживание музыки...", parse_mode="HTML")
+    
+    success = await start_music_tracking()
+    
+    if success:
+        target_chat = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else "твои личные сообщения"
+        await m.answer(
+            f"{PREMIUM_EMOJI['sparkle']} <b>Отслеживание музыки запущено!</b>\n\n"
+            f"📍 Чат: <code>{target_chat}</code>\n"
+            f"⏱️ Интервал: {MUSIC_CHECK_INTERVAL} сек\n\n"
+            f"<i>Используй /stopmusic чтобы остановить</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await m.answer(
+            f"{EMOJI['error']} <b>Не удалось запустить отслеживание!</b>\n\n"
+            f"Проверь:\n"
+            f"• Установлена ли библиотека yandex-music\n"
+            f"• Задан ли YANDEX_MUSIC_TOKEN\n"
+            f"• Корректен ли токен",
+            parse_mode="HTML"
+        )
+
+@dp.message(Command("stopmusic"))
+async def cmd_stop_music(m: Message):
+    """Остановить отслеживание музыки"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    await stop_music_tracking()
+    await m.answer(
+        f"{EMOJI['stop']} <b>Отслеживание музыки остановлено</b>",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("nowplaying"))
+async def cmd_now_playing(m: Message):
+    """Показать что играет прямо сейчас"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    if not ym_client:
+        await m.answer(f"{EMOJI['warning']} Клиент Яндекс.Музыки не инициализирован", parse_mode="HTML")
+        return
+    
+    track = get_current_track()
+    
+    if not track:
+        await m.answer(f"{EMOJI['info']} Сейчас ничего не играет", parse_mode="HTML")
+        return
+    
+    if track["cover_url"]:
+        await bot.send_photo(
+            chat_id=m.chat.id,
+            photo=track["cover_url"],
+            caption=track["text"],
+            parse_mode="HTML"
+        )
+    else:
+        await m.answer(track["text"], parse_mode="HTML")
+
 
 @dp.message(Command("block"))
 async def cmd_block(m: Message):
