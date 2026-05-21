@@ -581,71 +581,72 @@ def init_yandex_music():
         return False
 
 def get_current_track():
-    global ym_client
-    if not ym_client:
+    """Получает текущий трек через Ynison API (работает в yandex-music>=3.0.0)"""
+    global ym_client, YANDEX_MUSIC_TOKEN
+    
+    if not YANDEX_MUSIC_TOKEN:
+        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
         return None
 
     try:
-        queue = None
-        # Список всех возможных названий метода очереди в разных версиях библиотеки
-        queue_methods = ['get_queue', 'queue', 'get_current_queue', 'queue_context', 'get_queue_context']
-
-        for method_name in queue_methods:
-            if hasattr(ym_client, method_name):
-                try:
-                    method = getattr(ym_client, method_name)
-                    result = method()
-                    
-                    if result and hasattr(result, 'queue_id') and hasattr(ym_client, 'get_queue'):
-                        queue = ym_client.get_queue(result.queue_id)
-                    elif result and hasattr(result, 'tracks'):
-                        queue = result
-                    elif result and isinstance(result, list):
-                        queue = type('Queue', (), {'tracks': result})()
-                        
-                    if queue:
-                        logger.info(f"✅ Использован метод очереди: {method_name}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Метод {method_name} не сработал: {e}")
-
-        if not queue:
-            available = [m for m in dir(ym_client) if 'queue' in m.lower() or 'track' in m.lower() and not m.startswith('_')]
-            logger.error(f"❌ Не удалось получить очередь. Доступные методы: {available}")
+        # Импортируем Ynison только при вызове (чтобы не ломать, если библиотека старая)
+        from yandex_music.ynison import simple
+        
+        # Получаем трек через Ynison (просто и надёжно)
+        track = simple.get_current_track(YANDEX_MUSIC_TOKEN)
+        
+        if not track:
+            logger.debug("🎵 Ничего не играет или трек не определён")
             return None
 
-        tracks = getattr(queue, 'tracks', []) or getattr(queue, 'items', [])
-        if not tracks:
-            return None
+        # Извлекаем данные
+        title = getattr(track, 'title', getattr(track, 'name', 'Unknown Title'))
+        
+        # Артисты могут быть списком или строкой
+        artists_attr = getattr(track, 'artists', None)
+        if artists_attr:
+            if isinstance(artists_attr, list):
+                artists = ", ".join([getattr(a, 'name', str(a)) for a in artists_attr])
+            else:
+                artists = str(artists_attr)
+        else:
+            artists = "Unknown Artist"
 
-        first_item = tracks[0]
-        track_obj = getattr(first_item, 'track', first_item)
-        if not track_obj:
-            return None
-
-        title = getattr(track_obj, 'title', 'Unknown Title')
-        artists_list = getattr(track_obj, 'artists', [])
-        artists = ", ".join([a.name for a in artists_list]) if artists_list else "Unknown Artist"
-
+        # Обложка
         cover_url = None
-        cover = getattr(track_obj, 'cover', None)
+        cover = getattr(track, 'cover', None) or getattr(track, 'cover_uri', None)
         if cover:
-            if hasattr(cover, 'get_url'):
+            if isinstance(cover, str):
+                # Если это уже URL или URI
+                if cover.startswith('http'):
+                    cover_url = cover.replace('%%', '200x200')
+                else:
+                    cover_url = f"https://{cover.replace('%%', '200x200')}"
+            elif hasattr(cover, 'get_url'):
                 cover_url = cover.get_url('200x200')
-            elif getattr(cover, 'uri', None):
+            elif hasattr(cover, 'uri'):
                 uri = cover.uri
                 cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
 
+        # Уникальный идентификатор трека
+        track_id = getattr(track, 'id', getattr(track, 'track_id', 0))
+        if hasattr(track_id, '__iter__') and not isinstance(track_id, str):
+            # Если ID — это кортеж (альбом:трек), объединяем
+            track_id = ":".join(map(str, track_id)) if len(track_id) > 1 else str(track_id[0])
+
         return {
-            "id": getattr(track_obj, 'id', 0),
+            "id": str(track_id),
             "title": title,
             "artists": artists,
             "cover_url": cover_url,
             "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
         }
 
+    except ImportError:
+        logger.error("❌ Модуль yandex_music.ynison не найден. Требуется yandex-music>=3.0.0")
+        return None
     except Exception as e:
-        logger.error(f"Ошибка получения трека: {e}")
+        logger.error(f"Ошибка получения трека через Ynison: {e}")
         return None
         
 async def start_music_tracking():
