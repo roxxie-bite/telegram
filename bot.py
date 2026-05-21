@@ -635,10 +635,6 @@ def get_current_track():
         logger.error(f"Ошибка получения трека: {e}")
         return None
         
-    except Exception as e:
-        logger.error("Ошибка получения трека: " + str(e))
-        return None
-
 async def update_music_status():
     """Основной цикл обновления статуса музыки"""
     global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
@@ -757,6 +753,74 @@ async def stop_music_tracking():
     
     logger.info("⏹️ Отслеживание музыки остановлено")
 
+@dp.message(Command("testmusic"))
+async def cmd_test_music(m: Message):
+    if m.from_user.id != OWNER_ID_INT:
+        return
+
+    await m.answer("🔍 <b>Запускаю диагностику модуля Яндекс.Музыки...</b>", parse_mode="HTML")
+    
+    diagnostics = []
+    
+    try:
+        # 1. Проверяем инициализацию клиента
+        if not ym_client:
+            diagnostics.append("⚠️ Клиент не был запущен. Инициализирую...")
+            if not init_yandex_music():
+                await m.answer("❌ <b>Ошибка:</b> Не удалось инициализировать клиент Яндекс.Музыки.\nПроверь переменную `YANDEX_MUSIC_TOKEN` и логи сервера.", parse_mode="HTML")
+                return
+            diagnostics.append("✅ Клиент успешно подключён к API")
+        else:
+            diagnostics.append("✅ Клиент уже активен")
+
+        # 2. Пытаемся получить текущий трек
+        track = get_current_track()
+        if not track:
+            diagnostics.append("⚠️ Трек не найден (возможно, ничего не играет или очередь ещё не синхронизирована)")
+            await m.answer(
+                "ℹ️ <b>Результат:</b> Сейчас трек не определяется.\n\n" +
+                "\n".join(diagnostics),
+                parse_mode="HTML"
+            )
+            return
+
+        diagnostics.append(f"✅ Трек получен: {track['title']} — {track['artists']}")
+        diagnostics.append(f"🆔 ID трека: {track['id']}")
+        diagnostics.append(f"🖼️ Обложка: {'Найдена' if track['cover_url'] else 'Отсутствует'}")
+
+        # 3. Отправляем тестовое сообщение владельцу в ЛС
+        target_chat = OWNER_ID_INT
+        caption = f"{track['text']}\n\n📝 <b>Диагностика:</b>\n" + "\n".join(diagnostics)
+        
+        if track["cover_url"]:
+            await bot.send_photo(
+                chat_id=target_chat,
+                photo=track["cover_url"],
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            await bot.send_message(
+                chat_id=target_chat,
+                text=caption,
+                parse_mode="HTML"
+            )
+            
+        diagnostics.append("✅ Сообщение успешно отправлено в ЛС владельцу")
+        
+        await m.answer(
+            "✅ <b>Тест пройден!</b> Проверь личные сообщения от бота.\n\n" + "\n".join(diagnostics),
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ Ошибка тестирования музыки: {error_msg}")
+        await m.answer(
+            f"❌ <b>Критическая ошибка при тесте:</b>\n<code>{error_msg[:300]}</code>\n\n"
+            f"Проверь логи сервера и убедись, что токен Яндекс.Музыки корректен.",
+            parse_mode="HTML"
+        )
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
