@@ -581,34 +581,49 @@ def init_yandex_music():
         return False
 
 def get_current_track():
-    """Получает информацию о текущем треке"""
     global ym_client
     if not ym_client:
         return None
-    
+
     try:
-        queue = ym_client.get_queue()
-        if not queue or not queue.tracks:
-            return None
+        queue = None
         
+        # 1. Пробуем современный способ (через контекст очереди)
+        if hasattr(ym_client, 'get_queue_context'):
+            try:
+                ctx = ym_client.get_queue_context()
+                queue_id = getattr(ctx, 'queue_id', None)
+                if queue_id and hasattr(ym_client, 'get_queue'):
+                    queue = ym_client.get_queue(queue_id)
+            except Exception:
+                pass
+
+        # 2. Фоллбэк: прямой вызов (для старых версий)
+        if not queue and hasattr(ym_client, 'get_queue'):
+            try:
+                queue = ym_client.get_queue()
+            except Exception:
+                pass
+
+        # Если очередь не получена или пуста
+        if not queue or not getattr(queue, 'tracks', None):
+            return None
+
+        # Ищем текущий активный трек в очереди
         for track_info in queue.tracks:
-            if hasattr(track_info, 'track') and track_info.track:
-                track = track_info.track
+            track = getattr(track_info, 'track', None)
+            if track and hasattr(track, 'title'):
                 title = track.title
-                artists = ", ".join([artist.name for artist in track.artists]) if track.artists else "Unknown Artist"
-                
-                # Получаем обложку
+                artists = ", ".join([a.name for a in (track.artists or [])]) if track.artists else "Unknown Artist"
+
                 cover_url = None
-                if track.cover:
+                if getattr(track, 'cover', None):
                     if hasattr(track.cover, 'get_url'):
                         cover_url = track.cover.get_url('200x200')
-                    elif track.cover.uri:
+                    elif getattr(track.cover, 'uri', None):
                         uri = track.cover.uri
-                        if uri.startswith('http'):
-                            cover_url = uri.replace('%%', '200x200')
-                        else:
-                            cover_url = f"https://{uri.replace('%%', '200x200')}"
-                
+                        cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
+
                 return {
                     "id": track.id,
                     "title": title,
@@ -617,6 +632,7 @@ def get_current_track():
                     "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
                 }
         return None
+        
     except Exception as e:
         logger.error("Ошибка получения трека: " + str(e))
         return None
