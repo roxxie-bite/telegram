@@ -644,49 +644,84 @@ def init_yandex_music():
         return False
 
 def get_current_track():
-    global YANDEX_MUSIC_TOKEN
-    if not YANDEX_MUSIC_TOKEN:
+    """Получает текущий трек. Работает с yandex-music 2.3.0 - 3.x.x"""
+    global ym_client
+    if not ym_client:
         return None
+
     try:
-        from yandex_music.ynison import simple
-        track = simple.get_current_track(YANDEX_MUSIC_TOKEN)
-        if not track:
+        # 1. Диагностика версии (для логов)
+        import yandex_music
+        logger.debug(f"📦 Версия yandex-music: {getattr(yandex_music, '__version__', 'unknown')}")
+
+        # 2. Получаем очередь (адаптивно под версии)
+        queue = None
+        queue_id = None
+
+        # Способ A: v2.3+ (через контекст)
+        if hasattr(ym_client, 'get_queue_context'):
+            try:
+                ctx = ym_client.get_queue_context()
+                queue_id = getattr(ctx, 'queue_id', None) or getattr(ctx, 'id', None)
+                if queue_id and hasattr(ym_client, 'get_queue'):
+                    queue = ym_client.get_queue(queue_id)
+            except Exception as e:
+                logger.debug(f"get_queue_context не сработал: {e}")
+
+        # Способ B: Старые версии (прямой вызов)
+        if not queue and hasattr(ym_client, 'get_queue'):
+            try:
+                queue = ym_client.get_queue()
+            except Exception as e:
+                logger.debug(f"get_queue() без ID не сработал: {e}")
+
+        # Если очередь не получена
+        if not queue or not getattr(queue, 'tracks', None):
             return None
-        title = getattr(track, 'title', getattr(track, 'name', 'Unknown Title'))
-        artists_attr = getattr(track, 'artists', None)
-        if artists_attr:
-            if isinstance(artists_attr, list):
-                artists = ", ".join([getattr(a, 'name', str(a)) for a in artists_attr])
-            else:
-                artists = str(artists_attr)
-        else:
-            artists = "Unknown Artist"
+
+        # 3. Извлекаем объект трека
+        first_item = queue.tracks[0]
+        track_obj = getattr(first_item, 'track', first_item)
+        if not track_obj:
+            return None
+
+        # 4. Парсим данные безопасно
+        title = getattr(track_obj, 'title', 'Unknown Title')
+        artists_attr = getattr(track_obj, 'artists', [])
+        artists = ", ".join([a.name for a in artists_attr]) if artists_attr else "Unknown Artist"
+
         cover_url = None
-        cover = getattr(track, 'cover', None) or getattr(track, 'cover_uri', None)
+        cover = getattr(track_obj, 'cover', None)
         if cover:
-            if isinstance(cover, str):
-                if cover.startswith('http'):
-                    cover_url = cover.replace('%%', '200x200')
-                else:
-                    cover_url = f"https://{cover.replace('%%', '200x200')}"
-            elif hasattr(cover, 'get_url'):
+            if hasattr(cover, 'get_url'):
                 cover_url = cover.get_url('200x200')
-            elif hasattr(cover, 'uri'):
+            elif getattr(cover, 'uri', None):
                 uri = cover.uri
                 cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
-        track_id = getattr(track, 'id', getattr(track, 'track_id', 0))
+
+        track_id = getattr(track_obj, 'id', getattr(track_obj, 'track_id', 0))
         if hasattr(track_id, '__iter__') and not isinstance(track_id, str):
             track_id = ":".join(map(str, track_id)) if len(track_id) > 1 else str(track_id[0])
+
         return {
-            "id": str(track_id), "title": title, "artists": artists,
+            "id": str(track_id),
+            "title": title,
+            "artists": artists,
             "cover_url": cover_url,
             "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
         }
-    except ImportError:
-        logger.error("❌ Требуется yandex-music>=3.0.0")
+
+    except ImportError as ie:
+        logger.error(f"❌ Ошибка импорта: {ie}. Проверь установку пакета.")
         return None
     except Exception as e:
-        logger.error(f"Ошибка трека: {e}")
+        # Если всё упало, выведем доступные методы для точной отладки
+        try:
+            available = [m for m in dir(ym_client) if 'queue' in m.lower() and not m.startswith('_')]
+            logger.error(f"💥 Ошибка получения трека. Доступные методы с 'queue': {available}")
+        except:
+            pass
+        logger.error(f"Ошибка: {e}")
         return None
 
 # ⚠️ ВАЖНО: update_music_status должна быть ОБЪЯВЛЕНА ПЕРЕД start_music_tracking!
@@ -1037,6 +1072,15 @@ async def cmd_music_status(m: Message):
     status += "/stopmusic — Остановить отслеживание"
     
     await m.answer(status, parse_mode="HTML")
+
+@dp.message(Command("ymversion"))
+async def cmd_ym_version(m: Message):
+    if m.from_user.id != OWNER_ID_INT: return
+    try:
+        import yandex_music
+        await m.answer(f"📦 Установлена версия: <code>{getattr(yandex_music, '__version__', 'не определена')}</code>\n📍 Путь: <code>{yandex_music.__file__}</code>", parse_mode="HTML")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
 
 @dp.message(Command("startmusic"))
 async def cmd_start_music(m: Message):
