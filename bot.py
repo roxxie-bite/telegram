@@ -1435,14 +1435,14 @@ if files:
     keyboard.append(row)
     
     # Кнопки для файлов (первые 10) - только действия
-files = [item for item in items if item['type'] == 'file'][:10]
+    files = [item for item in items if item['type'] == 'file'][:10]
 if files:
     row = []
-    for item in files:
-        name = item['name'][:15] + "…" if len(item['name']) > 15 else item['name']
-        cb_path = item['path'] if len(item['path']) <= 60 else item['path'][-60:]
-        row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{cb_path}"))
+    for f in files:
+        name = f['name'][:15] + "…" if len(f['name']) > 15 else f['name']
+        row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{f['path']}"))
     keyboard.append(row)
+    
     # Кнопки действий
     action_row = [
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"ls:{path}"),
@@ -1501,18 +1501,10 @@ async def callback_ls_nav(callback: CallbackQuery):
         txt += f"📁 Директорий: <b>{len(dirs)}</b>\n"
         txt += f"📄 Файлов: <b>{len(files)}</b>\n\n"
         
-if dirs:
-    dir_lines = []
-    for item in dirs[:5]:
-        dir_lines.append(f"📁 <code>{safe_html_text(item['name'])}</code>")
-    txt += "<b>Директории:</b>\n" + "\n".join(dir_lines) + "\n"
-
-if files:
-    file_lines = []
-    for item in files[:5]:
-        size_kb = item['size'] / 1024
-        file_lines.append(f"📄 <code>{safe_html_text(item['name'])}</code> ({size_kb:.1f} KB)")
-    txt += "\n<b>Файлы:</b>\n" + "\n".join(file_lines)
+        if dirs:
+            txt += "<b>Директории:</b>\n" + "\n".join([f"📁 <code>{safe_html_text(d['name'])}</code>" for d in dirs[:5]]) + "\n"
+        if files:
+            txt += "\n<b>Файлы:</b>\n" + "\n".join([f"📄 <code>{safe_html_text(f['name'])}</code> ({f['size']/1024:.1f} KB)" for f in files[:5]])
         
         if len(dirs) > 5 or len(files) > 5:
             txt += f"\n\n<i>...показано первые 5, используй кнопки для навигации</i>"
