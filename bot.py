@@ -449,18 +449,30 @@ def find_all_loras(min_days):
         logger.info("=== Все лоры | Страница: " + str(page) + " ===")
         html = fetch_with_retry(url)
         if not html: break
+        
+        # 🔍 Парсим "сырые" лоры (без фильтра) чтобы проверить, есть ли они вообще
+        soup = BeautifulSoup(html, "html.parser")
+        raw_loras = soup.find_all("p", class_="lora_head")
+        
+        # Если на странице вообще нет лор — завершаем поиск
+        if not raw_loras:
+            logger.info("Стр. " + str(page) + ": нет лор на странице → завершаю")
+            break
+        
+        # Применяем фильтр min_days к найденным лорам
         loras = parse_loras_from_html(html, min_days)
         pages_scanned += 1
         if loras:
             all_results.extend(loras)
-            logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
-        if not loras and page > 1:
-            logger.info("Стр. " + str(page) + ": лор не найдено → завершаю")
-            break
+            logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор (после фильтра)")
+        else:
+            logger.info("Стр. " + str(page) + ": лор есть, но ни один не прошёл фильтр (мин. дней: " + str(min_days) + ")")
+        
         if page < MAX_PAGES: time.sleep(1.0)
+    
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
-
+    
 # ================= ФОРМАТИРОВАНИЕ И ОТПРАВКА =================
 def format_message(lora):
     return "\n".join([
