@@ -1400,11 +1400,11 @@ async def cmd_shell(m: Message):
     
     logger.info(f"🐚 Shell: {command} → код {returncode} за {exec_time:.2f} сек")
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def create_ls_keyboard(path: str, items: list) -> InlineKeyboardMarkup:
     """Создаёт инлайн-клавиатуру для навигации по файлам"""
     keyboard = []
+    callback_path = d['path'] if len(d['path']) <= 60 else d['path'][-60:]
     
     # Кнопка "Наверх" (если не в корне)
     if path != "/opt/render/project/src" and path != ".":
@@ -1420,7 +1420,7 @@ def create_ls_keyboard(path: str, items: list) -> InlineKeyboardMarkup:
         for d in dirs:
             # Обрезаем длинные имена
             name = d['name'][:20] + "…" if len(d['name']) > 20 else d['name']
-            row.append(InlineKeyboardButton(text=f"📁 {name}", callback_data=f"ls:{d['path']}"))
+            row.append(InlineKeyboardButton(text=f"📁 {name}", callback_data=f"ls:{callback_path}"))
         keyboard.append(row)
     
     # Кнопки для файлов (первые 10) - только действия
