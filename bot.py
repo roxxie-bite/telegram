@@ -1404,7 +1404,6 @@ async def cmd_shell(m: Message):
 def create_ls_keyboard(path: str, items: list) -> InlineKeyboardMarkup:
     """Создаёт инлайн-клавиатуру для навигации по файлам"""
     keyboard = []
-    callback_path = d['path'] if len(d['path']) <= 60 else d['path'][-60:]
     
     # Кнопка "Наверх" (если не в корне)
     if path != "/opt/render/project/src" and path != ".":
@@ -1414,34 +1413,25 @@ def create_ls_keyboard(path: str, items: list) -> InlineKeyboardMarkup:
         ])
     
     # Кнопки для директорий (первые 10)
-dirs = [item for item in items if item['type'] == 'dir'][:10]
-if dirs:
-    row = []
-    for item in dirs:
-        name = item['name'][:20] + "…" if len(item['name']) > 20 else item['name']
-        # Обрезаем callback_data до 64 символов (лимит Telegram)
-        cb_path = item['path'] if len(item['path']) <= 60 else item['path'][-60:]
-        row.append(InlineKeyboardButton(text=f"📁 {name}", callback_data=f"ls:{cb_path}"))
-    keyboard.append(row)
-
-# Кнопки для файлов (первые 10)
-files = [item for item in items if item['type'] == 'file'][:10]
-if files:
-    row = []
-    for item in files:
-        name = item['name'][:15] + "…" if len(item['name']) > 15 else item['name']
-        cb_path = item['path'] if len(item['path']) <= 60 else item['path'][-60:]
-        row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{cb_path}"))
-    keyboard.append(row)
+    dirs = [item for item in items if item['type'] == 'dir'][:10]
+    if dirs:
+        row = []
+        for item in dirs:
+            name = item['name'][:20] + "…" if len(item['name']) > 20 else item['name']
+            # Обрезаем callback_data до 64 символов (лимит Telegram)
+            cb_path = item['path'] if len(item['path']) <= 60 else item['path'][-60:]
+            row.append(InlineKeyboardButton(text=f"📁 {name}", callback_data=f"ls:{cb_path}"))
+        keyboard.append(row)
     
-    # Кнопки для файлов (первые 10) - только действия
+    # Кнопки для файлов (первые 10)
     files = [item for item in items if item['type'] == 'file'][:10]
-if files:
-    row = []
-    for f in files:
-        name = f['name'][:15] + "…" if len(f['name']) > 15 else f['name']
-        row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{f['path']}"))
-    keyboard.append(row)
+    if files:
+        row = []
+        for item in files:
+            name = item['name'][:15] + "…" if len(item['name']) > 15 else item['name']
+            cb_path = item['path'] if len(item['path']) <= 60 else item['path'][-60:]
+            row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{cb_path}"))
+        keyboard.append(row)
     
     # Кнопки действий
     action_row = [
@@ -1451,6 +1441,7 @@ if files:
     keyboard.append(action_row)
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 
 @dp.callback_query(F.data.startswith("ls:"))
 async def callback_ls_nav(callback: CallbackQuery):
@@ -1501,10 +1492,21 @@ async def callback_ls_nav(callback: CallbackQuery):
         txt += f"📁 Директорий: <b>{len(dirs)}</b>\n"
         txt += f"📄 Файлов: <b>{len(files)}</b>\n\n"
         
+                # Директории
         if dirs:
-            txt += "<b>Директории:</b>\n" + "\n".join([f"📁 <code>{safe_html_text(d['name'])}</code>" for d in dirs[:5]]) + "\n"
+            txt += "<b>Директории:</b>\n"
+            for item in dirs[:5]:
+                safe_name = safe_html_text(item['name'])
+                txt += f"📁 <code>{safe_name}</code>\n"
+            txt += "\n"
+        
+        # Файлы
         if files:
-            txt += "\n<b>Файлы:</b>\n" + "\n".join([f"📄 <code>{safe_html_text(f['name'])}</code> ({f['size']/1024:.1f} KB)" for f in files[:5]])
+            txt += "<b>Файлы:</b>\n"
+            for item in files[:5]:
+                safe_name = safe_html_text(item['name'])
+                size_kb = item['size'] / 1024
+                txt += f"📄 <code>{safe_name}</code> ({size_kb:.1f} KB)\n"
         
         if len(dirs) > 5 or len(files) > 5:
             txt += f"\n\n<i>...показано первые 5, используй кнопки для навигации</i>"
@@ -1812,21 +1814,24 @@ async def cmd_ls(m: Message):
         txt += f"📁 Директорий: <b>{len(dirs)}</b>\n"
         txt += f"📄 Файлов: <b>{len(files)}</b>\n\n"
         
-    if dirs:
-    dir_lines = []
-    for item in dirs[:5]:
-        dir_lines.append(f"📁 <code>{safe_html_text(item['name'])}</code>")
-    txt += "<b>Директории:</b>\n" + "\n".join(dir_lines) + "\n"
-
-    if files:
-    file_lines = []
-    for item in files[:5]:
-        size_kb = item['size'] / 1024
-        file_lines.append(f"📄 <code>{safe_html_text(item['name'])}</code> ({size_kb:.1f} KB)")
-    txt += "\n<b>Файлы:</b>\n" + "\n".join(file_lines)
+        # Директории
+        if dirs:
+            txt += "<b>Директории:</b>\n"
+            for item in dirs[:5]:
+                safe_name = safe_html_text(item['name'])
+                txt += f"📁 <code>{safe_name}</code>\n"
+            txt += "\n"
+        
+        # Файлы
+        if files:
+            txt += "<b>Файлы:</b>\n"
+            for item in files[:5]:
+                safe_name = safe_html_text(item['name'])
+                size_kb = item['size'] / 1024
+                txt += f"📄 <code>{safe_name}</code> ({size_kb:.1f} KB)\n"
         
         if len(dirs) > 5 or len(files) > 5:
-            txt += f"\n\n<i>...показано первые 5, используй кнопки для навигации</i>"
+            txt += f"\n<i>...показано первые 5, используй кнопки для навигации</i>"
         
         # Отправляем с клавиатурой
         await m.answer(
