@@ -14,6 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import subprocess
 import asyncio
 import shlex
@@ -1337,7 +1338,7 @@ async def cmd_blocked(m: Message):
     txt += f"\n<i>Используй /unblock &lt;id&gt; чтобы разблокировать</i>"
     await m.answer(txt, parse_mode="HTML")
 
-dp.message(Command("shell"))
+@dp.message(Command("shell"))
 async def cmd_shell(m: Message):
     """Выполняет shell-команду: /shell <command>"""
     if m.from_user.id != OWNER_ID_INT:
@@ -1400,6 +1401,333 @@ async def cmd_shell(m: Message):
     
     logger.info(f"🐚 Shell: {command} → код {returncode} за {exec_time:.2f} сек")
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def create_ls_keyboard(path: str, items: list) -> InlineKeyboardMarkup:
+    """Создаёт инлайн-клавиатуру для навигации по файлам"""
+    keyboard = []
+    
+    # Кнопка "Наверх" (если не в корне)
+    if path != "/opt/render/project/src" and path != ".":
+        parent = os.path.dirname(path) if path != "." else "/opt/render/project/src"
+        keyboard.append([
+            InlineKeyboardButton(text="🔙 Наверх", callback_data=f"ls:{parent}")
+        ])
+    
+    # Кнопки для директорий (первые 10)
+    dirs = [item for item in items if item['type'] == 'dir'][:10]
+    if dirs:
+        row = []
+        for d in dirs:
+            # Обрезаем длинные имена
+            name = d['name'][:20] + "…" if len(d['name']) > 20 else d['name']
+            row.append(InlineKeyboardButton(text=f"📁 {name}", callback_data=f"ls:{d['path']}"))
+        keyboard.append(row)
+    
+    # Кнопки для файлов (первые 10) - только действия
+    files = [item for item in items if item['type'] == 'file'][:10]
+    if files:
+        row = []
+        for f in files:
+            name = f['name'][:15] + "…" if len(f['name']) > 15 else f['name']
+            # Кнопка для просмотра/скачивания файла
+            row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{f['path']}"))
+        keyboard.append(row)
+    
+    # Кнопки действий
+    action_row = [
+        InlineKeyboardButton(text="🔄 Обновить", callback_data=f"ls:{path}"),
+        InlineKeyboardButton(text="📤 Загрузить всё", callback_data=f"upload_dir:{path}"),
+    ]
+    keyboard.append(action_row)
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+@dp.callback_query(F.data.startswith("ls:"))
+async def callback_ls_nav(callback: CallbackQuery):
+    """Навигация по директориям через кнопки"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    # Извлекаем путь из callback_data
+    path = callback.data.split(":", 1)[1]
+    
+    # Проверка безопасности
+    is_safe, error_msg = is_path_safe(path)
+    if not is_safe:
+        await callback.answer(error_msg, show_alert=True)
+        return
+    
+    try:
+        abs_path = os.path.abspath(path)
+        
+        if not os.path.exists(abs_path):
+            await callback.answer("❌ Путь не существует", show_alert=True)
+            return
+        
+        if not os.path.isdir(abs_path):
+            await callback.answer("❌ Это не директория", show_alert=True)
+            return
+        
+        # Получаем список элементов
+        items = []
+        for item in os.listdir(abs_path):
+            item_path = os.path.join(abs_path, item)
+            items.append({
+                'name': item,
+                'path': item_path,
+                'type': 'dir' if os.path.isdir(item_path) else 'file',
+                'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            })
+        items.sort(key=lambda x: (x['type'] != 'dir', x['name'].lower()))
+        
+        # Формируем текст
+        txt = f"{EMOJI['file']} <b>Список файлов:</b>\n"
+        txt += f"📁 Путь: <code>{safe_html_text(abs_path)}</code>\n\n"
+        
+        dirs = [i for i in items if i['type'] == 'dir']
+        files = [i for i in items if i['type'] == 'file']
+        
+        txt += f"📁 Директорий: <b>{len(dirs)}</b>\n"
+        txt += f"📄 Файлов: <b>{len(files)}</b>\n\n"
+        
+        if dirs:
+            txt += "<b>Директории:</b>\n" + "\n".join([f"📁 <code>{safe_html_text(d['name'])}</code>" for d in dirs[:5]]) + "\n"
+        if files:
+            txt += "\n<b>Файлы:</b>\n" + "\n".join([f"📄 <code>{safe_html_text(f['name'])}</code> ({f['size']/1024:.1f} KB)" for f in files[:5]])
+        
+        if len(dirs) > 5 or len(files) > 5:
+            txt += f"\n\n<i>...показано первые 5, используй кнопки для навигации</i>"
+        
+        # Обновляем сообщение с клавиатурой
+        await callback.message.edit_text(
+            txt,
+            parse_mode="HTML",
+            reply_markup=create_ls_keyboard(abs_path, items)
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        logger.error(f"❌ Ошибка callback_ls_nav: {e}")
+
+@dp.callback_query(F.data.startswith("file:"))
+async def callback_file_action(callback: CallbackQuery):
+    """Действия с файлом через кнопки"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    file_path = callback.data.split(":", 1)[1]
+    
+    is_safe, error_msg = is_path_safe(file_path)
+    if not is_safe:
+        await callback.answer(error_msg, show_alert=True)
+        return
+    
+    try:
+        abs_path = os.path.abspath(file_path)
+        
+        if not os.path.exists(abs_path) or os.path.isdir(abs_path):
+            await callback.answer("❌ Файл не найден", show_alert=True)
+            return
+        
+        file_size = os.path.getsize(abs_path)
+        
+        # Меню действий с файлом
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📤 Загрузить", callback_data=f"upload:{abs_path}"),
+                InlineKeyboardButton(text="👁️ Просмотреть", callback_data=f"cat:{abs_path}"),
+            ],
+            [
+                InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"rm_confirm:{abs_path}"),
+                InlineKeyboardButton(text="🔙 Назад", callback_data=f"ls:{os.path.dirname(abs_path)}"),
+            ]
+        ])
+        
+        await callback.message.edit_text(
+            f"{EMOJI['file']} <b>Файл:</b>\n"
+            f"📁 Путь: <code>{safe_html_text(abs_path)}</code>\n"
+            f"📦 Размер: <b>{file_size / 1024:.1f} KB</b>\n\n"
+            f"<i>Выберите действие:</i>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        logger.error(f"❌ Ошибка callback_file_action: {e}")
+
+@dp.callback_query(F.data.startswith("upload:"))
+async def callback_upload_file(callback: CallbackQuery):
+    """Загрузка файла по кнопке"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    file_path = callback.data.split(":", 1)[1]
+    
+    await callback.answer("⏳ Загружаю файл...", show_alert=False)
+    
+    try:
+        abs_path = os.path.abspath(file_path)
+        file_size = os.path.getsize(abs_path)
+        
+        if file_size > MAX_FILE_SIZE:
+            await callback.answer(f"❌ Файл слишком большой: {file_size / 1024 / 1024:.1f} MB", show_alert=True)
+            return
+        
+        async with aiofiles.open(abs_path, 'rb') as f:
+            file_data = await f.read()
+        
+        file = BufferedInputFile(file=file_data, filename=os.path.basename(abs_path))
+        await callback.message.answer_document(
+            document=file,
+            caption=f"📄 <code>{safe_html_text(abs_path)}</code>\n📦 Размер: {file_size / 1024:.1f} KB"
+        )
+        logger.info(f"📤 Upload (callback): {abs_path}")
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        logger.error(f"❌ Ошибка callback_upload_file: {e}")
+
+@dp.callback_query(F.data.startswith("cat:"))
+async def callback_cat_file(callback: CallbackQuery):
+    """Просмотр содержимого файла по кнопке"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    file_path = callback.data.split(":", 1)[1]
+    
+    await callback.answer("⏳ Читаю файл...", show_alert=False)
+    
+    try:
+        abs_path = os.path.abspath(file_path)
+        file_size = os.path.getsize(abs_path)
+        
+        if file_size > 10 * 1024 * 1024:
+            await callback.answer("❌ Файл слишком большой для просмотра (макс. 10 MB)", show_alert=True)
+            return
+        
+        async with aiofiles.open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = await f.read()
+        
+        txt = f"{EMOJI['file']} <b>Содержимое:</b>\n"
+        txt += f"📁 <code>{safe_html_text(abs_path)}</code>\n\n"
+        txt += f"<code>{safe_html_text(content[:3000])}</code>"
+        
+        if len(content) > 3000:
+            txt += f"\n\n<i>...обрезано. Используй 📤 для полного файла</i>"
+        
+        # Кнопка "Назад"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"file:{abs_path}")]
+        ])
+        
+        await callback.message.edit_text(txt, parse_mode="HTML", reply_markup=keyboard)
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        logger.error(f"❌ Ошибка callback_cat_file: {e}")
+
+@dp.callback_query(F.data.startswith("rm_confirm:"))
+async def callback_rm_confirm(callback: CallbackQuery):
+    """Подтверждение удаления файла"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    file_path = callback.data.split(":", 1)[1]
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"rm_exec:{file_path}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"file:{file_path}"),
+        ]
+    ])
+    
+    await callback.message.edit_text(
+        f"{EMOJI['warning']} <b>Подтвердите удаление!</b>\n\n"
+        f"📁 Путь: <code>{safe_html_text(file_path)}</code>\n\n"
+        f"<i>Это действие нельзя отменить!</i>",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("rm_exec:"))
+async def callback_rm_exec(callback: CallbackQuery):
+    """Выполнение удаления файла"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    file_path = callback.data.split(":", 1)[1]
+    
+    try:
+        abs_path = os.path.abspath(file_path)
+        os.remove(abs_path)
+        
+        await callback.message.edit_text(
+            f"{EMOJI['check']} <b>Файл удалён!</b>\n"
+            f"📁 <code>{safe_html_text(abs_path)}</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"ls:{os.path.dirname(abs_path)}")]
+            ])
+        )
+        logger.info(f"🗑️ RM (callback): {abs_path}")
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        logger.error(f"❌ Ошибка callback_rm_exec: {e}")
+
+@dp.callback_query(F.data.startswith("upload_dir:"))
+async def callback_upload_dir(callback: CallbackQuery):
+    """Загрузка списка файлов директории (архивом)"""
+    if callback.from_user.id != OWNER_ID_INT:
+        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        return
+    
+    dir_path = callback.data.split(":", 1)[1]
+    
+    await callback.answer("⏳ Готовлю архив...", show_alert=False)
+    
+    try:
+        import zipfile
+        
+        abs_path = os.path.abspath(dir_path)
+        archive_path = f"/tmp/ls_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        
+        # Создаём архив
+        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(abs_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, abs_path)
+                    zipf.write(file_path, arcname)
+        
+        # Отправляем архив
+        async with aiofiles.open(archive_path, 'rb') as f:
+            archive_data = await f.read()
+        
+        file = BufferedInputFile(file=archive_data, filename=f"ls_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+        await callback.message.answer_document(
+            document=file,
+            caption=f"📦 Архив директории:\n<code>{safe_html_text(abs_path)}</code>"
+        )
+        
+        # Удаляем временный файл
+        os.remove(archive_path)
+        logger.info(f"📤 Upload dir (callback): {abs_path}")
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        logger.error(f"❌ Ошибка callback_upload_dir: {e}")
 
 # ================= FILE MANAGEMENT =================
 ALLOWED_DIRECTORIES = [
@@ -1434,7 +1762,7 @@ async def cmd_ls(m: Message):
         return
     
     parts = m.text.split()
-    path = parts[1] if len(parts) > 1 else "."
+    path = parts[1] if len(parts) > 1 else "/opt/render/project/src"
     
     # Проверка безопасности
     is_safe, error_msg = is_path_safe(path)
@@ -1443,7 +1771,6 @@ async def cmd_ls(m: Message):
         return
     
     try:
-        # Нормализуем путь
         abs_path = os.path.abspath(path)
         
         if not os.path.exists(abs_path):
@@ -1454,32 +1781,42 @@ async def cmd_ls(m: Message):
             await m.answer(f"{EMOJI['error']} Это не директория: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
             return
         
-        # Получаем список файлов
-        items = os.listdir(abs_path)
-        items.sort()
+        # Получаем список элементов
+        items = []
+        for item in os.listdir(abs_path):
+            item_path = os.path.join(abs_path, item)
+            items.append({
+                'name': item,
+                'path': item_path,
+                'type': 'dir' if os.path.isdir(item_path) else 'file',
+                'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0
+            })
+        items.sort(key=lambda x: (x['type'] != 'dir', x['name'].lower()))
         
+        # Формируем текст
         txt = f"{EMOJI['file']} <b>Список файлов:</b>\n"
         txt += f"📁 Путь: <code>{safe_html_text(abs_path)}</code>\n\n"
         
-        dirs = []
-        files = []
+        dirs = [i for i in items if i['type'] == 'dir']
+        files = [i for i in items if i['type'] == 'file']
         
-        for item in items:
-            item_path = os.path.join(abs_path, item)
-            if os.path.isdir(item_path):
-                dirs.append(f"📁 <code>{safe_html_text(item)}</code>/")
-            else:
-                size = os.path.getsize(item_path)
-                size_str = f"{size / 1024:.1f} KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB"
-                files.append(f"📄 <code>{safe_html_text(item)}</code> ({size_str})")
+        txt += f"📁 Директорий: <b>{len(dirs)}</b>\n"
+        txt += f"📄 Файлов: <b>{len(files)}</b>\n\n"
         
-        txt += "\n".join(dirs[:20]) + "\n" if dirs else ""
-        txt += "\n".join(files[:20]) + "\n" if files else ""
+        if dirs:
+            txt += "<b>Директории:</b>\n" + "\n".join([f"📁 <code>{safe_html_text(d['name'])}</code>" for d in dirs[:5]]) + "\n"
+        if files:
+            txt += "\n<b>Файлы:</b>\n" + "\n".join([f"📄 <code>{safe_html_text(f['name'])}</code> ({f['size']/1024:.1f} KB)" for f in files[:5]])
         
-        if len(dirs) > 20 or len(files) > 20:
-            txt += f"\n<i>...и ещё {len(dirs) + len(files) - 40} файлов (показано первые 40)</i>"
+        if len(dirs) > 5 or len(files) > 5:
+            txt += f"\n\n<i>...показано первые 5, используй кнопки для навигации</i>"
         
-        await m.answer(txt, parse_mode="HTML")
+        # Отправляем с клавиатурой
+        await m.answer(
+            txt,
+            parse_mode="HTML",
+            reply_markup=create_ls_keyboard(abs_path, items)
+        )
         
     except Exception as e:
         await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
