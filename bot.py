@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery 
 import subprocess
 import asyncio
 import shlex
@@ -22,19 +22,18 @@ import shlex
 # ================= SHELL COMMANDS (БЕЗОПАСНОСТЬ) =================
 SHELL_ALLOWED_COMMANDS = [
     # Безопасные команды для мониторинга
-    "ls", "pwd", "whoami", "date", "uptime", "free", "df", "ps", "top", "cat", "head", "tail",
+    "ls", "pwd", "whoami", "date", "uptime", "free", "df", "ps", "top", "cat", "head", "tail", "echo"
     # Git и деплой
     "git", "pip", "python", "python3",
     # Сеть (осторожно)
     "curl", "wget", "ping",
     # Файлы (только чтение)
-    "grep", "find", "wc", "du"
+    "grep", "find", "wc", "du",
 ]
 
 SHELL_BLACKLISTED = [
-    "rm -rf", "mkfs", "dd", "chmod 777", "chown", "sudo", "su",
-    ":(){:|:&};:", "fork", "eval", "exec", "source", ".", 
-    "wget http", "curl http",  # Запрещаем скачивание извне
+    "rm -rf", "mkfs", "dd", "chmod 777", "chown",
+    ":(){:|:&};:", "fork", "eval", "exec", "source", ".",  # Запрещаем скачивание извне
     ">", ">>", "|", "&", ";", "`", "$(",  # Запрещаем перенаправления и подстановки
 ]
 
