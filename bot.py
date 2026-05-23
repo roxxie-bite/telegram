@@ -1812,13 +1812,13 @@ async def cmd_ls(m: Message):
         txt += f"📁 Директорий: <b>{len(dirs)}</b>\n"
         txt += f"📄 Файлов: <b>{len(files)}</b>\n\n"
         
-        if dirs:
+    if dirs:
     dir_lines = []
     for item in dirs[:5]:
         dir_lines.append(f"📁 <code>{safe_html_text(item['name'])}</code>")
     txt += "<b>Директории:</b>\n" + "\n".join(dir_lines) + "\n"
 
-if files:
+    if files:
     file_lines = []
     for item in files[:5]:
         size_kb = item['size'] / 1024
