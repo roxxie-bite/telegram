@@ -131,6 +131,14 @@ current_music_message_id = None
 last_track_id = None
 music_message_timestamp = None
 
+# === HQRadio парсинг ===
+HQ_RADIO_URL = "https://hqradio.ru/stations/phonk_radiorecord-ru"
+parse_hq_enabled = False  # Флаг включения парсинга
+last_parsed_track = None  # Кэш последнего трека
+last_parse_time = 0  # Время последнего парсинга
+PARSE_COOLDOWN = 30  # Мин. секунд между парсингами
+
+
 # ================= ПРЕМИУМ ЭМОДЗИ =================
 def premium_emoji(emoji_id: str, fallback: str = "⭐") -> str:
     """
@@ -545,6 +553,99 @@ def find_all_loras(min_days):
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
+
+# ================= HQRADIO ПАРСИНГ =================
+def parse_hq_radio(html: str) -> dict | None:
+    """Парсит информацию о текущем треке с HQRadio"""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Пробуем разные селекторы (сайт может менять структуру)
+        track_info = {}
+        
+        # 1. Название трека и артист
+        # Часто в элементе с классом player-track или similar
+        track_elem = soup.find("div", class_="player-track") or \
+                     soup.find("div", class_="now-playing") or \
+                     soup.find("div", {"id": "track-info"})
+        
+        if track_elem:
+            # Пробуем найти название
+            title_elem = track_elem.find("div", class_="track-title") or \
+                        track_elem.find("span", class_="title") or \
+                        track_elem.find("a", class_="track-link")
+            if title_elem:
+                track_info["title"] = title_elem.get_text(strip=True)
+            
+            # Пробуем найти артиста
+            artist_elem = track_elem.find("div", class_="track-artist") or \
+                         track_elem.find("span", class_="artist") or \
+                         track_elem.find("a", class_="artist-link")
+            if artist_elem:
+                track_info["artist"] = artist_elem.get_text(strip=True)
+        
+        # 2. Если не нашли в блоке — ищем по общим классам
+        if not track_info.get("title"):
+            title = soup.find("meta", property="og:title")
+            if title:
+                track_info["title"] = title.get("content", "").split(" - ")[0].strip()
+        
+        if not track_info.get("artist"):
+            # Пробуем из og:title в формате "Artist - Title"
+            og_title = soup.find("meta", property="og:title")
+            if og_title and " - " in og_title.get("content", ""):
+                parts = og_title["content"].split(" - ", 1)
+                if len(parts) == 2:
+                    track_info["artist"] = parts[0].strip()
+                    if not track_info.get("title"):
+                        track_info["title"] = parts[1].strip()
+        
+        # 3. Обложка
+        cover_elem = soup.find("meta", property="og:image") or \
+                     soup.find("img", class_="track-cover") or \
+                     soup.find("img", {"id": "cover"})
+        if cover_elem:
+            cover_url = cover_elem.get("content") or cover_elem.get("src") or cover_elem.get("data-src")
+            if cover_url:
+                # Исправляем относительные пути
+                if cover_url.startswith("//"):
+                    cover_url = "https:" + cover_url
+                elif cover_url.startswith("/"):
+                    cover_url = "https://hqradio.ru" + cover_url
+                track_info["cover_url"] = cover_url
+        
+        # 4. Длительность (если есть)
+        duration_elem = soup.find("span", class_="track-duration") or \
+                       soup.find("time", class_="duration") or \
+                       soup.find("div", class_="player-time")
+        if duration_elem:
+            track_info["duration"] = duration_elem.get_text(strip=True)
+        
+        # Возвращаем только если нашли хотя бы название
+        if track_info.get("title"):
+            track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
+            track_info["source"] = "hqradio.ru"
+            return track_info
+        
+        return None
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка парсинга HQRadio: {e}")
+        return None
+
+async def fetch_hq_radio() -> dict | None:
+    """Загружает и парсит страницу HQRadio"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        response = requests.get(HQ_RADIO_URL, headers=headers, timeout=15)
+        response.raise_for_status()
+        return parse_hq_radio(response.text)
+    except requests.RequestException as e:
+        logger.warning(f"⚠️ Ошибка загрузки HQRadio: {e}")
+        return None
 
 # ================= ФОРМАТИРОВАНИЕ И ОТПРАВКА =================
 def format_message(lora):
@@ -1964,6 +2065,96 @@ async def cmd_check(message: Message):
     finally: 
         update_settings(user_id, is_checking=False)
 
+
+@dp.message(Command("parse"))
+async def cmd_parse(m: Message):
+    """Включить/выключить парсинг HQRadio: /parse on/off/status"""
+    global parse_hq_enabled
+    
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split()
+    action = parts[1].lower() if len(parts) > 1 else "status"
+    
+    if action in ["on", "true", "1", "вкл", "включить"]:
+        parse_hq_enabled = True
+        # Сразу пробуем спарсить
+        track = await fetch_hq_radio()
+        if track:
+            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Парсинг включён!</b>\n\n"
+            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
+            if track.get("artist"):
+                txt += f"🎤 {safe_html_text(track['artist'])}\n"
+            if track.get("duration"):
+                txt += f"⏱️ {track['duration']}\n"
+            if track.get("cover_url"):
+                txt += f"\n<i>Обложка доступна</i>"
+            await m.answer(txt, parse_mode="HTML")
+        else:
+            await m.answer(f"{EMOJI['check']} <b>Парсинг включён!</b>\n\n<i>Следующий трек появится после обновления</i>", parse_mode="HTML")
+        logger.info("🎵 HQRadio парсинг включён")
+        
+    elif action in ["off", "false", "0", "выкл", "выключить"]:
+        parse_hq_enabled = False
+        await m.answer(f"{EMOJI['stop']} <b>Парсинг выключен</b>", parse_mode="HTML")
+        logger.info("🎵 HQRadio парсинг выключен")
+        
+    elif action in ["status", "статус", "стат"]:
+        status = "🟢 ВКЛ" if parse_hq_enabled else "🔴 ВЫКЛ"
+        txt = f"{EMOJI['info']} <b>Статус парсинга HQRadio:</b> {status}\n\n"
+        if last_parsed_track:
+            txt += f"🎵 Последний трек:\n"
+            txt += f"• {safe_html_text(last_parsed_track.get('title', 'Unknown'))}\n"
+            if last_parsed_track.get("artist"):
+                txt += f"• {safe_html_text(last_parsed_track['artist'])}\n"
+            if last_parsed_track.get("duration"):
+                txt += f"• ⏱️ {last_parsed_track['duration']}\n"
+            parsed_time = last_parsed_track.get("parsed_at")
+            if parsed_time:
+                txt += f"\n<i>Обновлено: {parsed_time.strftime('%H:%M:%S')} МСК</i>"
+        else:
+            txt += "<i>Треки ещё не парсились</i>"
+        txt += f"\n\n<b>Управление:</b>\n<code>/parse on</code> — включить\n<code>/parse off</code> — выключить"
+        await m.answer(txt, parse_mode="HTML")
+        
+    elif action in ["now", "сейчас", "текущий"]:
+        # Принудительный парсинг прямо сейчас
+        await m.answer("⏳ Парсю страницу...", parse_mode="HTML")
+        track = await fetch_hq_radio()
+        if track:
+            global last_parsed_track
+            last_parsed_track = track
+            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Сейчас играет:</b>\n\n"
+            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
+            if track.get("artist"):
+                txt += f"🎤 {safe_html_text(track['artist'])}\n"
+            if track.get("duration"):
+                txt += f"⏱️ {track['duration']}\n"
+            if track.get("cover_url"):
+                # Пробуем отправить с обложкой
+                try:
+                    await bot.send_photo(
+                        chat_id=m.chat.id,
+                        photo=track["cover_url"],
+                        caption=txt,
+                        parse_mode="HTML"
+                    )
+                    return
+                except:
+                    txt += f"\n\n<i>⚠️ Не удалось загрузить обложку</i>"
+            await m.answer(txt, parse_mode="HTML")
+        else:
+            await m.answer(f"{EMOJI['warning']} Не удалось получить информацию о треке", parse_mode="HTML")
+    else:
+        await m.answer(
+            f"{EMOJI['info']} <b>Управление парсингом HQRadio:</b>\n\n"
+            f"<code>/parse on</code> — включить парсинг\n"
+            f"<code>/parse off</code> — выключить парсинг\n"
+            f"<code>/parse status</code> — показать статус и последний трек\n"
+            f"<code>/parse now</code> — спарсить прямо сейчас",
+            parse_mode="HTML"
+        )
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
