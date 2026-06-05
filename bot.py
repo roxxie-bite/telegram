@@ -2069,7 +2069,7 @@ async def cmd_check(message: Message):
 @dp.message(Command("parse"))
 async def cmd_parse(m: Message):
     """Включить/выключить парсинг HQRadio: /parse on/off/status"""
-    global parse_hq_enabled
+    global parse_hq_enabled, last_parsed_track, last_parse_time  # ← ВСЕ global в начале!
     
     if m.from_user.id != OWNER_ID_INT:
         return
@@ -2079,9 +2079,10 @@ async def cmd_parse(m: Message):
     
     if action in ["on", "true", "1", "вкл", "включить"]:
         parse_hq_enabled = True
-        # Сразу пробуем спарсить
         track = await fetch_hq_radio()
         if track:
+            last_parsed_track = track  # ← Теперь можно присваивать
+            last_parse_time = time.time()
             txt = f"{PREMIUM_EMOJI['sparkle']} <b>Парсинг включён!</b>\n\n"
             txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
             if track.get("artist"):
@@ -2103,7 +2104,7 @@ async def cmd_parse(m: Message):
     elif action in ["status", "статус", "стат"]:
         status = "🟢 ВКЛ" if parse_hq_enabled else "🔴 ВЫКЛ"
         txt = f"{EMOJI['info']} <b>Статус парсинга HQRadio:</b> {status}\n\n"
-        if last_parsed_track:
+        if last_parsed_track:  # ← Чтение без global — это ОК
             txt += f"🎵 Последний трек:\n"
             txt += f"• {safe_html_text(last_parsed_track.get('title', 'Unknown'))}\n"
             if last_parsed_track.get("artist"):
@@ -2112,49 +2113,7 @@ async def cmd_parse(m: Message):
                 txt += f"• ⏱️ {last_parsed_track['duration']}\n"
             parsed_time = last_parsed_track.get("parsed_at")
             if parsed_time:
-                txt += f"\n<i>Обновлено: {parsed_time.strftime('%H:%M:%S')} МСК</i>"
-        else:
-            txt += "<i>Треки ещё не парсились</i>"
-        txt += f"\n\n<b>Управление:</b>\n<code>/parse on</code> — включить\n<code>/parse off</code> — выключить"
-        await m.answer(txt, parse_mode="HTML")
-        
-    elif action in ["now", "сейчас", "текущий"]:
-        # Принудительный парсинг прямо сейчас
-        await m.answer("⏳ Парсю страницу...", parse_mode="HTML")
-        track = await fetch_hq_radio()
-        if track:
-            global last_parsed_track
-            last_parsed_track = track
-            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Сейчас играет:</b>\n\n"
-            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-            if track.get("artist"):
-                txt += f"🎤 {safe_html_text(track['artist'])}\n"
-            if track.get("duration"):
-                txt += f"⏱️ {track['duration']}\n"
-            if track.get("cover_url"):
-                # Пробуем отправить с обложкой
-                try:
-                    await bot.send_photo(
-                        chat_id=m.chat.id,
-                        photo=track["cover_url"],
-                        caption=txt,
-                        parse_mode="HTML"
-                    )
-                    return
-                except:
-                    txt += f"\n\n<i>⚠️ Не удалось загрузить обложку</i>"
-            await m.answer(txt, parse_mode="HTML")
-        else:
-            await m.answer(f"{EMOJI['warning']} Не удалось получить информацию о треке", parse_mode="HTML")
-    else:
-        await m.answer(
-            f"{EMOJI['info']} <b>Управление парсингом HQRadio:</b>\n\n"
-            f"<code>/parse on</code> — включить парсинг\n"
-            f"<code>/parse off</code> — выключить парсинг\n"
-            f"<code>/parse status</code> — показать статус и последний трек\n"
-            f"<code>/parse now</code> — спарсить прямо сейчас",
-            parse_mode="HTML"
-        )
+                txt +=
 
 @dp.message(Command("track"))
 async def cmd_track(m: Message):
