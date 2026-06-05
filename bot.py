@@ -2113,7 +2113,47 @@ async def cmd_parse(m: Message):
                 txt += f"• ⏱️ {last_parsed_track['duration']}\n"
             parsed_time = last_parsed_track.get("parsed_at")
             if parsed_time:
-                txt +=
+                txt += f"\n<i>Обновлено: {parsed_time.strftime('%H:%M:%S')} МСК</i>"
+        else:
+            txt += "<i>Треки ещё не парсились</i>"
+        txt += f"\n\n<b>Управление:</b>\n<code>/parse on</code> — включить\n<code>/parse off</code> — выключить"
+        await m.answer(txt, parse_mode="HTML")
+        
+    elif action in ["now", "сейчас", "текущий"]:
+        await m.answer("⏳ Парсю страницу...", parse_mode="HTML")
+        track = await fetch_hq_radio()
+        if track:
+            last_parsed_track = track  # ← Присваивание, global уже объявлен выше
+            last_parse_time = time.time()
+            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Сейчас играет:</b>\n\n"
+            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
+            if track.get("artist"):
+                txt += f"🎤 {safe_html_text(track['artist'])}\n"
+            if track.get("duration"):
+                txt += f"⏱️ {track['duration']}\n"
+            if track.get("cover_url"):
+                try:
+                    await bot.send_photo(
+                        chat_id=m.chat.id,
+                        photo=track["cover_url"],
+                        caption=txt,
+                        parse_mode="HTML"
+                    )
+                    return
+                except:
+                    txt += f"\n\n<i>⚠️ Не удалось загрузить обложку</i>"
+            await m.answer(txt, parse_mode="HTML")
+        else:
+            await m.answer(f"{EMOJI['warning']} Не удалось получить информацию о треке", parse_mode="HTML")
+    else:
+        await m.answer(
+            f"{EMOJI['info']} <b>Управление парсингом HQRadio:</b>\n\n"
+            f"<code>/parse on</code> — включить парсинг\n"
+            f"<code>/parse off</code> — выключить парсинг\n"
+            f"<code>/parse status</code> — показать статус и последний трек\n"
+            f"<code>/parse now</code> — спарсить прямо сейчас",
+            parse_mode="HTML"
+        )
 
 @dp.message(Command("track"))
 async def cmd_track(m: Message):
