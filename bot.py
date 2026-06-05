@@ -2069,81 +2069,88 @@ async def cmd_check(message: Message):
 # ================= HQRADIO ПАРСИНГ =================
 
 async def fetch_hq_radio() -> dict | None:
-    """Парсит трек через внутренний API HQRadio"""
-    import time
+    """Парсит трек из HLS-плейлиста HQRadio (.m3u8)"""
+    import re
     
     try:
-        # Параметры для API
-        station_stream = "https://radiorecord.hostingradio.ru/phonk96.aacp"
-        station_name = "phonk_radiorecord-ru"
-        timestamp = int(time.time() * 1000)  # Текущее время в мс
-        
-        # Формируем URL (параметр _ можно опустить, но оставим для совместимости)
-        api_url = (
-            f"https://hqradio.ru/lib/meta?"
-            f"u={station_stream}&"
-            f"n={station_name}&"
-            f"ajax=json&"
-            f"_={timestamp}"
-        )
+        # URL плейлиста (обновляй если изменится)
+        playlist_url = "https://hls-01-radiorecord.hostingradio.ru/record-phonk/112/playlist.m3u8"
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept": "*/*",
             "Referer": "https://hqradio.ru/",
-            "X-Requested-With": "XMLHttpRequest",  # Важно для AJAX-запросов
         }
         
-        response = requests.get(api_url, headers=headers, timeout=10)
+        response = requests.get(playlist_url, headers=headers, timeout=10)
         response.raise_for_status()
-        data = response.json()
         
-        # 🔍 Парсим ответ (структура может отличаться, адаптируй под реальный ответ)
-        # Сначала попробуем стандартные поля
-        artist = data.get("artist") or data.get("ARTIST") or data.get("song", {}).get("artist")
-        title = data.get("title") or data.get("TITLE") or data.get("song", {}).get("title")
-        cover = data.get("cover") or data.get("COVER") or data.get("song", {}).get("cover")
-        duration = data.get("duration") or data.get("DURATION")
+        playlist_text = response.text
         
-        # Если не нашли — выводим ключи для отладки
-        if not artist and not title:
-            logger.warning(f"⚠️ Не найдены artist/title в ответе. Ключи: {list(data.keys())}")
-            # Пробуем альтернативные варианты
-            artist = data.get("performer") or data.get("author") or data.get("name")
-            title = data.get("track") or data.get("song_name") or data.get("text")
+        # 🔍 Ищем все #EXT-X-DATERANGE с метаданными
+        # Формат: #EXT-X-DATERANGE:...X-ARTIST="...",X-TITLE="...",X-COVER-IMAGE-URL="..."...
+        pattern = r'#EXT-X-DATERANGE:[^#]*X-ARTIST="([^"]*)"[^#]*X-TITLE="([^"]*)"'
+        matches = re.findall(pattern, playlist_text)
         
-        if not artist and not title:
-            logger.warning(f"⚠️ Пустой ответ или неизвестный формат: {data}")
+        if not matches:
+            # Пробуем альтернативный порядок атрибутов
+            pattern = r'#EXT-X-DATERANGE:[^#]*X-TITLE="([^"]*)"[^#]*X-ARTIST="([^"]*)"'
+            matches = re.findall(pattern, playlist_text)
+            if matches:
+                # Меняем местами: (title, artist) → (artist, title)
+                matches = [(m[1], m[0]) for m in matches]
+        
+        if not matches:
+            logger.warning("⚠️ Не найдено метаданных в плейлисте")
             return None
+        
+        # Берём ПОСЛЕДНИЙ трек (самый свежий)
+        artist, title = matches[-1]
+        
+        # 🖼️ Ищем обложку в том же теге
+        cover_pattern = r'#EXT-X-DATERANGE:[^#]*X-COVER-IMAGE-URL="([^"]*)"'
+        cover_matches = re.findall(cover_pattern, playlist_text)
+        cover_url = cover_matches[-1] if cover_matches else None
+        
+        # ⏱️ Ищем длительность (опционально)
+        duration_pattern = r'#EXTINF:([\d.]+),'
+        duration_matches = re.findall(duration_pattern, playlist_text)
+        duration = None
+        if duration_matches:
+            # Конвертируем секунды в ММ:СС
+            total_sec = float(duration_matches[-1])
+            mins = int(total_sec // 60)
+            secs = int(total_sec % 60)
+            duration = f"{mins}:{secs:02d}"
         
         track_info = {
             "artist": artist.strip() if artist else "Unknown Artist",
             "title": title.strip() if title else "Unknown Title",
             "parsed_at": datetime.now(timezone(timedelta(hours=3))),
-            "source": "hqradio.ru"
+            "source": "hqradio.ru (HLS)"
         }
         
-        if cover:
+        if cover_url:
             # Исправляем относительные пути
-            if cover.startswith("//"):
-                cover = "https:" + cover
-            elif cover.startswith("/"):
-                cover = "https://hqradio.ru" + cover
-            elif not cover.startswith("http"):
-                cover = "https://hqradio.ru" + cover
-            track_info["cover_url"] = cover
+            if cover_url.startswith("//"):
+                cover_url = "https:" + cover_url
+            elif cover_url.startswith("/"):
+                cover_url = "https://hqradio.ru" + cover_url
+            elif not cover_url.startswith("http"):
+                cover_url = "https://hqradio.ru" + cover_url
+            track_info["cover_url"] = cover_url
         
         if duration:
-            track_info["duration"] = str(duration)
+            track_info["duration"] = duration
         
-        logger.info(f"✅ API: {track_info['artist']} - {track_info['title']}")
+        logger.info(f"✅ HLS: {track_info['artist']} - {track_info['title']}")
         return track_info
         
     except requests.RequestException as e:
-        logger.warning(f"⚠️ Ошибка запроса к HQRadio API: {e}")
+        logger.warning(f"⚠️ Ошибка загрузки плейлиста: {e}")
         return None
     except Exception as e:
-        logger.error(f"❌ Ошибка парсинга HQRadio API: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка парсинга HLS: {e}", exc_info=True)
         return None
 
 def parse_hq_radio(html: str) -> dict | None:
