@@ -2069,19 +2069,81 @@ async def cmd_check(message: Message):
 # ================= HQRADIO ПАРСИНГ =================
 
 async def fetch_hq_radio() -> dict | None:
-    """Загружает и парсит страницу HQRadio"""
+    """Парсит трек через внутренний API HQRadio"""
+    import time
+    
     try:
+        # Параметры для API
+        station_stream = "https://radiorecord.hostingradio.ru/phonk96.aacp"
+        station_name = "phonk_radiorecord-ru"
+        timestamp = int(time.time() * 1000)  # Текущее время в мс
+        
+        # Формируем URL (параметр _ можно опустить, но оставим для совместимости)
+        api_url = (
+            f"https://hqradio.ru/lib/meta?"
+            f"u={station_stream}&"
+            f"n={station_name}&"
+            f"ajax=json&"
+            f"_={timestamp}"
+        )
+        
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
             "Referer": "https://hqradio.ru/",
+            "X-Requested-With": "XMLHttpRequest",  # Важно для AJAX-запросов
         }
-        response = requests.get(HQ_RADIO_URL, headers=headers, timeout=15)
+        
+        response = requests.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
-        return parse_hq_radio(response.text)
+        data = response.json()
+        
+        # 🔍 Парсим ответ (структура может отличаться, адаптируй под реальный ответ)
+        # Сначала попробуем стандартные поля
+        artist = data.get("artist") or data.get("ARTIST") or data.get("song", {}).get("artist")
+        title = data.get("title") or data.get("TITLE") or data.get("song", {}).get("title")
+        cover = data.get("cover") or data.get("COVER") or data.get("song", {}).get("cover")
+        duration = data.get("duration") or data.get("DURATION")
+        
+        # Если не нашли — выводим ключи для отладки
+        if not artist and not title:
+            logger.warning(f"⚠️ Не найдены artist/title в ответе. Ключи: {list(data.keys())}")
+            # Пробуем альтернативные варианты
+            artist = data.get("performer") or data.get("author") or data.get("name")
+            title = data.get("track") or data.get("song_name") or data.get("text")
+        
+        if not artist and not title:
+            logger.warning(f"⚠️ Пустой ответ или неизвестный формат: {data}")
+            return None
+        
+        track_info = {
+            "artist": artist.strip() if artist else "Unknown Artist",
+            "title": title.strip() if title else "Unknown Title",
+            "parsed_at": datetime.now(timezone(timedelta(hours=3))),
+            "source": "hqradio.ru"
+        }
+        
+        if cover:
+            # Исправляем относительные пути
+            if cover.startswith("//"):
+                cover = "https:" + cover
+            elif cover.startswith("/"):
+                cover = "https://hqradio.ru" + cover
+            elif not cover.startswith("http"):
+                cover = "https://hqradio.ru" + cover
+            track_info["cover_url"] = cover
+        
+        if duration:
+            track_info["duration"] = str(duration)
+        
+        logger.info(f"✅ API: {track_info['artist']} - {track_info['title']}")
+        return track_info
+        
     except requests.RequestException as e:
-        logger.warning(f"⚠️ Ошибка загрузки HQRadio: {e}")
+        logger.warning(f"⚠️ Ошибка запроса к HQRadio API: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга HQRadio API: {e}", exc_info=True)
         return None
 
 def parse_hq_radio(html: str) -> dict | None:
