@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton
 import subprocess
 import asyncio
 import shlex
@@ -2074,15 +2074,15 @@ async def inline_search(query: InlineQuery):
         results = [
             InlineQueryResultArticle(
                 id="help",
-                title="✉️ Написать владельцу",
+                title="✉️ Написать",
                 description="Просто начни писать сообщение после @looniesbot",
                 input_message_content=InputTextMessageContent(
                     message_text=(
-                        f"{EMOJI['info']} <b>Как написать владельцу:</b>\n\n"
+                        f"{EMOJI['info']} <b>Как написать:</b>\n\n"
                         f"1. В любом чате напиши: <code>@looniesbot</code>\n"
                         f"2. Сразу пиши текст: <code>@looniesbot Привет, есть вопрос!</code>\n"
                         f"3. Нажми на кнопку «✉️ Отправить»\n"
-                        f"4. Готово! Владелец получит твоё сообщение"
+                        f"4. Готово! Кто-то получит твоё сообщение"
                     ),
                     parse_mode="HTML"
                 ),
@@ -2098,15 +2098,15 @@ async def inline_search(query: InlineQuery):
     results = [
         InlineQueryResultArticle(
             id=f"send_{user.id}_{hash(message_text)}",  # Уникальный ID
-            title="✉️ Отправить владельцу",
+            title="✉️ Отправить",
             description=f"Твоё сообщение: {message_text[:50]}{'...' if len(message_text) > 50 else ''}",
             input_message_content=InputTextMessageContent(
-                message_text=f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Владелец получит его в ближайшее время</i>",
+                message_text=f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Кто-то получит его в ближайшее время</i>",
                 parse_mode="HTML"
             ),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
-                    text="✉️ Отправить владельцу",
+                    text="✉️ Отправить",
                     callback_data=f"inline_send:{user.id}:{message_text}"
                 )]
             ]),
@@ -2172,6 +2172,26 @@ async def callback_inline_send(callback: CallbackQuery):
         logger.error(f"❌ Ошибка отправки inline: {e}")
         await callback.answer("❌ Не удалось отправить", show_alert=True)
 
+
+@dp.inline_query()
+async def inline_search(query: InlineQuery):
+    """Отладка inline — покажет что запрос пришёл"""
+    logger.info(f"🔍 INLINE QUERY: user={query.from_user.id} query='{query.query}'")
+    
+    # Простой тестовый ответ
+    results = [
+        InlineQueryResultArticle(
+            id="test",
+            title="🧪 Inline работает!",
+            description="Если видишь это — всё настроено верно",
+            input_message_content=InputTextMessageContent(
+                message_text="✅ Inline mode работает!"
+            )
+        )
+    ]
+    
+    await query.answer(results=results, cache_time=0, is_personal=True)
+    logger.info("✅ Inline ответ отправлен")
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
