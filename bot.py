@@ -131,12 +131,7 @@ current_music_message_id = None
 last_track_id = None
 music_message_timestamp = None
 
-# === HQRadio парсинг ===
-HQ_RADIO_URL = "https://hqradio.ru/stations/phonk_radiorecord-ru"
-parse_hq_enabled = False  # Флаг включения парсинга
-last_parsed_track = None  # Кэш последнего трека
-last_parse_time = 0  # Время последнего парсинга
-PARSE_COOLDOWN = 30  # Мин. секунд между парсингами
+
 
 
 # ================= ПРЕМИУМ ЭМОДЗИ =================
@@ -2066,317 +2061,117 @@ async def cmd_check(message: Message):
     finally: 
         update_settings(user_id, is_checking=False)
 
-# ================= HQRADIO ПАРСИНГ =================
 
-async def fetch_hq_radio() -> dict | None:
-    """Парсит трек из HLS-плейлиста HQRadio (.m3u8)"""
-    import re
+        
+@dp.inline_query()
+async def inline_search(query: InlineQuery):
+    """Простой inline: пользователь пишет текст → отправляется владельцу"""
+    user = query.from_user
+    message_text = query.query.strip()
     
-    try:
-        # URL плейлиста (обновляй если изменится)
-        playlist_url = "https://hls-01-radiorecord.hostingradio.ru/record-phonk/112/playlist.m3u8"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
-            "Referer": "https://hqradio.ru/",
-        }
-        
-        response = requests.get(playlist_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        playlist_text = response.text
-        
-        # 🔍 Ищем все #EXT-X-DATERANGE с метаданными
-        # Формат: #EXT-X-DATERANGE:...X-ARTIST="...",X-TITLE="...",X-COVER-IMAGE-URL="..."...
-        pattern = r'#EXT-X-DATERANGE:[^#]*X-ARTIST="([^"]*)"[^#]*X-TITLE="([^"]*)"'
-        matches = re.findall(pattern, playlist_text)
-        
-        if not matches:
-            # Пробуем альтернативный порядок атрибутов
-            pattern = r'#EXT-X-DATERANGE:[^#]*X-TITLE="([^"]*)"[^#]*X-ARTIST="([^"]*)"'
-            matches = re.findall(pattern, playlist_text)
-            if matches:
-                # Меняем местами: (title, artist) → (artist, title)
-                matches = [(m[1], m[0]) for m in matches]
-        
-        if not matches:
-            logger.warning("⚠️ Не найдено метаданных в плейлисте")
-            return None
-        
-        # Берём ПОСЛЕДНИЙ трек (самый свежий)
-        artist, title = matches[-1]
-        
-        # 🖼️ Ищем обложку в том же теге
-        cover_pattern = r'#EXT-X-DATERANGE:[^#]*X-COVER-IMAGE-URL="([^"]*)"'
-        cover_matches = re.findall(cover_pattern, playlist_text)
-        cover_url = cover_matches[-1] if cover_matches else None
-        
-        # ⏱️ Ищем длительность (опционально)
-        duration_pattern = r'#EXTINF:([\d.]+),'
-        duration_matches = re.findall(duration_pattern, playlist_text)
-        duration = None
-        if duration_matches:
-            # Конвертируем секунды в ММ:СС
-            total_sec = float(duration_matches[-1])
-            mins = int(total_sec // 60)
-            secs = int(total_sec % 60)
-            duration = f"{mins}:{secs:02d}"
-        
-        track_info = {
-            "artist": artist.strip() if artist else "Unknown Artist",
-            "title": title.strip() if title else "Unknown Title",
-            "parsed_at": datetime.now(timezone(timedelta(hours=3))),
-            "source": "hqradio.ru (HLS)"
-        }
-        
-        if cover_url:
-            # Исправляем относительные пути
-            if cover_url.startswith("//"):
-                cover_url = "https:" + cover_url
-            elif cover_url.startswith("/"):
-                cover_url = "https://hqradio.ru" + cover_url
-            elif not cover_url.startswith("http"):
-                cover_url = "https://hqradio.ru" + cover_url
-            track_info["cover_url"] = cover_url
-        
-        if duration:
-            track_info["duration"] = duration
-        
-        logger.info(f"✅ HLS: {track_info['artist']} - {track_info['title']}")
-        return track_info
-        
-    except requests.RequestException as e:
-        logger.warning(f"⚠️ Ошибка загрузки плейлиста: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка парсинга HLS: {e}", exc_info=True)
-        return None
-
-async def get_latest_playlist_url() -> str:
-    """Получает актуальную ссылку на плейлист с главной страницы"""
-    try:
-        response = requests.get("https://www.radiorecord.ru/station/phonk", timeout=10)
-        # Ищем ссылку на .m3u8 в HTML
-        match = re.search(r'(https://[^\s"\'<>]+\.m3u8[^"\']*)', response.text)
-        if match:
-            return match.group(1).split('?')[0]  # Убираем параметры если нужно
-    except:
-        pass
-    # Fallback на старую ссылку
-    return "https://hls-01-radiorecord.hostingradio.ru/record-phonk/112/playlist.m3u8"
-
-def parse_hq_radio(html: str) -> dict | None:
-    """Парсит информацию о текущем треке с HQRadio"""
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # 🔍 Ищем элемент с id="track"
-        track_elem = soup.find("div", id="track")
-        
-        if not track_elem:
-            logger.warning("⚠️ Элемент #track не найден на странице")
-            return None
-        
-        # Получаем текст в формате "ARTIST - TITLE"
-        track_text = track_elem.get_text(strip=True)
-        
-        if not track_text:
-            logger.warning("⚠️ Элемент #track пустой")
-            return None
-        
-        logger.info(f"🎵 Найдено: {track_text}")
-        
-        # Разделяем по " - " (первое вхождение)
-        track_info = {}
-        
-        if " - " in track_text:
-            parts = track_text.split(" - ", 1)
-            if len(parts) == 2:
-                track_info["artist"] = parts[0].strip()
-                track_info["title"] = parts[1].strip()
-            else:
-                track_info["title"] = track_text
-        else:
-            track_info["title"] = track_text
-        
-        # 🖼️ Ищем обложку в <i class="cover" style="background-image: url(...)">
-        cover_elem = soup.find("i", class_="cover")
-        
-        if cover_elem:
-            # Получаем style атрибут
-            style = cover_elem.get("style", "")
-            
-            # Ищем URL в background-image: url("...")
-            import re
-            url_match = re.search(r'background-image:\s*url\(["\']?([^"\')]+)["\']?\)', style)
-            
-            if url_match:
-                cover_url = url_match.group(1)
-                # Исправляем HTML-сущности (&quot; → ")
-                cover_url = cover_url.replace("&quot;", '"').replace('"', '')
-                
-                # Исправляем относительные пути
-                if cover_url.startswith("//"):
-                    cover_url = "https:" + cover_url
-                elif cover_url.startswith("/"):
-                    cover_url = "https://hqradio.ru" + cover_url
-                elif not cover_url.startswith("http"):
-                    cover_url = "https://hqradio.ru" + cover_url
-                
-                track_info["cover_url"] = cover_url
-                logger.info(f"🖼️ Обложка найдена: {cover_url}")
-            else:
-                logger.warning("⚠️ Не удалось извлечь URL из style атрибута")
-        else:
-            logger.warning("⚠️ Элемент <i class='cover'> не найден")
-            
-            # Fallback: ищем og:image
-            og_image = soup.find("meta", property="og:image")
-            if og_image:
-                track_info["cover_url"] = og_image.get("content")
-                logger.info(f"🖼️ Обложка из og:image: {track_info['cover_url']}")
-        
-        # ⏱️ Ищем длительность (если есть)
-        duration_elem = soup.find("span", class_="duration")
-        if not duration_elem:
-            duration_elem = soup.find("span", class_="track-duration")
-        if not duration_elem:
-            duration_elem = soup.find("time")
-        
-        if duration_elem:
-            track_info["duration"] = duration_elem.get_text(strip=True)
-        
-        # Добавляем метаданные
-        track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
-        track_info["source"] = "hqradio.ru"
-        track_info["raw_text"] = track_text
-        
-        logger.info(f"✅ Спаршено: {track_info.get('artist', '?')} - {track_info.get('title', '?')}")
-        return track_info
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка парсинга HQRadio: {e}", exc_info=True)
-        return None  # ← Обязательно вернуть None при ошибке!
-        
-
-@dp.message(Command("parse"))
-async def cmd_parse(m: Message):
-    """Включить/выключить парсинг HQRadio: /parse on/off/status"""
-    global parse_hq_enabled, last_parsed_track, last_parse_time  # ← ВСЕ global в начале!
-    
-    if m.from_user.id != OWNER_ID_INT:
+    # Если запрос пустой — покажи подсказку
+    if not message_text:
+        results = [
+            InlineQueryResultArticle(
+                id="help",
+                title="✉️ Написать владельцу",
+                description="Просто начни писать сообщение после @looniesbot",
+                input_message_content=InputTextMessageContent(
+                    message_text=(
+                        f"{EMOJI['info']} <b>Как написать владельцу:</b>\n\n"
+                        f"1. В любом чате напиши: <code>@looniesbot</code>\n"
+                        f"2. Сразу пиши текст: <code>@looniesbot Привет, есть вопрос!</code>\n"
+                        f"3. Нажми на кнопку «✉️ Отправить»\n"
+                        f"4. Готово! Владелец получит твоё сообщение"
+                    ),
+                    parse_mode="HTML"
+                ),
+                thumbnail_url="https://i.imgur.com/help.png",
+                thumbnail_width=64,
+                thumbnail_height=64
+            )
+        ]
+        await query.answer(results=results, cache_time=30, is_personal=True)
         return
     
-    parts = m.text.split()
-    action = parts[1].lower() if len(parts) > 1 else "status"
+    # Формируем результат с кнопкой отправки
+    results = [
+        InlineQueryResultArticle(
+            id=f"send_{user.id}_{hash(message_text)}",  # Уникальный ID
+            title="✉️ Отправить владельцу",
+            description=f"Твоё сообщение: {message_text[:50]}{'...' if len(message_text) > 50 else ''}",
+            input_message_content=InputTextMessageContent(
+                message_text=f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Владелец получит его в ближайшее время</i>",
+                parse_mode="HTML"
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="✉️ Отправить владельцу",
+                    callback_data=f"inline_send:{user.id}:{message_text}"
+                )]
+            ]),
+            thumbnail_url="https://i.imgur.com/send.png",
+            thumbnail_width=64,
+            thumbnail_height=64
+        )
+    ]
     
-    if action in ["on", "true", "1", "вкл", "включить"]:
-        parse_hq_enabled = True
-        track = await fetch_hq_radio()
-        if track:
-            last_parsed_track = track  # ← Теперь можно присваивать
-            last_parse_time = time.time()
-            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Парсинг включён!</b>\n\n"
-            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-            if track.get("artist"):
-                txt += f"🎤 {safe_html_text(track['artist'])}\n"
-            if track.get("duration"):
-                txt += f"⏱️ {track['duration']}\n"
-            if track.get("cover_url"):
-                txt += f"\n<i>Обложка доступна</i>"
-            await m.answer(txt, parse_mode="HTML")
-        else:
-            await m.answer(f"{EMOJI['check']} <b>Парсинг включён!</b>\n\n<i>Следующий трек появится после обновления</i>", parse_mode="HTML")
-        logger.info("🎵 HQRadio парсинг включён")
+    await query.answer(results=results, cache_time=0, is_personal=True)
+
+
+@dp.callback_query(F.data.startswith("inline_send:"))
+async def callback_inline_send(callback: CallbackQuery):
+    """Обрабатывает нажатие кнопки 'Отправить владельцу' в inline"""
+    # Извлекаем данные: inline_send:USER_ID:MESSAGE
+    try:
+        parts = callback.data.split(":", 2)
+        if len(parts) != 3:
+            await callback.answer("❌ Ошибка формата", show_alert=True)
+            return
         
-    elif action in ["off", "false", "0", "выкл", "выключить"]:
-        parse_hq_enabled = False
-        await m.answer(f"{EMOJI['stop']} <b>Парсинг выключен</b>", parse_mode="HTML")
-        logger.info("🎵 HQRadio парсинг выключен")
-        
-    elif action in ["status", "статус", "стат"]:
-        status = "🟢 ВКЛ" if parse_hq_enabled else "🔴 ВЫКЛ"
-        txt = f"{EMOJI['info']} <b>Статус парсинга HQRadio:</b> {status}\n\n"
-        if last_parsed_track:  # ← Чтение без global — это ОК
-            txt += f"🎵 Последний трек:\n"
-            txt += f"• {safe_html_text(last_parsed_track.get('title', 'Unknown'))}\n"
-            if last_parsed_track.get("artist"):
-                txt += f"• {safe_html_text(last_parsed_track['artist'])}\n"
-            if last_parsed_track.get("duration"):
-                txt += f"• ⏱️ {last_parsed_track['duration']}\n"
-            parsed_time = last_parsed_track.get("parsed_at")
-            if parsed_time:
-                txt += f"\n<i>Обновлено: {parsed_time.strftime('%H:%M:%S')} МСК</i>"
-        else:
-            txt += "<i>Треки ещё не парсились</i>"
-        txt += f"\n\n<b>Управление:</b>\n<code>/parse on</code> — включить\n<code>/parse off</code> — выключить"
-        await m.answer(txt, parse_mode="HTML")
-        
-    elif action in ["now", "сейчас", "текущий"]:
-        await m.answer("⏳ Парсю страницу...", parse_mode="HTML")
-        track = await fetch_hq_radio()
-        if track:
-            last_parsed_track = track  # ← Присваивание, global уже объявлен выше
-            last_parse_time = time.time()
-            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Сейчас играет:</b>\n\n"
-            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-            if track.get("artist"):
-                txt += f"🎤 {safe_html_text(track['artist'])}\n"
-            if track.get("duration"):
-                txt += f"⏱️ {track['duration']}\n"
-            if track.get("cover_url"):
-                try:
-                    await bot.send_photo(
-                        chat_id=m.chat.id,
-                        photo=track["cover_url"],
-                        caption=txt,
-                        parse_mode="HTML"
-                    )
-                    return
-                except:
-                    txt += f"\n\n<i>⚠️ Не удалось загрузить обложку</i>"
-            await m.answer(txt, parse_mode="HTML")
-        else:
-            await m.answer(f"{EMOJI['warning']} Не удалось получить информацию о треке", parse_mode="HTML")
-    else:
-        await m.answer(
-            f"{EMOJI['info']} <b>Управление парсингом HQRadio:</b>\n\n"
-            f"<code>/parse on</code> — включить парсинг\n"
-            f"<code>/parse off</code> — выключить парсинг\n"
-            f"<code>/parse status</code> — показать статус и последний трек\n"
-            f"<code>/parse now</code> — спарсить прямо сейчас",
+        sender_id = int(parts[1])
+        message_text = parts[2]
+    except (ValueError, IndexError) as e:
+        logger.error(f"❌ Ошибка парсинга callback: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
+    # Получаем инфо о пользователе
+    try:
+        sender = await bot.get_chat(sender_id)
+        sender_name = sender.full_name
+        sender_username = f"@{sender.username}" if sender.username else "нет"
+    except:
+        sender_name = "Unknown"
+        sender_username = "нет"
+    
+    # Отправляем сообщение владельцу
+    try:
+        await bot.send_message(
+            chat_id=OWNER_ID_INT,
+            text=(
+                f"{PREMIUM_EMOJI['sparkle']} <b>✉️ Новое сообщение (inline):</b>\n\n"
+                f"👤 <b>От:</b> {safe_html_text(sender_name)} ({sender_username})\n"
+                f"🆔 <b>ID:</b> <code>{sender_id}</code>\n"
+                f"💬 <b>Текст:</b>\n{safe_html_text(message_text)}\n\n"
+                f"<i>Ответь на это сообщение чтобы ответить пользователю</i>"
+            ),
             parse_mode="HTML"
         )
+        logger.info(f"📩 Inline от {sender_id}: {message_text[:100]}")
+        
+        # Подтверждение пользователю
+        await callback.answer("✅ Отправлено!", show_alert=False)
+        await callback.message.edit_text(
+            f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Ожидай ответа в ЛС</i>",
+            parse_mode="HTML",
+            reply_markup=None  # Убираем кнопку после отправки
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки inline: {e}")
+        await callback.answer("❌ Не удалось отправить", show_alert=True)
 
-@dp.message(Command("track"))
-async def cmd_track(m: Message):
-    """Быстро отправить текущий трек в чат"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    if not last_parsed_track:
-        await m.answer(f"{EMOJI['info']} Трек ещё не спаршен. Включи /parse on", parse_mode="HTML")
-        return
-    
-    track = last_parsed_track
-    txt = f"🎧 <b>Сейчас играет на Phonk Radio:</b>\n\n"
-    txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-    if track.get("artist"):
-        txt += f"🎤 {safe_html_text(track['artist'])}\n"
-    if track.get("duration"):
-        txt += f"⏱️ {track['duration']}\n"
-    txt += f"\n<i>via @looniesbot</i>"
-    
-    # Если есть обложка — отправляем фото
-    if track.get("cover_url"):
-        try:
-            await bot.send_photo(chat_id=m.chat.id, photo=track["cover_url"], caption=txt, parse_mode="HTML")
-            return
-        except:
-            pass
-    
-    await m.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
