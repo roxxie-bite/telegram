@@ -2153,6 +2153,19 @@ async def fetch_hq_radio() -> dict | None:
         logger.error(f"❌ Ошибка парсинга HLS: {e}", exc_info=True)
         return None
 
+async def get_latest_playlist_url() -> str:
+    """Получает актуальную ссылку на плейлист с главной страницы"""
+    try:
+        response = requests.get("https://www.radiorecord.ru/station/phonk", timeout=10)
+        # Ищем ссылку на .m3u8 в HTML
+        match = re.search(r'(https://[^\s"\'<>]+\.m3u8[^"\']*)', response.text)
+        if match:
+            return match.group(1).split('?')[0]  # Убираем параметры если нужно
+    except:
+        pass
+    # Fallback на старую ссылку
+    return "https://hls-01-radiorecord.hostingradio.ru/record-phonk/112/playlist.m3u8"
+
 def parse_hq_radio(html: str) -> dict | None:
     """Парсит информацию о текущем треке с HQRadio"""
     try:
