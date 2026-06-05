@@ -2173,25 +2173,7 @@ async def callback_inline_send(callback: CallbackQuery):
         await callback.answer("❌ Не удалось отправить", show_alert=True)
 
 
-@dp.inline_query()
-async def inline_search(query: InlineQuery):
-    """Отладка inline — покажет что запрос пришёл"""
-    logger.info(f"🔍 INLINE QUERY: user={query.from_user.id} query='{query.query}'")
-    
-    # Простой тестовый ответ
-    results = [
-        InlineQueryResultArticle(
-            id="test",
-            title="🧪 Inline работает!",
-            description="Если видишь это — всё настроено верно",
-            input_message_content=InputTextMessageContent(
-                message_text="✅ Inline mode работает!"
-            )
-        )
-    ]
-    
-    await query.answer(results=results, cache_time=0, is_personal=True)
-    logger.info("✅ Inline ответ отправлен")
+
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
