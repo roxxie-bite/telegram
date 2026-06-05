@@ -2066,6 +2066,117 @@ async def cmd_check(message: Message):
     finally: 
         update_settings(user_id, is_checking=False)
 
+# ================= HQRADIO ПАРСИНГ =================
+
+async def fetch_hq_radio() -> dict | None:
+    """Загружает и парсит страницу HQRadio"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://hqradio.ru/",
+        }
+        response = requests.get(HQ_RADIO_URL, headers=headers, timeout=15)
+        response.raise_for_status()
+        return parse_hq_radio(response.text)
+    except requests.RequestException as e:
+        logger.warning(f"⚠️ Ошибка загрузки HQRadio: {e}")
+        return None
+
+def parse_hq_radio(html: str) -> dict | None:
+    """Парсит информацию о текущем треке с HQRadio"""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # 🔍 Ищем элемент с id="track"
+        track_elem = soup.find("div", id="track")
+        
+        if not track_elem:
+            logger.warning("⚠️ Элемент #track не найден на странице")
+            return None
+        
+        # Получаем текст в формате "ARTIST - TITLE"
+        track_text = track_elem.get_text(strip=True)
+        
+        if not track_text:
+            logger.warning("⚠️ Элемент #track пустой")
+            return None
+        
+        logger.info(f"🎵 Найдено: {track_text}")
+        
+        # Разделяем по " - " (первое вхождение)
+        track_info = {}
+        
+        if " - " in track_text:
+            parts = track_text.split(" - ", 1)
+            if len(parts) == 2:
+                track_info["artist"] = parts[0].strip()
+                track_info["title"] = parts[1].strip()
+            else:
+                track_info["title"] = track_text
+        else:
+            track_info["title"] = track_text
+        
+        # 🖼️ Ищем обложку в <i class="cover" style="background-image: url(...)">
+        cover_elem = soup.find("i", class_="cover")
+        
+        if cover_elem:
+            # Получаем style атрибут
+            style = cover_elem.get("style", "")
+            
+            # Ищем URL в background-image: url("...")
+            import re
+            url_match = re.search(r'background-image:\s*url\(["\']?([^"\')]+)["\']?\)', style)
+            
+            if url_match:
+                cover_url = url_match.group(1)
+                # Исправляем HTML-сущности (&quot; → ")
+                cover_url = cover_url.replace("&quot;", '"').replace('"', '')
+                
+                # Исправляем относительные пути
+                if cover_url.startswith("//"):
+                    cover_url = "https:" + cover_url
+                elif cover_url.startswith("/"):
+                    cover_url = "https://hqradio.ru" + cover_url
+                elif not cover_url.startswith("http"):
+                    cover_url = "https://hqradio.ru" + cover_url
+                
+                track_info["cover_url"] = cover_url
+                logger.info(f"🖼️ Обложка найдена: {cover_url}")
+            else:
+                logger.warning("⚠️ Не удалось извлечь URL из style атрибута")
+        else:
+            logger.warning("⚠️ Элемент <i class='cover'> не найден")
+            
+            # Fallback: ищем og:image
+            og_image = soup.find("meta", property="og:image")
+            if og_image:
+                track_info["cover_url"] = og_image.get("content")
+                logger.info(f"🖼️ Обложка из og:image: {track_info['cover_url']}")
+        
+        # ⏱️ Ищем длительность (если есть)
+        duration_elem = soup.find("span", class_="duration")
+        if not duration_elem:
+            duration_elem = soup.find("span", class_="track-duration")
+        if not duration_elem:
+            duration_elem = soup.find("time")
+        
+        if duration_elem:
+            track_info["duration"] = duration_elem.get_text(strip=True)
+        
+        # Добавляем метаданные
+        track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
+        track_info["source"] = "hqradio.ru"
+        track_info["raw_text"] = track_text
+        
+        logger.info(f"✅ Спаршено: {track_info.get('artist', '?')} - {track_info.get('title', '?')}")
+        return track_info
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга HQRadio: {e}", exc_info=True)
+        return None  # ← Обязательно вернуть None при ошибке!
+        
 
 @dp.message(Command("parse"))
 async def cmd_parse(m: Message):
