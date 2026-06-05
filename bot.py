@@ -2156,6 +2156,35 @@ async def cmd_parse(m: Message):
             parse_mode="HTML"
         )
 
+@dp.message(Command("track"))
+async def cmd_track(m: Message):
+    """Быстро отправить текущий трек в чат"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    if not last_parsed_track:
+        await m.answer(f"{EMOJI['info']} Трек ещё не спаршен. Включи /parse on", parse_mode="HTML")
+        return
+    
+    track = last_parsed_track
+    txt = f"🎧 <b>Сейчас играет на Phonk Radio:</b>\n\n"
+    txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
+    if track.get("artist"):
+        txt += f"🎤 {safe_html_text(track['artist'])}\n"
+    if track.get("duration"):
+        txt += f"⏱️ {track['duration']}\n"
+    txt += f"\n<i>via @looniesbot</i>"
+    
+    # Если есть обложка — отправляем фото
+    if track.get("cover_url"):
+        try:
+            await bot.send_photo(chat_id=m.chat.id, photo=track["cover_url"], caption=txt, parse_mode="HTML")
+            return
+        except:
+            pass
+    
+    await m.answer(txt, parse_mode="HTML")
+
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
     if message.from_user.id != OWNER_ID_INT: return
