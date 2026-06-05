@@ -560,91 +560,92 @@ def parse_hq_radio(html: str) -> dict | None:
     try:
         soup = BeautifulSoup(html, "html.parser")
         
-        # Пробуем разные селекторы (сайт может менять структуру)
+        # 🔍 Ищем элемент с id="track"
+        track_elem = soup.find("div", id="track")
+        
+        if not track_elem:
+            logger.warning("⚠️ Элемент #track не найден на странице")
+            return None
+        
+        # Получаем текст в формате "ARTIST - TITLE"
+        track_text = track_elem.get_text(strip=True)
+        
+        if not track_text:
+            logger.warning("⚠️ Элемент #track пустой")
+            return None
+        
+        logger.info(f"🎵 Найдено: {track_text}")
+        
+        # Разделяем по " - " (первое вхождение)
         track_info = {}
         
-        # 1. Название трека и артист
-        # Часто в элементе с классом player-track или similar
-        track_elem = soup.find("div", class_="player-track") or \
-                     soup.find("div", class_="now-playing") or \
-                     soup.find("div", {"id": "track-info"})
+        if " - " in track_text:
+            parts = track_text.split(" - ", 1)
+            if len(parts) == 2:
+                track_info["artist"] = parts[0].strip()
+                track_info["title"] = parts[1].strip()
+            else:
+                track_info["title"] = track_text
+        else:
+            track_info["title"] = track_text
         
-        if track_elem:
-            # Пробуем найти название
-            title_elem = track_elem.find("div", class_="track-title") or \
-                        track_elem.find("span", class_="title") or \
-                        track_elem.find("a", class_="track-link")
-            if title_elem:
-                track_info["title"] = title_elem.get_text(strip=True)
-            
-            # Пробуем найти артиста
-            artist_elem = track_elem.find("div", class_="track-artist") or \
-                         track_elem.find("span", class_="artist") or \
-                         track_elem.find("a", class_="artist-link")
-            if artist_elem:
-                track_info["artist"] = artist_elem.get_text(strip=True)
+        # 🖼️ Ищем обложку в <i class="cover" style="background-image: url(...)">
+        cover_elem = soup.find("i", class_="cover")
         
-        # 2. Если не нашли в блоке — ищем по общим классам
-        if not track_info.get("title"):
-            title = soup.find("meta", property="og:title")
-            if title:
-                track_info["title"] = title.get("content", "").split(" - ")[0].strip()
-        
-        if not track_info.get("artist"):
-            # Пробуем из og:title в формате "Artist - Title"
-            og_title = soup.find("meta", property="og:title")
-            if og_title and " - " in og_title.get("content", ""):
-                parts = og_title["content"].split(" - ", 1)
-                if len(parts) == 2:
-                    track_info["artist"] = parts[0].strip()
-                    if not track_info.get("title"):
-                        track_info["title"] = parts[1].strip()
-        
-        # 3. Обложка
-        cover_elem = soup.find("meta", property="og:image") or \
-                     soup.find("img", class_="track-cover") or \
-                     soup.find("img", {"id": "cover"})
         if cover_elem:
-            cover_url = cover_elem.get("content") or cover_elem.get("src") or cover_elem.get("data-src")
-            if cover_url:
+            # Получаем style атрибут
+            style = cover_elem.get("style", "")
+            
+            # Ищем URL в background-image: url("...")
+            import re
+            url_match = re.search(r'background-image:\s*url\(["\']?([^"\')]+)["\']?\)', style)
+            
+            if url_match:
+                cover_url = url_match.group(1)
+                # Исправляем HTML-сущности (&quot; → ")
+                cover_url = cover_url.replace("&quot;", '"').replace('"', '')
+                
                 # Исправляем относительные пути
                 if cover_url.startswith("//"):
                     cover_url = "https:" + cover_url
                 elif cover_url.startswith("/"):
                     cover_url = "https://hqradio.ru" + cover_url
+                elif not cover_url.startswith("http"):
+                    cover_url = "https://hqradio.ru" + cover_url
+                
                 track_info["cover_url"] = cover_url
+                logger.info(f"🖼️ Обложка найдена: {cover_url}")
+            else:
+                logger.warning("⚠️ Не удалось извлечь URL из style атрибута")
+        else:
+            logger.warning("⚠️ Элемент <i class='cover'> не найден")
+            
+            # Fallback: ищем og:image
+            og_image = soup.find("meta", property="og:image")
+            if og_image:
+                track_info["cover_url"] = og_image.get("content")
+                logger.info(f"🖼️ Обложка из og:image: {track_info['cover_url']}")
         
-        # 4. Длительность (если есть)
-        duration_elem = soup.find("span", class_="track-duration") or \
-                       soup.find("time", class_="duration") or \
-                       soup.find("div", class_="player-time")
+        # ⏱️ Ищем длительность (если есть)
+        duration_elem = soup.find("span", class_="duration")
+        if not duration_elem:
+            duration_elem = soup.find("span", class_="track-duration")
+        if not duration_elem:
+            duration_elem = soup.find("time")
+        
         if duration_elem:
             track_info["duration"] = duration_elem.get_text(strip=True)
         
-        # Возвращаем только если нашли хотя бы название
-        if track_info.get("title"):
-            track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
-            track_info["source"] = "hqradio.ru"
-            return track_info
+        # Добавляем метаданные
+        track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
+        track_info["source"] = "hqradio.ru"
+        track_info["raw_text"] = track_text
         
-        return None
+        logger.info(f"✅ Спаршено: {track_info.get('artist', '?')} - {track_info.get('title', '?')}")
+        return track_info
         
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка парсинга HQRadio: {e}")
-        return None
-
-async def fetch_hq_radio() -> dict | None:
-    """Загружает и парсит страницу HQRadio"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        response = requests.get(HQ_RADIO_URL, headers=headers, timeout=15)
-        response.raise_for_status()
-        return parse_hq_radio(response.text)
-    except requests.RequestException as e:
-        logger.warning(f"⚠️ Ошибка загрузки HQRadio: {e}")
+        logger.error(f"❌ Ошибка парсинга HQRadio: {e}", exc_info=True)
         return None
 
 # ================= ФОРМАТИРОВАНИЕ И ОТПРАВКА =================
