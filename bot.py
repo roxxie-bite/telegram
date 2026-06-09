@@ -518,7 +518,8 @@ def parse_loras_from_html(html, min_days):
         logger.error("Ошибка парсинга: " + str(e))
         return []
 
-def find_loras_by_tag(tag, min_days):
+
+async def find_loras_by_tag(tag, min_days):
     all_results, pages_scanned = [], 0
     for page in range(1, MAX_PAGES + 1):
         if not bot_running: break
@@ -534,11 +535,12 @@ def find_loras_by_tag(tag, min_days):
         else:
             logger.info("Стр. " + str(page) + ": лор не найдено")
             if page > 3: break
-        if page < MAX_PAGES: time.sleep(1.0)
+        if page < MAX_PAGES: 
+            await asyncio.sleep(1.0)
     logger.info("=== Тег " + tag + " готов === Лор: " + str(len(all_results)) + " | Стр: " + str(pages_scanned))
     return all_results, pages_scanned
 
-def find_all_loras(min_days):
+async def find_all_loras(min_days):
     all_results, pages_scanned = [], 0
     for page in range(1, MAX_PAGES + 1):
         if not bot_running: break
@@ -565,7 +567,8 @@ def find_all_loras(min_days):
         else:
             logger.info("Стр. " + str(page) + ": лор есть, но ни один не прошёл фильтр (мин. дней: " + str(min_days) + ")")
         
-        if page < MAX_PAGES: time.sleep(1.0)
+        if page < MAX_PAGES: 
+            await asyncio.sleep(1.0)
     
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
@@ -2041,13 +2044,13 @@ async def cmd_check(message: Message):
         update_settings(user_id, is_checking=True)
         await message.answer(EMOJI["search"] + " Поиск запущен...", parse_mode="HTML")
         min_days, tags = settings["min_days"], settings["tags"]
-        if tags:
+       if tags:
             all_loras, total_pages = [], 0
             for tag in tags:
-                loras, pages = find_loras_by_tag(tag, min_days)
-                all_loras.extend(loras); total_pages += pages
-        else:
-            all_loras, total_pages = find_all_loras(min_days)
+        loras, pages = await find_loras_by_tag(tag, min_days)  # ← Добавлен await!
+        all_loras.extend(loras); total_pages += pages
+    else:
+        all_loras, total_pages = await find_all_loras(min_days) 
         if not all_loras: 
             await message.answer(EMOJI["check"] + " Лоры не найдены.")
             update_settings(user_id, is_checking=False, last_check=time.time())
