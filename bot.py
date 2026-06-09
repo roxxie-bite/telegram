@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton
 import subprocess
 import asyncio
 import shlex
@@ -130,13 +130,10 @@ music_task = None
 current_music_message_id = None
 last_track_id = None
 music_message_timestamp = None
+# === Rate limiting для сайта с лорами ===
+LAST_REQUEST_TIME = 0  # Время последнего запроса
+REQUEST_DELAY = 1.0    # Мин. секунд между запросами (по просьбе владельца)
 
-# === HQRadio парсинг ===
-HQ_RADIO_URL = "https://hqradio.ru/stations/phonk_radiorecord-ru"
-parse_hq_enabled = False  # Флаг включения парсинга
-last_parsed_track = None  # Кэш последнего трека
-last_parse_time = 0  # Время последнего парсинга
-PARSE_COOLDOWN = 30  # Мин. секунд между парсингами
 
 
 # ================= ПРЕМИУМ ЭМОДЗИ =================
@@ -461,18 +458,37 @@ def check_cooldown(user_id):
     return False, int(COOLDOWN_SECONDS - elapsed)
 
 # ================= ЗАПРОСЫ И ПАРСИНГ =================
-def fetch_with_retry(url, max_retries=3):
+async def fetch_with_retry(url, max_retries=3):
+    """Асинхронный запрос с rate limiting (1 запрос/сек)"""
+    global LAST_REQUEST_TIME
+    
     headers = {"User-Agent": "Mozilla/5.0"}
+    
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.get(url, headers=headers, timeout=20)
+            # 🔹 Ждём если прошло меньше REQUEST_DELAY секунд с последнего запроса
+            now = time.time()
+            time_since_last = now - LAST_REQUEST_TIME
+            if time_since_last < REQUEST_DELAY:
+                await asyncio.sleep(REQUEST_DELAY - time_since_last)
+            
+            # 🔹 Выполняем запрос в отдельном потоке (чтобы не блокировать event loop)
+            response = await asyncio.to_thread(
+                requests.get, url, headers=headers, timeout=20
+            )
             response.raise_for_status()
+            
+            # 🔹 Обновляем время последнего запроса
+            LAST_REQUEST_TIME = time.time()
+            
             return response.text
+            
         except requests.RequestException as e:
-            logger.warning("Попытка " + str(attempt) + " упала: " + str(e))
+            logger.warning(f"Попытка {attempt} упала: {e}")
             if attempt == max_retries:
                 return None
-            time.sleep(2 ** attempt)
+            # 🔹 Ждём перед повторной попыткой (экспоненциальная задержка)
+            await asyncio.sleep(min(2 ** attempt, 10))
 
 def parse_loras_from_html(html, min_days):
     if html is None:
@@ -508,7 +524,7 @@ def find_loras_by_tag(tag, min_days):
         if not bot_running: break
         url = BASE_URL + "&t=" + tag + ("&c="+str(page) if page>1 else "")
         logger.info("=== Тег: " + tag + " | Страница: " + str(page) + " ===")
-        html = fetch_with_retry(url)
+        html = await fetch_with_retry(url)
         if not html: break
         loras = parse_loras_from_html(html, min_days)
         pages_scanned += 1
@@ -528,7 +544,7 @@ def find_all_loras(min_days):
         if not bot_running: break
         url = BASE_URL if page == 1 else BASE_URL + "&c=" + str(page)
         logger.info("=== Все лоры | Страница: " + str(page) + " ===")
-        html = fetch_with_retry(url)
+        html = await fetch_with_retry(url)
         if not html: break
         
         # 🔍 Парсим "сырые" лоры (без фильтра) чтобы проверить, есть ли они вообще
@@ -560,91 +576,92 @@ def parse_hq_radio(html: str) -> dict | None:
     try:
         soup = BeautifulSoup(html, "html.parser")
         
-        # Пробуем разные селекторы (сайт может менять структуру)
+        # 🔍 Ищем элемент с id="track"
+        track_elem = soup.find("div", id="track")
+        
+        if not track_elem:
+            logger.warning("⚠️ Элемент #track не найден на странице")
+            return None
+        
+        # Получаем текст в формате "ARTIST - TITLE"
+        track_text = track_elem.get_text(strip=True)
+        
+        if not track_text:
+            logger.warning("⚠️ Элемент #track пустой")
+            return None
+        
+        logger.info(f"🎵 Найдено: {track_text}")
+        
+        # Разделяем по " - " (первое вхождение)
         track_info = {}
         
-        # 1. Название трека и артист
-        # Часто в элементе с классом player-track или similar
-        track_elem = soup.find("div", class_="player-track") or \
-                     soup.find("div", class_="now-playing") or \
-                     soup.find("div", {"id": "track-info"})
+        if " - " in track_text:
+            parts = track_text.split(" - ", 1)
+            if len(parts) == 2:
+                track_info["artist"] = parts[0].strip()
+                track_info["title"] = parts[1].strip()
+            else:
+                track_info["title"] = track_text
+        else:
+            track_info["title"] = track_text
         
-        if track_elem:
-            # Пробуем найти название
-            title_elem = track_elem.find("div", class_="track-title") or \
-                        track_elem.find("span", class_="title") or \
-                        track_elem.find("a", class_="track-link")
-            if title_elem:
-                track_info["title"] = title_elem.get_text(strip=True)
-            
-            # Пробуем найти артиста
-            artist_elem = track_elem.find("div", class_="track-artist") or \
-                         track_elem.find("span", class_="artist") or \
-                         track_elem.find("a", class_="artist-link")
-            if artist_elem:
-                track_info["artist"] = artist_elem.get_text(strip=True)
+        # 🖼️ Ищем обложку в <i class="cover" style="background-image: url(...)">
+        cover_elem = soup.find("i", class_="cover")
         
-        # 2. Если не нашли в блоке — ищем по общим классам
-        if not track_info.get("title"):
-            title = soup.find("meta", property="og:title")
-            if title:
-                track_info["title"] = title.get("content", "").split(" - ")[0].strip()
-        
-        if not track_info.get("artist"):
-            # Пробуем из og:title в формате "Artist - Title"
-            og_title = soup.find("meta", property="og:title")
-            if og_title and " - " in og_title.get("content", ""):
-                parts = og_title["content"].split(" - ", 1)
-                if len(parts) == 2:
-                    track_info["artist"] = parts[0].strip()
-                    if not track_info.get("title"):
-                        track_info["title"] = parts[1].strip()
-        
-        # 3. Обложка
-        cover_elem = soup.find("meta", property="og:image") or \
-                     soup.find("img", class_="track-cover") or \
-                     soup.find("img", {"id": "cover"})
         if cover_elem:
-            cover_url = cover_elem.get("content") or cover_elem.get("src") or cover_elem.get("data-src")
-            if cover_url:
+            # Получаем style атрибут
+            style = cover_elem.get("style", "")
+            
+            # Ищем URL в background-image: url("...")
+            import re
+            url_match = re.search(r'background-image:\s*url\(["\']?([^"\')]+)["\']?\)', style)
+            
+            if url_match:
+                cover_url = url_match.group(1)
+                # Исправляем HTML-сущности (&quot; → ")
+                cover_url = cover_url.replace("&quot;", '"').replace('"', '')
+                
                 # Исправляем относительные пути
                 if cover_url.startswith("//"):
                     cover_url = "https:" + cover_url
                 elif cover_url.startswith("/"):
                     cover_url = "https://hqradio.ru" + cover_url
+                elif not cover_url.startswith("http"):
+                    cover_url = "https://hqradio.ru" + cover_url
+                
                 track_info["cover_url"] = cover_url
+                logger.info(f"🖼️ Обложка найдена: {cover_url}")
+            else:
+                logger.warning("⚠️ Не удалось извлечь URL из style атрибута")
+        else:
+            logger.warning("⚠️ Элемент <i class='cover'> не найден")
+            
+            # Fallback: ищем og:image
+            og_image = soup.find("meta", property="og:image")
+            if og_image:
+                track_info["cover_url"] = og_image.get("content")
+                logger.info(f"🖼️ Обложка из og:image: {track_info['cover_url']}")
         
-        # 4. Длительность (если есть)
-        duration_elem = soup.find("span", class_="track-duration") or \
-                       soup.find("time", class_="duration") or \
-                       soup.find("div", class_="player-time")
+        # ⏱️ Ищем длительность (если есть)
+        duration_elem = soup.find("span", class_="duration")
+        if not duration_elem:
+            duration_elem = soup.find("span", class_="track-duration")
+        if not duration_elem:
+            duration_elem = soup.find("time")
+        
         if duration_elem:
             track_info["duration"] = duration_elem.get_text(strip=True)
         
-        # Возвращаем только если нашли хотя бы название
-        if track_info.get("title"):
-            track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
-            track_info["source"] = "hqradio.ru"
-            return track_info
+        # Добавляем метаданные
+        track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
+        track_info["source"] = "hqradio.ru"
+        track_info["raw_text"] = track_text
         
-        return None
+        logger.info(f"✅ Спаршено: {track_info.get('artist', '?')} - {track_info.get('title', '?')}")
+        return track_info
         
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка парсинга HQRadio: {e}")
-        return None
-
-async def fetch_hq_radio() -> dict | None:
-    """Загружает и парсит страницу HQRadio"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        response = requests.get(HQ_RADIO_URL, headers=headers, timeout=15)
-        response.raise_for_status()
-        return parse_hq_radio(response.text)
-    except requests.RequestException as e:
-        logger.warning(f"⚠️ Ошибка загрузки HQRadio: {e}")
+        logger.error(f"❌ Ошибка парсинга HQRadio: {e}", exc_info=True)
         return None
 
 # ================= ФОРМАТИРОВАНИЕ И ОТПРАВКА =================
@@ -2066,123 +2083,118 @@ async def cmd_check(message: Message):
         update_settings(user_id, is_checking=False)
 
 
-@dp.message(Command("parse"))
-async def cmd_parse(m: Message):
-    """Включить/выключить парсинг HQRadio: /parse on/off/status"""
-    global parse_hq_enabled, last_parsed_track, last_parse_time  # ← ВСЕ global в начале!
+        
+@dp.inline_query()
+async def inline_search(query: InlineQuery):
+    """Простой inline: пользователь пишет текст → отправляется владельцу"""
+    user = query.from_user
+    message_text = query.query.strip()
     
-    if m.from_user.id != OWNER_ID_INT:
+    # Если запрос пустой — покажи подсказку
+    if not message_text:
+        results = [
+            InlineQueryResultArticle(
+                id="help",
+                title="✉️ Написать",
+                description="Просто начни писать сообщение после @looniesbot",
+                input_message_content=InputTextMessageContent(
+                    message_text=(
+                        f"{EMOJI['info']} <b>Как написать:</b>\n\n"
+                        f"1. В любом чате напиши: <code>@looniesbot</code>\n"
+                        f"2. Сразу пиши текст: <code>@looniesbot Привет, есть вопрос!</code>\n"
+                        f"3. Нажми на кнопку «✉️ Отправить»\n"
+                        f"4. Готово! Кто-то получит твоё сообщение"
+                    ),
+                    parse_mode="HTML"
+                ),
+                thumbnail_url="https://i.imgur.com/help.png",
+                thumbnail_width=64,
+                thumbnail_height=64
+            )
+        ]
+        await query.answer(results=results, cache_time=30, is_personal=True)
         return
     
-    parts = m.text.split()
-    action = parts[1].lower() if len(parts) > 1 else "status"
+    # Формируем результат с кнопкой отправки
+    results = [
+        InlineQueryResultArticle(
+            id=f"send_{user.id}_{hash(message_text)}",  # Уникальный ID
+            title="✉️ Отправить",
+            description=f"Твоё сообщение: {message_text[:50]}{'...' if len(message_text) > 50 else ''}",
+            input_message_content=InputTextMessageContent(
+                message_text=f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Кто-то получит его в ближайшее время</i>",
+                parse_mode="HTML"
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="✉️ Отправить",
+                    callback_data=f"inline_send:{user.id}:{message_text}"
+                )]
+            ]),
+            thumbnail_url="https://i.imgur.com/send.png",
+            thumbnail_width=64,
+            thumbnail_height=64
+        )
+    ]
     
-    if action in ["on", "true", "1", "вкл", "включить"]:
-        parse_hq_enabled = True
-        track = await fetch_hq_radio()
-        if track:
-            last_parsed_track = track  # ← Теперь можно присваивать
-            last_parse_time = time.time()
-            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Парсинг включён!</b>\n\n"
-            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-            if track.get("artist"):
-                txt += f"🎤 {safe_html_text(track['artist'])}\n"
-            if track.get("duration"):
-                txt += f"⏱️ {track['duration']}\n"
-            if track.get("cover_url"):
-                txt += f"\n<i>Обложка доступна</i>"
-            await m.answer(txt, parse_mode="HTML")
-        else:
-            await m.answer(f"{EMOJI['check']} <b>Парсинг включён!</b>\n\n<i>Следующий трек появится после обновления</i>", parse_mode="HTML")
-        logger.info("🎵 HQRadio парсинг включён")
+    await query.answer(results=results, cache_time=0, is_personal=True)
+
+
+@dp.callback_query(F.data.startswith("inline_send:"))
+async def callback_inline_send(callback: CallbackQuery):
+    """Обрабатывает нажатие кнопки 'Отправить владельцу' в inline"""
+    # Извлекаем данные: inline_send:USER_ID:MESSAGE
+    try:
+        parts = callback.data.split(":", 2)
+        if len(parts) != 3:
+            await callback.answer("❌ Ошибка формата", show_alert=True)
+            return
         
-    elif action in ["off", "false", "0", "выкл", "выключить"]:
-        parse_hq_enabled = False
-        await m.answer(f"{EMOJI['stop']} <b>Парсинг выключен</b>", parse_mode="HTML")
-        logger.info("🎵 HQRadio парсинг выключен")
-        
-    elif action in ["status", "статус", "стат"]:
-        status = "🟢 ВКЛ" if parse_hq_enabled else "🔴 ВЫКЛ"
-        txt = f"{EMOJI['info']} <b>Статус парсинга HQRadio:</b> {status}\n\n"
-        if last_parsed_track:  # ← Чтение без global — это ОК
-            txt += f"🎵 Последний трек:\n"
-            txt += f"• {safe_html_text(last_parsed_track.get('title', 'Unknown'))}\n"
-            if last_parsed_track.get("artist"):
-                txt += f"• {safe_html_text(last_parsed_track['artist'])}\n"
-            if last_parsed_track.get("duration"):
-                txt += f"• ⏱️ {last_parsed_track['duration']}\n"
-            parsed_time = last_parsed_track.get("parsed_at")
-            if parsed_time:
-                txt += f"\n<i>Обновлено: {parsed_time.strftime('%H:%M:%S')} МСК</i>"
-        else:
-            txt += "<i>Треки ещё не парсились</i>"
-        txt += f"\n\n<b>Управление:</b>\n<code>/parse on</code> — включить\n<code>/parse off</code> — выключить"
-        await m.answer(txt, parse_mode="HTML")
-        
-    elif action in ["now", "сейчас", "текущий"]:
-        await m.answer("⏳ Парсю страницу...", parse_mode="HTML")
-        track = await fetch_hq_radio()
-        if track:
-            last_parsed_track = track  # ← Присваивание, global уже объявлен выше
-            last_parse_time = time.time()
-            txt = f"{PREMIUM_EMOJI['sparkle']} <b>Сейчас играет:</b>\n\n"
-            txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-            if track.get("artist"):
-                txt += f"🎤 {safe_html_text(track['artist'])}\n"
-            if track.get("duration"):
-                txt += f"⏱️ {track['duration']}\n"
-            if track.get("cover_url"):
-                try:
-                    await bot.send_photo(
-                        chat_id=m.chat.id,
-                        photo=track["cover_url"],
-                        caption=txt,
-                        parse_mode="HTML"
-                    )
-                    return
-                except:
-                    txt += f"\n\n<i>⚠️ Не удалось загрузить обложку</i>"
-            await m.answer(txt, parse_mode="HTML")
-        else:
-            await m.answer(f"{EMOJI['warning']} Не удалось получить информацию о треке", parse_mode="HTML")
-    else:
-        await m.answer(
-            f"{EMOJI['info']} <b>Управление парсингом HQRadio:</b>\n\n"
-            f"<code>/parse on</code> — включить парсинг\n"
-            f"<code>/parse off</code> — выключить парсинг\n"
-            f"<code>/parse status</code> — показать статус и последний трек\n"
-            f"<code>/parse now</code> — спарсить прямо сейчас",
+        sender_id = int(parts[1])
+        message_text = parts[2]
+    except (ValueError, IndexError) as e:
+        logger.error(f"❌ Ошибка парсинга callback: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
+    # Получаем инфо о пользователе
+    try:
+        sender = await bot.get_chat(sender_id)
+        sender_name = sender.full_name
+        sender_username = f"@{sender.username}" if sender.username else "нет"
+    except:
+        sender_name = "Unknown"
+        sender_username = "нет"
+    
+    # Отправляем сообщение владельцу
+    try:
+        await bot.send_message(
+            chat_id=OWNER_ID_INT,
+            text=(
+                f"{PREMIUM_EMOJI['sparkle']} <b>✉️ Новое сообщение (inline):</b>\n\n"
+                f"👤 <b>От:</b> {safe_html_text(sender_name)} ({sender_username})\n"
+                f"🆔 <b>ID:</b> <code>{sender_id}</code>\n"
+                f"💬 <b>Текст:</b>\n{safe_html_text(message_text)}\n\n"
+                f"<i>Ответь на это сообщение чтобы ответить пользователю</i>"
+            ),
             parse_mode="HTML"
         )
+        logger.info(f"📩 Inline от {sender_id}: {message_text[:100]}")
+        
+        # Подтверждение пользователю
+        await callback.answer("✅ Отправлено!", show_alert=False)
+        await callback.message.edit_text(
+            f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Ожидай ответа в ЛС</i>",
+            parse_mode="HTML",
+            reply_markup=None  # Убираем кнопку после отправки
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки inline: {e}")
+        await callback.answer("❌ Не удалось отправить", show_alert=True)
 
-@dp.message(Command("track"))
-async def cmd_track(m: Message):
-    """Быстро отправить текущий трек в чат"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    if not last_parsed_track:
-        await m.answer(f"{EMOJI['info']} Трек ещё не спаршен. Включи /parse on", parse_mode="HTML")
-        return
-    
-    track = last_parsed_track
-    txt = f"🎧 <b>Сейчас играет на Phonk Radio:</b>\n\n"
-    txt += f"🎵 <b>{safe_html_text(track.get('title', 'Unknown'))}</b>\n"
-    if track.get("artist"):
-        txt += f"🎤 {safe_html_text(track['artist'])}\n"
-    if track.get("duration"):
-        txt += f"⏱️ {track['duration']}\n"
-    txt += f"\n<i>via @looniesbot</i>"
-    
-    # Если есть обложка — отправляем фото
-    if track.get("cover_url"):
-        try:
-            await bot.send_photo(chat_id=m.chat.id, photo=track["cover_url"], caption=txt, parse_mode="HTML")
-            return
-        except:
-            pass
-    
-    await m.answer(txt, parse_mode="HTML")
+
+
 
 @dp.message(Command("setdays"))
 async def cmd_setdays(message: Message):
