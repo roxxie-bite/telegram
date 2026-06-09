@@ -2044,7 +2044,7 @@ async def cmd_check(message: Message):
         update_settings(user_id, is_checking=True)
         await message.answer(EMOJI["search"] + " Поиск запущен...", parse_mode="HTML")
         min_days, tags = settings["min_days"], settings["tags"]
-       if tags:
+        if tags:
             all_loras, total_pages = [], 0
             for tag in tags:
         loras, pages = await find_loras_by_tag(tag, min_days)  # ← Добавлен await!
