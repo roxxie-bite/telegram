@@ -2031,30 +2031,49 @@ async def cmd_help(message: Message):
     txt += f"<b>{EMOJI['stop']} Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить"
     await message.answer(txt, parse_mode="HTML")
 
+
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    if not bot_running: await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML"); return
+    """Поиск лор по настройкам"""
+    if message.from_user.id != OWNER_ID_INT:
+        return
+    
+    if not bot_running:
+        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        return
+    
     user_id = message.from_user.id
     settings = get_settings(user_id)
-    if settings.get("is_checking"): await message.answer(EMOJI["lock"] + " Проверка уже запущена!", parse_mode="HTML"); return
+    
+    if settings.get("is_checking"):
+        await message.answer(EMOJI["lock"] + " Проверка уже запущена!", parse_mode="HTML")
+        return
+    
     can_use, remaining = check_cooldown(user_id)
-    if not can_use: await message.answer(EMOJI["clock"] + f" Кулдаун! Повтори через <b>{remaining}</b> сек.", parse_mode="HTML"); return
+    if not can_use:
+        await message.answer(EMOJI["clock"] + f" Кулдаун! Повтори через <b>{remaining}</b> сек.", parse_mode="HTML")
+        return
+    
     try:
         update_settings(user_id, is_checking=True)
         await message.answer(EMOJI["search"] + " Поиск запущен...", parse_mode="HTML")
+        
         min_days, tags = settings["min_days"], settings["tags"]
+        
         if tags:
             all_loras, total_pages = [], 0
             for tag in tags:
-        loras, pages = await find_loras_by_tag(tag, min_days)  # ← Добавлен await!
-        all_loras.extend(loras); total_pages += pages
-    else:
-        all_loras, total_pages = await find_all_loras(min_days) 
-        if not all_loras: 
+                loras, pages = await find_loras_by_tag(tag, min_days)
+                all_loras.extend(loras)
+                total_pages += pages
+        else:
+            all_loras, total_pages = await find_all_loras(min_days)
+        
+        if not all_loras:
             await message.answer(EMOJI["check"] + " Лоры не найдены.")
             update_settings(user_id, is_checking=False, last_check=time.time())
             return
+        
         all_loras.sort(key=lambda x: x["days"], reverse=True)
         
         # 📤 Отправляем результаты
@@ -2064,7 +2083,7 @@ async def cmd_check(message: Message):
         else:
             await send_loras_to_chat(message, all_loras, total_pages)
         
-        # 🗄️ Сохраняем в кэш если лор <50 (для /export) — ВЫНОСИМ ЗА ПРЕДЕЛЫ if/else
+        # 🗄️ Сохраняем в кэш если лор <50
         if len(all_loras) < 50:
             global last_search_results, last_search_meta
             last_search_results = all_loras.copy()
@@ -2076,13 +2095,14 @@ async def cmd_check(message: Message):
             }
             logger.info(f"💾 Сохранено {len(all_loras)} лор в кэш для /export")
         
-        # ⏱️ Обновляем кулдаун (ОДИН РАЗ)
+        # ⏱️ Обновляем кулдаун
         update_settings(user_id, last_check=time.time())
         logger.info("✅ Поиск завершён: " + str(len(all_loras)) + " лор")
+        
     except Exception as e:
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
         await message.answer(EMOJI["error"] + " Ошибка: " + str(e)[:100], parse_mode="HTML")
-    finally: 
+    finally:
         update_settings(user_id, is_checking=False)
 
 
