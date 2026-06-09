@@ -458,38 +458,66 @@ def check_cooldown(user_id):
     return False, int(COOLDOWN_SECONDS - elapsed)
 
 # ================= ЗАПРОСЫ И ПАРСИНГ =================
-async def fetch_with_retry(url, max_retries=3):
-    """Асинхронный запрос с rate limiting (1 запрос/сек)"""
+async def fetch_with_retry(url, max_retries=3, timeout=60):
+    """Асинхронный запрос с увеличенным таймаутом и логированием"""
     global LAST_REQUEST_TIME
     
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+    }
     
     for attempt in range(1, max_retries + 1):
         try:
-            # 🔹 Ждём если прошло меньше REQUEST_DELAY секунд с последнего запроса
+            # 🔹 Rate limiting
             now = time.time()
             time_since_last = now - LAST_REQUEST_TIME
             if time_since_last < REQUEST_DELAY:
-                await asyncio.sleep(REQUEST_DELAY - time_since_last)
+                wait_time = REQUEST_DELAY - time_since_last
+                logger.info(f"⏱️ Rate limit: ждём {wait_time:.2f} сек")
+                await asyncio.sleep(wait_time)
             
-            # 🔹 Выполняем запрос в отдельном потоке (чтобы не блокировать event loop)
+            logger.info(f"🔗 Запрос #{attempt} к {url[:80]}...")
+            start = time.time()
+            
+            # 🔹 Выполняем запрос
             response = await asyncio.to_thread(
-                requests.get, url, headers=headers, timeout=20
+                requests.get, url, headers=headers, timeout=timeout
             )
+            
+            elapsed = time.time() - start
+            logger.info(f"✅ Ответ за {elapsed:.2f} сек: статус {response.status_code}, размер {len(response.content)} байт")
+            
             response.raise_for_status()
-            
-            # 🔹 Обновляем время последнего запроса
             LAST_REQUEST_TIME = time.time()
-            
             return response.text
             
-        except requests.RequestException as e:
-            logger.warning(f"Попытка {attempt} упала: {e}")
-            if attempt == max_retries:
-                return None
-            # 🔹 Ждём перед повторной попыткой (экспоненциальная задержка)
-            await asyncio.sleep(min(2 ** attempt, 10))
-
+        except requests.exceptions.ConnectTimeout:
+            logger.warning(f"⚠️ Попытка {attempt}: таймаут подключения (>{timeout} сек)")
+        except requests.exceptions.ReadTimeout:
+            logger.warning(f"⚠️ Попытка {attempt}: таймаут чтения (сервер не отвечает)")
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(f"⚠️ Попытка {attempt}: ошибка соединения: {str(e)[:100]}")
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"⚠️ Попытка {attempt}: HTTP {response.status_code if 'response' in locals() else '?'}")
+        except Exception as e:
+            logger.warning(f"⚠️ Попытка {attempt}: непредвиденная ошибка: {type(e).__name__}: {str(e)[:100]}")
+        
+        if attempt < max_retries:
+            wait = min(2 ** attempt, 15)  # Экспоненциальная задержка, макс 15 сек
+            logger.info(f"🔄 Повтор через {wait} сек...")
+            await asyncio.sleep(wait)
+    
+    logger.error(f"❌ Все {max_retries} попыток исчерпаны для {url[:80]}")
+    return None
+    
 def parse_loras_from_html(html, min_days):
     if html is None:
         return []
