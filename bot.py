@@ -132,7 +132,7 @@ last_track_id = None
 music_message_timestamp = None
 # === Rate limiting для сайта с лорами ===
 LAST_REQUEST_TIME = 0  # Время последнего запроса
-REQUEST_DELAY = 1.0    # Мин. секунд между запросами (по просьбе владельца)
+REQUEST_DELAY = 30.0    # Мин. секунд между запросами (по просьбе владельца)
 
 
 
