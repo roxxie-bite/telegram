@@ -2154,180 +2154,118 @@ async def main():
 
 
 # ================= INLINE AI MODE =================
+# ================= INLINE AI MODE (ПОЛНЫЙ) =================
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
-    """
-    Умный inline: @looniesbot → варианты действий с текстом
-    """
+    """Умный inline: @looniesbot → варианты действий"""
     user = query.from_user
     user_input = query.query.strip()
     
-    # 🔹 Если пользователь только начал вводить (пустой или мало символов) — покажи меню
-    if len(user_input) < 3:
+    logger.info(f"🔍 Inline: user_id={user.id} query='{user_input}'")
+    
+    # 🔹 Пустой запрос — показываем меню
+    if len(user_input) < 2:
         results = [
-            # 📚 Объяснить
-            InlineQueryResultArticle(
-                id="mode_explain",
-                title="📚 Объяснить",
-                description="Объясни текст простыми словами",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"{EMOJI['info']} <b>Как использовать:</b>\n\n"
-                               f"1. Выбери этот вариант\n"
-                               f"2. Сразу пиши текст: <code>@looniesbot 📚 Объяснить квантовую физику</code>\n"
-                               f"3. Бот ответит в чат",
-                    parse_mode="HTML"
-                ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="✍️ Ввести текст",
-                        switch_inline_query_current_chat="explain: "
-                    )]
-                ]),
-                thumbnail_url="https://i.imgur.com/explain.png",
-                thumbnail_width=64,
-                thumbnail_height=64
-            ),
-            # 📝 Пересказать
-            InlineQueryResultArticle(
-                id="mode_summarize",
-                title="📝 Пересказать",
-                description="Краткий пересказ текста",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"{EMOJI['info']} <b>Как использовать:</b>\n\n"
-                               f"1. Выбери этот вариант\n"
-                               f"2. Сразу пиши текст: <code>@looniesbot 📝 Перескажи эту статью</code>\n"
-                               f"3. Бот ответит в чат",
-                    parse_mode="HTML"
-                ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="✍️ Ввести текст",
-                        switch_inline_query_current_chat="summarize: "
-                    )]
-                ]),
-        
-            # ❓ Спросить
             InlineQueryResultArticle(
                 id="mode_ask",
                 title="❓ Спросить",
                 description="Задать вопрос нейросети",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"{EMOJI['info']} <b>Как использовать:</b>\n\n"
-                               f"1. Выбери этот вариант\n"
-                               f"2. Сразу пиши вопрос: <code>@looniesbot ❓ Почему небо голубое?</code>\n"
-                               f"3. Бот ответит в чат",
-                    parse_mode="HTML"
+                    message_text="❓ Напиши вопрос после выбора..."
                 ),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="✍️ Задать вопрос",
-                        switch_inline_query_current_chat="ask: "
-                    )]
+                    [InlineKeyboardButton(text="✍️ Задать вопрос", switch_inline_query_current_chat="ask: ")]
                 ]),
-               
+            ),
+            InlineQueryResultArticle(
+                id="mode_explain",
+                title="📚 Объяснить",
+                description="Объяснить текст просто",
+                input_message_content=InputTextMessageContent(
+                    message_text="📚 Введи текст для объяснения..."
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✍️ Ввести текст", switch_inline_query_current_chat="explain: ")]
+                ]),
+            ),
         ]
         await query.answer(results=results, cache_time=30, is_personal=True)
         return
     
-    # 🔹 Парсим ввод: режим:текст (например: "explain: квантовая физика")
-    mode = "ask"  # по умолчанию
+    # 🔹 Есть ввод — парсим режим:текст
+    mode = "ask"
     text = user_input
-    
     if ":" in user_input:
         parts = user_input.split(":", 1)
         mode = parts[0].strip().lower()
         text = parts[1].strip() if len(parts) > 1 else ""
     
-    # 🔹 Если текста ещё нет — покажи подсказку для выбранного режима
+    # 🔹 Нет текста — подсказка
     if not text:
-        mode_titles = {
-            "explain": ("📚 Объяснить", "Введи текст для объяснения..."),
-            "summarize": ("📝 Пересказать", "Введи текст для краткого пересказа..."),
-            "ask": ("❓ Спросить", "Введи твой вопрос..."),
-        }
-        title, desc = mode_titles.get(mode, mode_titles["ask"])
-        
         results = [
             InlineQueryResultArticle(
                 id=f"prompt_{mode}",
-                title=title,
-                description=desc,
+                title="✍️ Введи текст",
+                description="Продолжи писать после режима...",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"{EMOJI['info']} <b>{title}:</b>\n\n"
-                               f"Продолжи писать после <code>@looniesbot {mode}:</code>\n\n"
-                               f"<i>Пример: <code>@looniesbot {mode}: твой текст или вопрос</code></i>",
-                    parse_mode="HTML"
+                    message_text=f"✍️ Пиши: @looniesbot {mode}: твой текст"
                 ),
             )
         ]
         await query.answer(results=results, cache_time=0, is_personal=True)
         return
     
-    # 🔹 Есть режим и текст — отправляем в Gemini
-    # Показываем "загрузку"
+    # 🔹 Есть режим и текст — показываем "думаю"
     results = [
         InlineQueryResultArticle(
             id=f"processing_{query.id}",
             title="⏳ Думаю...",
-            description="Обработка запроса, подожди...",
-            input_message_content=InputTextMessageContent(
-                message_text=f"{EMOJI['brain']} <i>Обработка запроса...</i>",
-                parse_mode="HTML"
-            ),
+            description="Обработка запроса...",
+            input_message_content=InputTextMessageContent(message_text="⏳ <i>Думаю...</i>"),
         )
     ]
     await query.answer(results=results, cache_time=0, is_personal=True)
     
-    # 🔹 Формируем промпт
-    system_prompts = {
-        "explain": "Объясни следующий текст простыми словами, как будто объясняешь новичку. Ответь на русском языке, кратко и понятно:",
-        "summarize": "Сделай краткий пересказ следующего текста, выделив самое главное в 2-3 предложениях. Ответь на русском:",
-        "ask": "Ответь на следующий вопрос. Будь полезен, точен и отвечай на русском языке:",
+    # 🔹 Промпт для Gemini
+    prompts = {
+        "explain": "Объясни просто на русском:",
+        "summarize": "Кратко перескажи на русском в 2-3 предложениях:",
+        "ask": "Ответь на русском:",
     }
+    full_prompt = f"{prompts.get(mode, prompts['ask'])}\n\n{text}"
     
-    full_prompt = f"{system_prompts.get(mode, system_prompts['ask'])}\n\n{text}"
-    
-    # 🔹 Запрашиваем ответ у Gemini
+    # 🔹 Запрос к Gemini
     result = await ask_gemini_http(full_prompt)
     
-    # 🔹 Формируем финальный результат
+    # 🔹 Финальный ответ
     if result["success"]:
         answer = safe_html_text(result["text"])
-        answer = re.sub(r'```(\w*)\n?(.*?)```', r'<code>\2</code>', answer, flags=re.DOTALL)
+        answer = re.sub(r'```.*?```', r'<code>\g<2></code>', answer, flags=re.DOTALL)
         
-        mode_emoji = {"explain": "📚", "summarize": "📝", "ask": "❓"}.get(mode, "🤖")
-        
-        final_results = [
+        final = [
             InlineQueryResultArticle(
                 id=f"answer_{query.id}",
-                title=f"{mode_emoji} Ответ",
-                description=f"Ответ от Gemini на твой запрос",
+                title="✨ Ответ",
+                description="Ответ от Gemini",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
+                    message_text=f"✨ <b>Gemini:</b>\n\n{answer}",
                     parse_mode="HTML"
                 ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Ещё вопрос", switch_inline_query_current_chat="ask: ")]
-                ]) if len(answer) < 3000 else None,
             )
         ]
-        logger.info(f"🤖 Inline {mode}: '{text[:50]}...' → ответ ({len(answer)} символов)")
     else:
-        final_results = [
+        final = [
             InlineQueryResultArticle(
                 id=f"error_{query.id}",
                 title="❌ Ошибка",
                 description=result["error"],
                 input_message_content=InputTextMessageContent(
-                    message_text=f"{EMOJI['error']} {result['error']}\n\n<i>Попробуй ещё раз или упрости запрос</i>",
-                    parse_mode="HTML"
+                    message_text=f"❌ {result['error']}"
                 ),
             )
         ]
-        logger.warning(f"⚠️ Inline ошибка: {result['error']}")
     
-    # 🔹 Отправляем финальный результат
-    await query.answer(results=final_results, cache_time=0, is_personal=True)
+    await query.answer(results=final, cache_time=0, is_personal=True)
 
 
 if __name__ == "__main__":
