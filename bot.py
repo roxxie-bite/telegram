@@ -206,10 +206,9 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= GEMINI ИНИЦИАЛИЗАЦИЯ =================
-# ================= GEMINI ИНИЦИАЛИЗАЦИЯ =================
+# ================= GEMINI ИНИЦИАЛИЗАЦИЯ (НОВЫЙ SDK) =================
 def init_gemini():
-    """Инициализирует клиент Gemini API с авто-выбором модели"""
+    """Инициализирует клиент Gemini API через google.genai (новый SDK)"""
     global gemini_client, gemini_model, GEMINI_MODEL
     
     if not GEMINI_API_KEY:
@@ -217,80 +216,34 @@ def init_gemini():
         return False
     
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
+        # 🔹 НОВЫЙ ИМПОРТ (вместо google.generativeai)
+        from google import genai
+        from google.genai import types
         
-        # 🔹 Список моделей по приоритету (от лучшей к запасной)
+        # Создаём клиент
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # 🔹 Список моделей для проверки (БЕЗ префикса "models/")
         models_to_try = [
-            "gemini-pro",
-            "chat-bison-001",
-            "text-bison-001",
-            "embedding-gecko-001",
-            "gemini-1.0-pro-vision-latest",
-            "gemini-pro-vision",
-            "gemini-1.5-pro-latest",
-            "gemini-1.5-pro-001",
-            "gemini-1.5-pro-002",
-            "gemini-1.5-pro",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash-001",
-            "gemini-1.5-flash-001-tuning",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-002",
-            "gemini-1.5-flash-8b",
-            "gemini-1.5-flash-8b-001",
-            "gemini-1.5-flash-8b-latest",
-            "gemini-1.5-flash-8b-exp-0827",
-            "gemini-1.5-flash-8b-exp-0924",
-            "gemini-2.5-pro-exp-03-25",
-            "gemini-2.0-flash-exp",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-001",
-            "gemini-2.0-flash-exp-image-generation",
-            "gemini-2.0-flash-lite-001",
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash-lite-preview-02-05",
-            "gemini-2.0-flash-lite-preview",
-            "gemini-2.0-pro-exp",
-            "gemini-2.0-pro-exp-02-05",
-            "gemini-exp-1206",
-            "gemini-2.0-flash-thinking-exp-01-21",
-            "gemini-2.0-flash-thinking-exp",
-            "gemini-2.0-flash-thinking-exp-1219",
-            "learnlm-1.5-pro-experimental",
-            "gemma-3-27b-it",
-            "embedding-001",
-            "text-embedding-004",
-            "gemini-embedding-exp-03-07",
-            "gemini-embedding-exp",
-            "aqa",            
+            "gemini-2.0-flash",           # 🆕 Новая, быстрая (РЕКОМЕНДУЮ)
+            "gemini-1.5-flash",           # ⚡ Стабильная, дешёвая
+            "gemini-1.5-pro",             # 🧠 Умная, но дороже
         ]
         
-        # 🔹 Пробуем модели по очереди
         for model_name in models_to_try:
             try:
                 logger.info(f"🔍 Пробую модель: {model_name}")
-                test_model = genai.GenerativeModel(model_name=model_name)
-                # Простой тестовый запрос чтобы проверить доступ
-                test_model.generate_content("Hi", generation_config={"max_output_tokens": 1})
                 
-                # Если дошли сюда — модель работает!
-                GEMINI_MODEL = model_name
-                gemini_model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config={
-                        "temperature": 0.7,
-                        "top_p": 0.95,
-                        "top_k": 40,
-                        "max_output_tokens": 2048,
-                    },
-                    safety_settings=[
-                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                    ]
+                # Тестовый запрос через новый SDK
+                response = gemini_client.models.generate_content(
+                    model=model_name,
+                    contents="Hi",
+                    config=types.GenerateContentConfig(max_output_tokens=1)
                 )
+                
+                # Если успешно — сохраняем модель
+                GEMINI_MODEL = model_name
+                gemini_model = model_name  # В новом SDK передаём имя строкой
                 logger.info(f"✅ Gemini инициализирован: {GEMINI_MODEL}")
                 return True
                 
@@ -298,21 +251,21 @@ def init_gemini():
                 logger.warning(f"⚠️ Модель {model_name} недоступна: {str(e)[:100]}")
                 continue
         
-        # 🔹 Если ни одна модель не сработала
-        logger.error("❌ Ни одна из моделей Gemini не доступна")
+        logger.error("❌ Ни одна модель Gemini не доступна")
         return False
         
-    except ImportError:
-        logger.error("❌ Модуль google-generativeai не установлен")
+    except ImportError as e:
+        logger.error(f"❌ Модуль google.genai не установлен: {e}")
+        logger.error("💡 Выполни: pip install google-genai>=1.0.0")
         return False
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации Gemini: {e}")
         return False
 
-# ================= GEMINI ЗАПРОСЫ =================
+# ================= GEMINI ЗАПРОСЫ (НОВЫЙ SDK) =================
 async def ask_gemini(prompt: str, history: list = None) -> dict:
     """
-    Отправляет запрос к Gemini API
+    Отправляет запрос к Gemini API через google.genai
     
     Args:
         prompt: Текст запроса от пользователя
@@ -321,45 +274,72 @@ async def ask_gemini(prompt: str, history: list = None) -> dict:
     Returns:
         dict: {"success": bool, "text": str, "error": str}
     """
-    if not gemini_model:
+    if not gemini_client or not GEMINI_MODEL:
         return {"success": False, "error": "Gemini не инициализирован"}
     
     try:
-        # Запускаем в отдельном потоке (библиотека не полностью асинхронная)
+        from google.genai import types
+        
+        # 🔹 Формируем контент
+        contents = prompt
+        
+        # 🔹 Если есть история — форматируем для многоходового чата
+        if history:
+            contents = []
+            for msg in history:
+                role = "user" if msg.get("role") == "user" else "model"
+                contents.append(types.Content(
+                    role=role,
+                    parts=[types.Part.from_text(text=msg.get("parts", [""])[0])]
+                ))
+            # Добавляем текущий запрос
+            contents.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt)]
+            ))
+        
+        # 🔹 Конфигурация генерации
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=2048,
+        )
+        
+        # 🔹 Выполняем запрос в отдельном потоке
         def generate():
-            if history:
-                # Создаём чат с историей
-                chat = gemini_model.start_chat(history=history)
-                return chat.send_message(prompt)
-            else:
-                return gemini_model.generate_content(prompt)
+            return gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=config
+            )
         
         response = await asyncio.to_thread(generate)
         
-        # Проверяем на блокировку контента
-        if response.prompt_feedback and response.prompt_feedback.block_reason:
-            return {
-                "success": False, 
-                "error": f"Запрос заблокирован: {response.prompt_feedback.block_reason}"
-            }
-        
-        # Получаем текст ответа
-        text = response.text.strip() if response.text else "(пустой ответ)"
-        
-        return {"success": True, "text": text}
+        # 🔹 Получаем текст ответа
+        if response and response.text:
+            text = response.text.strip()
+            return {"success": True, "text": text}
+        else:
+            return {"success": False, "error": "Пустой ответ от модели"}
         
     except Exception as e:
         error_msg = str(e)
+        logger.error(f"❌ Gemini API error: {error_msg}")
+        
         # Дружелюбные сообщения об ошибках
-        if "429" in error_msg or "quota" in error_msg.lower():
-            return {"success": False, "error": "🔄 Лимит запросов превышен. Попробуй через минуту."}
+        if "404" in error_msg and "not found" in error_msg.lower():
+            return {"success": False, "error": "⚠️ Модель недоступна. Попробуй другую."}
+        elif "429" in error_msg or "quota" in error_msg.lower():
+            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту."}
         elif "400" in error_msg:
             return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать."}
+        elif "403" in error_msg or "permission" in error_msg.lower():
+            return {"success": False, "error": "🔒 Ошибка доступа. Проверь API ключ."}
         elif "503" in error_msg or "unavailable" in error_msg.lower():
-            return {"success": False, "error": "⚠️ Сервис временно недоступен. Попробуй позже."}
+            return {"success": False, "error": "⚠️ Сервис временно недоступен."}
         else:
-            logger.error(f"❌ Ошибка Gemini: {error_msg}")
-            return {"success": False, "error": f"⚠️ Ошибка: {error_msg[:150]}"}
+            return {"success": False, "error": f"⚠️ Ошибка: {error_msg[:200]}"}
 
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
@@ -2114,15 +2094,7 @@ async def cmd_rmforce(m: Message):
 
 @dp.message(Command("ai"))
 async def cmd_ai(m: Message):
-    """
-    Запрос к нейросети Gemini: /ai <твой вопрос>
-    Пример: /ai Напиши стих про котов
-    """
-    # Можно ограничить доступ только владельцу:
-    # if m.from_user.id != OWNER_ID_INT:
-    #     await m.answer(f"{EMOJI['lock']} Эта команда доступна только владельцу", parse_mode="HTML")
-    #     return
-    
+    """Запрос к нейросети Gemini: /ai <твой вопрос>"""
     prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     
     if not prompt:
@@ -2131,37 +2103,24 @@ async def cmd_ai(m: Message):
             f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
             f"<b>Примеры:</b>\n"
             f"• /ai Объясни квантовую физику простыми словами\n"
-            f"• /ai Напиши код для сортировки списка на Python\n"
-            f"• /ai Придумай идею для стартапа в 2026 году",
+            f"• /ai Напиши код для сортировки списка на Python",
             parse_mode="HTML"
         )
         return
     
-    # Отправляем "думаю..."
     status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
-    
-    # Запрашиваем ответ у Gemini
     result = await ask_gemini(prompt)
     
     if result["success"]:
-        # Форматируем ответ (Markdown → HTML для Telegram)
-        answer = result["text"]
-        # Экранируем для HTML
-        answer = safe_html_text(answer)
-        # Заменяем ``` на <code> для форматирования кода
+        answer = safe_html_text(result["text"])
         answer = re.sub(r'```(\w*)\n?(.*?)```', r'<code>\2</code>', answer, flags=re.DOTALL)
         
         await status_msg.edit_text(
             f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
             parse_mode="HTML"
         )
-        logger.info(f"🤖 Gemini: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
     else:
-        await status_msg.edit_text(
-            f"{EMOJI['error']} {result['error']}",
-            parse_mode="HTML"
-        )
-        logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
+        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
 
 
 @dp.message(Command("loglevel"))
