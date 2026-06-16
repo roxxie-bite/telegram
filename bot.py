@@ -2154,111 +2154,46 @@ async def main():
 
 
 ## ================= INLINE QUERY (ПРОВЕРЕННЫЙ ВАРИАНТ) =================
+# ================= INLINE QUERY (МИНИМАЛЬНЫЙ ТЕСТ) =================
 @dp.inline_query()
 async def inline_query_handler(inline_query: InlineQuery):
-    """Обработчик inline-запросов — минимальный рабочий вариант"""
+    """Минимальный тест — должен работать ВСЕГДА"""
     
-    # Логируем запрос
-    query = inline_query.query.strip()
-    logger.info(f"📥 INLINE QUERY: user={inline_query.from_user.id} query='{query}'")
+    # Логируем ЧТО ПРИШЛО
+    logger.info(f"🔥 INLINE QUERY RECEIVED!")
+    logger.info(f"   User: {inline_query.from_user.id} (@{inline_query.from_user.username})")
+    logger.info(f"   Query: '{inline_query.query}'")
     
-    results = []
-    
-    # Если запрос пустой — показываем меню
-    if not query:
-        results.append(
-            InlineQueryResultArticle(
-                id="help",
-                title="🤖 Gemini AI",
-                description="Нажми чтобы увидеть команды",
-                input_message_content=InputTextMessageContent(
-                    message_text=(
-                        f"{EMOJI['info']} <b>Команды:</b>\n\n"
-                        f"• <code>ask</code> — задать вопрос\n"
-                        f"• <code>explain</code> — объяснить текст\n"
-                        f"• <code>summarize</code> — пересказать кратко"
-                    ),
-                    parse_mode="HTML"
-                ),
-                thumbnail_url="https://i.imgur.com/7QZ8V8m.png",
-                thumbnail_width=64,
-                thumbnail_height=64
+    # 🔹 Простой результат который ТОЧНО сработает
+    results = [
+        InlineQueryResultArticle(
+            id="test1",  # Простой ID
+            title="✅ Inline работает!",
+            description="Если видишь это — всё настроено",
+            input_message_content=InputTextMessageContent(
+                message_text="🎉 Inline mode работает!"
+            )
+        ),
+        InlineQueryResultArticle(
+            id="test2",
+            title="❓ Второй результат",
+            description="Тоже должен показаться",
+            input_message_content=InputTextMessageContent(
+                message_text="📝 Второй тестовый результат"
             )
         )
+    ]
     
-    # Команда: ask
-    elif query.lower().startswith("ask"):
-        text = query[4:].strip() if len(query) > 4 else "твой вопрос"
-        results.append(
-            InlineQueryResultArticle(
-                id=f"ask_{inline_query.id}",
-                title="❓ Спросить",
-                description=f"Вопрос: {text[:50]}",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"❓ <b>Твой вопрос:</b> {safe_html_text(text)}\n\n<i>Отправь чтобы получить ответ от ИИ</i>",
-                    parse_mode="HTML"
-                )
-            )
-        )
-    
-    # Команда: explain
-    elif query.lower().startswith("explain"):
-        text = query[8:].strip() if len(query) > 8 else "текст для объяснения"
-        results.append(
-            InlineQueryResultArticle(
-                id=f"explain_{inline_query.id}",
-                title="📚 Объяснить",
-                description=f"Текст: {text[:50]}",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"📚 <b>Объясни:</b> {safe_html_text(text)}",
-                    parse_mode="HTML"
-                )
-            )
-        )
-    
-    # Команда: summarize
-    elif query.lower().startswith("summarize"):
-        text = query[10:].strip() if len(query) > 10 else "текст для пересказа"
-        results.append(
-            InlineQueryResultArticle(
-                id=f"summarize_{inline_query.id}",
-                title="📝 Пересказать",
-                description=f"Текст: {text[:50]}",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"📝 <b>Перескажи кратко:</b> {safe_html_text(text)}",
-                    parse_mode="HTML"
-                )
-            )
-        )
-    
-    # Fallback: если ничего не подошло
-    if not results:
-        results.append(
-            InlineQueryResultArticle(
-                id="unknown",
-                title="❓ Неизвестная команда",
-                description="Доступно: ask, explain, summarize",
-                input_message_content=InputTextMessageContent(
-                    message_text=(
-                        f"<b>📖 Доступные команды:</b>\n\n"
-                        f"• <code>ask</code> — задать вопрос\n"
-                        f"• <code>explain</code> — объяснить текст\n"
-                        f"• <code>summarize</code> — пересказать кратко"
-                    ),
-                    parse_mode="HTML"
-                )
-            )
-        )
-    
-    # Отправляем ответ
-    logger.info(f"📤 Отправляю {len(results)} inline результатов")
+    # 🔹 Отправляем
+    logger.info(f"📤 Отправляю {len(results)} результатов")
     
     try:
-        await inline_query.answer(results[:50], cache_time=1, is_personal=True)
-        logger.info("✅ Inline результаты отправлены")
+        await inline_query.answer(results, cache_time=0, is_personal=True)
+        logger.info("✅ Inline отправлен успешно")
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки inline: {e}")
-
+        logger.error(f"❌ ОТПРАВКА НЕ УДАЛАСЬ: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     try:
