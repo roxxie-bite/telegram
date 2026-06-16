@@ -2133,6 +2133,26 @@ async def run_web_server():
 
 
 
+
+# ================= MAIN =================
+async def main():
+    # Инициализация (функции уже определены выше)
+    init_log_bot()
+    mongo_ok = init_mongo()
+    init_gemini_http()
+    load_forwarded()
+    load_users()
+    load_settings()
+    
+    await run_web_server()
+    moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
+    db_status = "✅ MongoDB" if mongo_ok else "❌ память"
+    logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time} | DB: {db_status}")
+    
+    while True:
+        await asyncio.sleep(3600)
+
+
 # ================= INLINE AI MODE =================
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
@@ -2368,24 +2388,6 @@ async def callback_inline_send(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки inline: {e}")
         await callback.answer("❌ Не удалось отправить", show_alert=True)
-
-# ================= MAIN =================
-async def main():
-    # Инициализация (функции уже определены выше)
-    init_log_bot()
-    mongo_ok = init_mongo()
-    init_gemini_http()
-    load_forwarded()
-    load_users()
-    load_settings()
-    
-    await run_web_server()
-    moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
-    db_status = "✅ MongoDB" if mongo_ok else "❌ память"
-    logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time} | DB: {db_status}")
-    
-    while True:
-        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     try:
