@@ -894,14 +894,6 @@ def format_message(lora):
         "─" * 30
     ])
 
-def make_export_file(loras, min_days, tags):
-    lines = ["# Loonie Bot Export", "# Дата: " + datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M"),
-             "# Порог: >= " + str(min_days) + " дней", "# Теги: " + (", ".join(tags) if tags else "все"),
-             "# Лор: " + str(len(loras)), ""]
-    for l in loras:
-        lines.append("/dellora " + l["id"] + "  # " + l["name"] + " (" + str(l["days"]) + " дней)")
-    return "\n".join(lines).encode("utf-8")
-
 # ================= РАЗБИЕНИЕ ДЛИННЫХ СООБЩЕНИЙ =================
 MAX_MESSAGE_LENGTH = 4000  # Чуть меньше лимита 4096 для безопасности
 
@@ -995,6 +987,14 @@ async def send_long_message(message: Message, text: str, parse_mode: str = "HTML
             # Если не вышло с HTML — пробуем без парсинга
             if parse_mode:
                 await message.answer(part, parse_mode=None)
+
+def make_export_file(loras, min_days, tags):
+    lines = ["# Loonie Bot Export", "# Дата: " + datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M"),
+             "# Порог: >= " + str(min_days) + " дней", "# Теги: " + (", ".join(tags) if tags else "все"),
+             "# Лор: " + str(len(loras)), ""]
+    for l in loras:
+        lines.append("/dellora " + l["id"] + "  # " + l["name"] + " (" + str(l["days"]) + " дней)")
+    return "\n".join(lines).encode("utf-8")
 
 async def send_loras_to_chat(message, loras, total_pages):
     await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
@@ -2279,7 +2279,6 @@ async def cmd_ai(m: Message):
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
         logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
 
-
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
     """Показать или сменить модель Gemini: /model [ключ]"""
@@ -2667,7 +2666,13 @@ async def run_web_server():
     ext_url = os.getenv("RENDER_EXTERNAL_URL")
     if ext_url and bot_running:
         wh_url = ext_url + webhook_path
-        await bot.set_webhook(wh_url)
+        await bot.set_webhook(
+            wh_url,
+            allowed_updates=[
+                "message", "edited_message", "callback_query",
+                "inline_query", "chosen_inline_result",
+            ],
+        )
         logger.info("✅ Webhook: " + wh_url)
 
 
@@ -2694,6 +2699,12 @@ async def main():
 
 
 # ================= INLINE AI MODE (ПОЛНЫЙ) =================
+# 🔹 Хранилище ожидающих запросов: result_id -> (mode, text)
+# Простой словарь в памяти достаточен (запись живёт секунды до выбора варианта
+# пользователем), но при перезапуске процесса он очищается — это нормально.
+PENDING_AI_QUERIES = {}
+
+
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
     logger.info(f"🔥🔥🔥 INLINE HANDLER CALLED! Query: '{query.query}'") 
@@ -2755,57 +2766,70 @@ async def inline_search(query: InlineQuery):
         await query.answer(results=results, cache_time=0, is_personal=True)
         return
     
-    # 🔹 Есть режим и текст — показываем "думаю"
+    # 🔹 Есть режим и текст — отдаём ОДИН результат с плейсхолдером.
+    # ВАЖНО: Telegram не даёт ответить на один и тот же inline_query дважды,
+    # поэтому реальный запрос к Gemini переносим в обработчик chosen_inline_result
+    # (срабатывает, когда пользователь реально выбрал этот вариант),
+    # а готовый ответ доставляем через edit_message_text по inline_message_id.
+    # reply_markup обязателен — без него Telegram не передаст inline_message_id.
+    result_id = f"ai_{query.id}"
+    PENDING_AI_QUERIES[result_id] = (mode, text)
+
     results = [
         InlineQueryResultArticle(
-            id=f"processing_{query.id}",
-            title="⏳ Думаю...",
-            description="Обработка запроса...",
-            input_message_content=InputTextMessageContent(message_text="⏳ <i>Думаю...</i>"),
+            id=result_id,
+            title="✨ Спросить у Gemini",
+            description=text[:64],
+            input_message_content=InputTextMessageContent(message_text="⏳ <i>Думаю...</i>", parse_mode="HTML"),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏳ Обновляется...", callback_data="noop")]
+            ]),
         )
     ]
     await query.answer(results=results, cache_time=0, is_personal=True)
-    
-    # 🔹 Промпт для Gemini
+
+
+@dp.chosen_inline_result()
+async def on_inline_result_chosen(chosen: ChosenInlineResult):
+    """Срабатывает, когда пользователь реально выбрал результат из inline-меню."""
+    data = PENDING_AI_QUERIES.pop(chosen.result_id, None)
+    if not data:
+        return
+    if not chosen.inline_message_id:
+        logger.warning("⚠️ Нет inline_message_id — не могу отредактировать сообщение")
+        return
+
+    mode, text = data
     prompts = {
         "explain": "Объясни просто на русском:",
         "summarize": "Кратко перескажи на русском в 2-3 предложениях:",
         "ask": "Ответь на русском:",
     }
     full_prompt = f"{prompts.get(mode, prompts['ask'])}\n\n{text}"
-    
-    # 🔹 Запрос к Gemini
+
     result = await ask_gemini_http(full_prompt)
-    
-    # 🔹 Финальный ответ
+
     if result["success"]:
         answer = safe_html_text(result["text"])
-        answer = re.sub(r'```.*?```', r'<code>\g<2></code>', answer, flags=re.DOTALL)
-        
-        final = [
-            InlineQueryResultArticle(
-                id=f"answer_{query.id}",
-                title="✨ Ответ",
-                description="Ответ от Gemini",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"✨ <b>Gemini:</b>\n\n{answer}",
-                    parse_mode="HTML"
-                ),
-            )
-        ]
+        answer = re.sub(r'```(?:\w*\n)?(.*?)```', r'<code>\1</code>', answer, flags=re.DOTALL)
+        final_text = f"✨ <b>Gemini:</b>\n\n{answer}"
     else:
-        final = [
-            InlineQueryResultArticle(
-                id=f"error_{query.id}",
-                title="❌ Ошибка",
-                description=result["error"],
-                input_message_content=InputTextMessageContent(
-                    message_text=f"❌ {result['error']}"
-                ),
-            )
-        ]
-    
-    await query.answer(results=final, cache_time=0, is_personal=True)
+        final_text = f"❌ {result['error']}"
+
+    try:
+        await bot.edit_message_text(
+            text=final_text,
+            inline_message_id=chosen.inline_message_id,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"❌ Не удалось отредактировать inline-сообщение: {e}")
+
+
+@dp.callback_query(F.data == "noop")
+async def on_noop_callback(callback: CallbackQuery):
+    """Декоративная кнопка на время ожидания ответа — просто гасим спиннер."""
+    await callback.answer()
 
 
 if __name__ == "__main__":
