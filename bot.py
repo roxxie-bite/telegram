@@ -113,6 +113,10 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 MONGO_URI = os.getenv("MONGO_URI")
 SITE_BASE = "https://lynther.sytes.net"
 
+# ================= GEMINI AI =================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-1.5-flash" 
+
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
 DEFAULT_TAGS = []
@@ -175,6 +179,8 @@ user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
+gemini_client = None
+gemini_model = None
 log_handler = None
 mongo_client = None
 db = None
@@ -199,6 +205,99 @@ if not BOT_TOKEN or not OWNER_ID:
 OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# ================= GEMINI ИНИЦИАЛИЗАЦИЯ =================
+def init_gemini():
+    """Инициализирует клиент Gemini API"""
+    global gemini_client
+    
+    if not GEMINI_API_KEY:
+        logger.warning("⚠️ GEMINI_API_KEY не задан — AI-функции недоступны")
+        return False
+    
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # Создаём модель с настройками
+        global gemini_model
+        gemini_model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            generation_config={
+                "temperature": 0.7,  # Креативность: 0.0-1.0
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 2048,
+            },
+            safety_settings=[
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            ]
+        )
+        
+        logger.info(f"✅ Gemini инициализирован: {GEMINI_MODEL}")
+        return True
+        
+    except ImportError:
+        logger.error("❌ Модуль google-generativeai не установлен — выполни: pip install google-generativeai")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации Gemini: {e}")
+        return False
+
+# ================= GEMINI ЗАПРОСЫ =================
+async def ask_gemini(prompt: str, history: list = None) -> dict:
+    """
+    Отправляет запрос к Gemini API
+    
+    Args:
+        prompt: Текст запроса от пользователя
+        history: Опционально, список предыдущих сообщений для контекста
+    
+    Returns:
+        dict: {"success": bool, "text": str, "error": str}
+    """
+    if not gemini_model:
+        return {"success": False, "error": "Gemini не инициализирован"}
+    
+    try:
+        # Запускаем в отдельном потоке (библиотека не полностью асинхронная)
+        def generate():
+            if history:
+                # Создаём чат с историей
+                chat = gemini_model.start_chat(history=history)
+                return chat.send_message(prompt)
+            else:
+                return gemini_model.generate_content(prompt)
+        
+        response = await asyncio.to_thread(generate)
+        
+        # Проверяем на блокировку контента
+        if response.prompt_feedback and response.prompt_feedback.block_reason:
+            return {
+                "success": False, 
+                "error": f"Запрос заблокирован: {response.prompt_feedback.block_reason}"
+            }
+        
+        # Получаем текст ответа
+        text = response.text.strip() if response.text else "(пустой ответ)"
+        
+        return {"success": True, "text": text}
+        
+    except Exception as e:
+        error_msg = str(e)
+        # Дружелюбные сообщения об ошибках
+        if "429" in error_msg or "quota" in error_msg.lower():
+            return {"success": False, "error": "🔄 Лимит запросов превышен. Попробуй через минуту."}
+        elif "400" in error_msg:
+            return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать."}
+        elif "503" in error_msg or "unavailable" in error_msg.lower():
+            return {"success": False, "error": "⚠️ Сервис временно недоступен. Попробуй позже."}
+        else:
+            logger.error(f"❌ Ошибка Gemini: {error_msg}")
+            return {"success": False, "error": f"⚠️ Ошибка: {error_msg[:150]}"}
 
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
@@ -458,66 +557,38 @@ def check_cooldown(user_id):
     return False, int(COOLDOWN_SECONDS - elapsed)
 
 # ================= ЗАПРОСЫ И ПАРСИНГ =================
-async def fetch_with_retry(url, max_retries=3, timeout=60):
-    """Асинхронный запрос с увеличенным таймаутом и логированием"""
+async def fetch_with_retry(url, max_retries=3):
+    """Асинхронный запрос с rate limiting (1 запрос/сек)"""
     global LAST_REQUEST_TIME
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     for attempt in range(1, max_retries + 1):
         try:
-            # 🔹 Rate limiting
+            # 🔹 Ждём если прошло меньше REQUEST_DELAY секунд с последнего запроса
             now = time.time()
             time_since_last = now - LAST_REQUEST_TIME
             if time_since_last < REQUEST_DELAY:
-                wait_time = REQUEST_DELAY - time_since_last
-                logger.info(f"⏱️ Rate limit: ждём {wait_time:.2f} сек")
-                await asyncio.sleep(wait_time)
+                await asyncio.sleep(REQUEST_DELAY - time_since_last)
             
-            logger.info(f"🔗 Запрос #{attempt} к {url[:80]}...")
-            start = time.time()
-            
-            # 🔹 Выполняем запрос
+            # 🔹 Выполняем запрос в отдельном потоке (чтобы не блокировать event loop)
             response = await asyncio.to_thread(
-                requests.get, url, headers=headers, timeout=timeout
+                requests.get, url, headers=headers, timeout=20
             )
-            
-            elapsed = time.time() - start
-            logger.info(f"✅ Ответ за {elapsed:.2f} сек: статус {response.status_code}, размер {len(response.content)} байт")
-            
             response.raise_for_status()
+            
+            # 🔹 Обновляем время последнего запроса
             LAST_REQUEST_TIME = time.time()
+            
             return response.text
             
-        except requests.exceptions.ConnectTimeout:
-            logger.warning(f"⚠️ Попытка {attempt}: таймаут подключения (>{timeout} сек)")
-        except requests.exceptions.ReadTimeout:
-            logger.warning(f"⚠️ Попытка {attempt}: таймаут чтения (сервер не отвечает)")
-        except requests.exceptions.ConnectionError as e:
-            logger.warning(f"⚠️ Попытка {attempt}: ошибка соединения: {str(e)[:100]}")
-        except requests.exceptions.HTTPError as e:
-            logger.warning(f"⚠️ Попытка {attempt}: HTTP {response.status_code if 'response' in locals() else '?'}")
-        except Exception as e:
-            logger.warning(f"⚠️ Попытка {attempt}: непредвиденная ошибка: {type(e).__name__}: {str(e)[:100]}")
-        
-        if attempt < max_retries:
-            wait = min(2 ** attempt, 15)  # Экспоненциальная задержка, макс 15 сек
-            logger.info(f"🔄 Повтор через {wait} сек...")
-            await asyncio.sleep(wait)
-    
-    logger.error(f"❌ Все {max_retries} попыток исчерпаны для {url[:80]}")
-    return None
-    
+        except requests.RequestException as e:
+            logger.warning(f"Попытка {attempt} упала: {e}")
+            if attempt == max_retries:
+                return None
+            # 🔹 Ждём перед повторной попыткой (экспоненциальная задержка)
+            await asyncio.sleep(min(2 ** attempt, 10))
+
 def parse_loras_from_html(html, min_days):
     if html is None:
         return []
@@ -1979,6 +2050,57 @@ async def cmd_rmforce(m: Message):
         await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
         logger.error(f"❌ Ошибка /rmforce: {e}")
 
+@dp.message(Command("ai"))
+async def cmd_ai(m: Message):
+    """
+    Запрос к нейросети Gemini: /ai <твой вопрос>
+    Пример: /ai Напиши стих про котов
+    """
+    # Можно ограничить доступ только владельцу:
+    # if m.from_user.id != OWNER_ID_INT:
+    #     await m.answer(f"{EMOJI['lock']} Эта команда доступна только владельцу", parse_mode="HTML")
+    #     return
+    
+    prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+    
+    if not prompt:
+        await m.answer(
+            f"{EMOJI['info']} <b>Нейросеть Gemini:</b>\n\n"
+            f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• /ai Объясни квантовую физику простыми словами\n"
+            f"• /ai Напиши код для сортировки списка на Python\n"
+            f"• /ai Придумай идею для стартапа в 2026 году",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Отправляем "думаю..."
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
+    
+    # Запрашиваем ответ у Gemini
+    result = await ask_gemini(prompt)
+    
+    if result["success"]:
+        # Форматируем ответ (Markdown → HTML для Telegram)
+        answer = result["text"]
+        # Экранируем для HTML
+        answer = safe_html_text(answer)
+        # Заменяем ``` на <code> для форматирования кода
+        answer = re.sub(r'```(\w*)\n?(.*?)```', r'<code>\2</code>', answer, flags=re.DOTALL)
+        
+        await status_msg.edit_text(
+            f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
+            parse_mode="HTML"
+        )
+        logger.info(f"🤖 Gemini: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
+    else:
+        await status_msg.edit_text(
+            f"{EMOJI['error']} {result['error']}",
+            parse_mode="HTML"
+        )
+        logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
+
 
 @dp.message(Command("loglevel"))
 async def cmd_loglevel(m: Message):
@@ -2423,6 +2545,7 @@ async def main():
     init_log_bot()
     mongo_ok = init_mongo()
     load_forwarded()
+    init_gemini()
     load_users()
     load_settings()
     
