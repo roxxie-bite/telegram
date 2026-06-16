@@ -86,14 +86,6 @@ async def run_shell_command(cmd: str, timeout: int = 30) -> tuple[str, str, int]
         return "", f"❌ Ошибка: {str(e)}", -1
 
 
-# ================= YANDEX MUSIC INTEGRATION =================
-try:
-    from yandex_music import Client
-    YANDEX_MUSIC_AVAILABLE = True
-except ImportError:
-    YANDEX_MUSIC_AVAILABLE = False
-    print("⚠️ WARNING: yandex-music не установлен — функция отслеживания музыки недоступна")
-    print("   Чтобы исправить: добавь 'yandex-music>=2.3.0' в requirements.txt")
 
 # Пытаемся импортировать pymongo
 try:
@@ -116,6 +108,9 @@ SITE_BASE = "https://lynther.sytes.net"
 # ================= GEMINI AI =================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-1.5-flash" 
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
 
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
@@ -179,6 +174,7 @@ user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
+gemini_session = None
 gemini_client = None
 gemini_model = None
 log_handler = None
@@ -206,140 +202,108 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= GEMINI ИНИЦИАЛИЗАЦИЯ (НОВЫЙ SDK) =================
-def init_gemini():
-    """Инициализирует клиент Gemini API через google.genai (новый SDK)"""
-    global gemini_client, gemini_model, GEMINI_MODEL
-    
-    if not GEMINI_API_KEY:
-        logger.warning("⚠️ GEMINI_API_KEY не задан — AI-функции недоступны")
-        return False
-    
-    try:
-        # 🔹 НОВЫЙ ИМПОРТ (вместо google.generativeai)
-        from google import genai
-        from google.genai import types
-        
-        # Создаём клиент
-        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # 🔹 Список моделей для проверки (БЕЗ префикса "models/")
-        models_to_try = [
-            "gemini-2.0-flash",           # 🆕 Новая, быстрая (РЕКОМЕНДУЮ)
-            "gemini-1.5-flash",           # ⚡ Стабильная, дешёвая
-            "gemini-1.5-pro",             # 🧠 Умная, но дороже
-        ]
-        
-        for model_name in models_to_try:
-            try:
-                logger.info(f"🔍 Пробую модель: {model_name}")
-                
-                # Тестовый запрос через новый SDK
-                response = gemini_client.models.generate_content(
-                    model=model_name,
-                    contents="Hi",
-                    config=types.GenerateContentConfig(max_output_tokens=1)
-                )
-                
-                # Если успешно — сохраняем модель
-                GEMINI_MODEL = model_name
-                gemini_model = model_name  # В новом SDK передаём имя строкой
-                logger.info(f"✅ Gemini инициализирован: {GEMINI_MODEL}")
-                return True
-                
-            except Exception as e:
-                logger.warning(f"⚠️ Модель {model_name} недоступна: {str(e)[:100]}")
-                continue
-        
-        logger.error("❌ Ни одна модель Gemini не доступна")
-        return False
-        
-    except ImportError as e:
-        logger.error(f"❌ Модуль google.genai не установлен: {e}")
-        logger.error("💡 Выполни: pip install google-genai>=1.0.0")
-        return False
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации Gemini: {e}")
-        return False
-
-# ================= GEMINI ЗАПРОСЫ (НОВЫЙ SDK) =================
-async def ask_gemini(prompt: str, history: list = None) -> dict:
+async def ask_gemini_http(prompt: str, history: list = None) -> dict:
     """
-    Отправляет запрос к Gemini API через google.genai
+    Отправляет запрос к Gemini API через прямой HTTP-запрос
     
     Args:
         prompt: Текст запроса от пользователя
-        history: Опционально, список предыдущих сообщений для контекста
+        history: Опционально, список предыдущих сообщений [{"role": "user"/"model", "text": "..."}]
     
     Returns:
         dict: {"success": bool, "text": str, "error": str}
     """
-    if not gemini_client or not GEMINI_MODEL:
+    if not gemini_session or not GEMINI_API_KEY:
         return {"success": False, "error": "Gemini не инициализирован"}
     
     try:
-        from google.genai import types
-        
-        # 🔹 Формируем контент
-        contents = prompt
-        
-        # 🔹 Если есть история — форматируем для многоходового чата
+        # 🔹 Формируем содержимое запроса
         if history:
+            # Многоходовой чат с историей
             contents = []
             for msg in history:
                 role = "user" if msg.get("role") == "user" else "model"
-                contents.append(types.Content(
-                    role=role,
-                    parts=[types.Part.from_text(text=msg.get("parts", [""])[0])]
-                ))
-            # Добавляем текущий запрос
-            contents.append(types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=prompt)]
-            ))
-        
-        # 🔹 Конфигурация генерации
-        config = types.GenerateContentConfig(
-            temperature=0.7,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=2048,
-        )
-        
-        # 🔹 Выполняем запрос в отдельном потоке
-        def generate():
-            return gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=config
-            )
-        
-        response = await asyncio.to_thread(generate)
-        
-        # 🔹 Получаем текст ответа
-        if response and response.text:
-            text = response.text.strip()
-            return {"success": True, "text": text}
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": msg.get("text", "")}]
+                })
+            contents.append({
+                "role": "user",
+                "parts": [{"text": prompt}]
+            })
         else:
-            return {"success": False, "error": "Пустой ответ от модели"}
+            # Простой запрос
+            contents = [{
+                "role": "user",
+                "parts": [{"text": prompt}]
+            }]
         
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"❌ Gemini API error: {error_msg}")
+        # 🔹 Формируем тело запроса
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.95,
+                "topK": 40,
+                "maxOutputTokens": 2048,
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            ]
+        }
         
-        # Дружелюбные сообщения об ошибках
-        if "404" in error_msg and "not found" in error_msg.lower():
-            return {"success": False, "error": "⚠️ Модель недоступна. Попробуй другую."}
-        elif "429" in error_msg or "quota" in error_msg.lower():
-            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту."}
-        elif "400" in error_msg:
+        # 🔹 URL запроса
+        url = f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        
+        # 🔹 Выполняем запрос в отдельном потоке (requests блокирующий)
+        def make_request():
+            return gemini_session.post(url, json=payload, timeout=60)
+        
+        response = await asyncio.to_thread(make_request)
+        
+        # 🔹 Обрабатываем ответ
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Проверяем на блокировку контента
+            if "promptFeedback" in data and data["promptFeedback"].get("blockReason"):
+                return {
+                    "success": False,
+                    "error": f"⛔ Запрос заблокирован: {data['promptFeedback']['blockReason']}"
+                }
+            
+            # Извлекаем текст ответа
+            if "candidates" in data and len(data["candidates"]) > 0:
+                parts = data["candidates"][0].get("content", {}).get("parts", [])
+                if parts and "text" in parts[0]:
+                    text = parts[0]["text"].strip()
+                    return {"success": True, "text": text}
+            
+            return {"success": False, "error": "Пустой или неверный ответ от API"}
+            
+        elif response.status_code == 400:
             return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать."}
-        elif "403" in error_msg or "permission" in error_msg.lower():
+        elif response.status_code == 403:
             return {"success": False, "error": "🔒 Ошибка доступа. Проверь API ключ."}
-        elif "503" in error_msg or "unavailable" in error_msg.lower():
-            return {"success": False, "error": "⚠️ Сервис временно недоступен."}
+        elif response.status_code == 429:
+            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту."}
+        elif response.status_code >= 500:
+            return {"success": False, "error": "⚠️ Серверная ошибка. Попробуй позже."}
         else:
-            return {"success": False, "error": f"⚠️ Ошибка: {error_msg[:200]}"}
+            return {"success": False, "error": f"⚠️ HTTP {response.status_code}: {response.text[:150]}"}
+        
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Таймаут ответа. Попробуй позже."}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "error": "🌐 Ошибка соединения. Проверь интернет."}
+    except Exception as e:
+        logger.error(f"❌ Gemini HTTP error: {str(e)}")
+        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
+
+
 
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
@@ -714,99 +678,7 @@ async def find_all_loras(min_days):
     logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
     return all_results, pages_scanned
 
-# ================= HQRADIO ПАРСИНГ =================
-def parse_hq_radio(html: str) -> dict | None:
-    """Парсит информацию о текущем треке с HQRadio"""
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # 🔍 Ищем элемент с id="track"
-        track_elem = soup.find("div", id="track")
-        
-        if not track_elem:
-            logger.warning("⚠️ Элемент #track не найден на странице")
-            return None
-        
-        # Получаем текст в формате "ARTIST - TITLE"
-        track_text = track_elem.get_text(strip=True)
-        
-        if not track_text:
-            logger.warning("⚠️ Элемент #track пустой")
-            return None
-        
-        logger.info(f"🎵 Найдено: {track_text}")
-        
-        # Разделяем по " - " (первое вхождение)
-        track_info = {}
-        
-        if " - " in track_text:
-            parts = track_text.split(" - ", 1)
-            if len(parts) == 2:
-                track_info["artist"] = parts[0].strip()
-                track_info["title"] = parts[1].strip()
-            else:
-                track_info["title"] = track_text
-        else:
-            track_info["title"] = track_text
-        
-        # 🖼️ Ищем обложку в <i class="cover" style="background-image: url(...)">
-        cover_elem = soup.find("i", class_="cover")
-        
-        if cover_elem:
-            # Получаем style атрибут
-            style = cover_elem.get("style", "")
-            
-            # Ищем URL в background-image: url("...")
-            import re
-            url_match = re.search(r'background-image:\s*url\(["\']?([^"\')]+)["\']?\)', style)
-            
-            if url_match:
-                cover_url = url_match.group(1)
-                # Исправляем HTML-сущности (&quot; → ")
-                cover_url = cover_url.replace("&quot;", '"').replace('"', '')
-                
-                # Исправляем относительные пути
-                if cover_url.startswith("//"):
-                    cover_url = "https:" + cover_url
-                elif cover_url.startswith("/"):
-                    cover_url = "https://hqradio.ru" + cover_url
-                elif not cover_url.startswith("http"):
-                    cover_url = "https://hqradio.ru" + cover_url
-                
-                track_info["cover_url"] = cover_url
-                logger.info(f"🖼️ Обложка найдена: {cover_url}")
-            else:
-                logger.warning("⚠️ Не удалось извлечь URL из style атрибута")
-        else:
-            logger.warning("⚠️ Элемент <i class='cover'> не найден")
-            
-            # Fallback: ищем og:image
-            og_image = soup.find("meta", property="og:image")
-            if og_image:
-                track_info["cover_url"] = og_image.get("content")
-                logger.info(f"🖼️ Обложка из og:image: {track_info['cover_url']}")
-        
-        # ⏱️ Ищем длительность (если есть)
-        duration_elem = soup.find("span", class_="duration")
-        if not duration_elem:
-            duration_elem = soup.find("span", class_="track-duration")
-        if not duration_elem:
-            duration_elem = soup.find("time")
-        
-        if duration_elem:
-            track_info["duration"] = duration_elem.get_text(strip=True)
-        
-        # Добавляем метаданные
-        track_info["parsed_at"] = datetime.now(timezone(timedelta(hours=3)))
-        track_info["source"] = "hqradio.ru"
-        track_info["raw_text"] = track_text
-        
-        logger.info(f"✅ Спаршено: {track_info.get('artist', '?')} - {track_info.get('title', '?')}")
-        return track_info
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка парсинга HQRadio: {e}", exc_info=True)
-        return None
+
 
 # ================= ФОРМАТИРОВАНИЕ И ОТПРАВКА =================
 def format_message(lora):
@@ -905,215 +777,6 @@ def mark_user_forwarded(user_id):
         known_users[user_id]["forwarded"] = True
         save_users()
 
-
-@dp.message(Command("testmusic"))
-async def cmd_test_music(m: Message):
-    if m.from_user.id != OWNER_ID_INT:
-        return
-
-    await m.answer("🔍 <b>Запускаю диагностику модуля Яндекс.Музыки...</b>", parse_mode="HTML")
-    
-    diagnostics = []
-    
-    try:
-        # 1. Проверяем инициализацию клиента
-        if not ym_client:
-            diagnostics.append("⚠️ Клиент не был запущен. Инициализирую...")
-            if not init_yandex_music():
-                await m.answer("❌ <b>Ошибка:</b> Не удалось инициализировать клиент Яндекс.Музыки.\nПроверь переменную `YANDEX_MUSIC_TOKEN` и логи сервера.", parse_mode="HTML")
-                return
-            diagnostics.append("✅ Клиент успешно подключён к API")
-        else:
-            diagnostics.append("✅ Клиент уже активен")
-
-        # 2. Пытаемся получить текущий трек
-        track = get_current_track()
-        if not track:
-            diagnostics.append("⚠️ Трек не найден (возможно, ничего не играет или очередь ещё не синхронизирована)")
-            await m.answer(
-                "ℹ️ <b>Результат:</b> Сейчас трек не определяется.\n\n" +
-                "\n".join(diagnostics),
-                parse_mode="HTML"
-            )
-            return
-
-        diagnostics.append(f"✅ Трек получен: {track['title']} — {track['artists']}")
-        diagnostics.append(f"🆔 ID трека: {track['id']}")
-        diagnostics.append(f"🖼️ Обложка: {'Найдена' if track['cover_url'] else 'Отсутствует'}")
-
-        # 3. Отправляем тестовое сообщение владельцу в ЛС
-        target_chat = OWNER_ID_INT
-        caption = f"{track['text']}\n\n📝 <b>Диагностика:</b>\n" + "\n".join(diagnostics)
-        
-        if track["cover_url"]:
-            await bot.send_photo(
-                chat_id=target_chat,
-                photo=track["cover_url"],
-                caption=caption,
-                parse_mode="HTML"
-            )
-        else:
-            await bot.send_message(
-                chat_id=target_chat,
-                text=caption,
-                parse_mode="HTML"
-            )
-            
-        diagnostics.append("✅ Сообщение успешно отправлено в ЛС владельцу")
-        
-        await m.answer(
-            "✅ <b>Тест пройден!</b> Проверь личные сообщения от бота.\n\n" + "\n".join(diagnostics),
-            parse_mode="HTML"
-        )
-    except Exception as error_msg:
-        logger.error(f"❌ Ошибка тестирования музыки: {error_msg}")
-        await m.answer(
-            f"❌ <b>Критическая ошибка при тесте:</b>\n<code>{str(error_msg)[:300]}</code>\n\n"
-            f"Проверь логи сервера и убедись, что токен Яндекс.Музыки корректен.",
-            parse_mode="HTML"
-        )
-
-# ================= YANDEX MUSIC (Ynison API) =================
-
-def get_current_track():
-    """Получает текущий трек через Ynison Simple API (yandex-music>=3.0.0)"""
-    global YANDEX_MUSIC_TOKEN
-    
-    if not YANDEX_MUSIC_TOKEN:
-        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан")
-        return None
-
-    try:
-        from yandex_music.ynison import simple
-        track = simple.get_current_track(YANDEX_MUSIC_TOKEN)
-        
-        if not track:
-            logger.debug("🎵 Ничего не играет (Ynison вернул None)")
-            return None
-
-        title = getattr(track, 'title', getattr(track, 'name', 'Unknown Title'))
-        
-        artists_attr = getattr(track, 'artists', [])
-        if artists_attr:
-            if isinstance(artists_attr, list):
-                artists = ", ".join([getattr(a, 'name', str(a)) for a in artists_attr])
-            else:
-                artists = str(artists_attr)
-        else:
-            artists = "Unknown Artist"
-
-        cover_url = None
-        cover = getattr(track, 'cover', None)
-        if cover:
-            if hasattr(cover, 'get_url'):
-                cover_url = cover.get_url('200x200')
-            elif isinstance(cover, str):
-                if cover.startswith('http'):
-                    cover_url = cover.replace('%%', '200x200')
-                else:
-                    cover_url = f"https://{cover.replace('%%', '200x200')}"
-            elif hasattr(cover, 'uri'):
-                uri = cover.uri
-                cover_url = f"https://{uri.replace('%%', '200x200')}" if not uri.startswith('http') else uri.replace('%%', '200x200')
-
-        track_id = getattr(track, 'id', getattr(track, 'track_id', 0))
-        if hasattr(track_id, '__iter__') and not isinstance(track_id, str):
-            track_id = ":".join(map(str, track_id)) if len(track_id) > 1 else str(track_id[0])
-
-        return {
-            "id": str(track_id),
-            "title": title,
-            "artists": artists,
-            "cover_url": cover_url,
-            "text": f"🎧 <b>Сейчас играет:</b>\n{title} — {artists}"
-        }
-
-    except ImportError:
-        logger.error("❌ Модуль yandex_music.ynison не найден. Требуется yandex-music>=3.0.0")
-        return None
-    except Exception as e:
-        logger.error(f"💥 Ошибка получения трека через Ynison: {e}")
-        return None
-
-# ⚠️ update_music_status должна быть ОБЪЯВЛЕНА ПЕРЕД start_music_tracking!
-async def update_music_status():
-    global current_music_message_id, last_track_id, music_message_timestamp, music_tracking_enabled
-    try:
-        target_chat_id = int(MUSIC_STATUS_CHAT_ID) if MUSIC_STATUS_CHAT_ID else OWNER_ID_INT
-    except (ValueError, TypeError):
-        logger.error("❌ MUSIC_STATUS_CHAT_ID должен быть числом")
-        return
-    logger.info(f"🎵 Цикл запущен. Чат: {target_chat_id}")
-    
-    while music_tracking_enabled:
-        try:
-            track = get_current_track()
-            if not track:
-                await asyncio.sleep(MUSIC_CHECK_INTERVAL)
-                continue
-            if track["id"] != last_track_id or current_music_message_id is None:
-                logger.info(f"🔄 Трек: {track['title']} — {track['artists']}")
-                now = time.time()
-                is_old = music_message_timestamp and (now - music_message_timestamp > 172800)
-                try:
-                    if current_music_message_id and not is_old:
-                        if track["cover_url"]:
-                            from aiogram.types import InputMediaPhoto
-                            media = InputMediaPhoto(media=track["cover_url"], caption=track["text"], parse_mode="HTML")
-                            await bot.edit_message_media(chat_id=target_chat_id, message_id=current_music_message_id, media=media)
-                        else:
-                            await bot.edit_message_caption(chat_id=target_chat_id, message_id=current_music_message_id, caption=track["text"], parse_mode="HTML")
-                    else:
-                        if current_music_message_id:
-                            try:
-                                await bot.delete_message(chat_id=target_chat_id, message_id=current_music_message_id)
-                            except:
-                                pass
-                        if track["cover_url"]:
-                            msg = await bot.send_photo(chat_id=target_chat_id, photo=track["cover_url"], caption=track["text"], parse_mode="HTML")
-                        else:
-                            msg = await bot.send_message(chat_id=target_chat_id, text=track["text"], parse_mode="HTML")
-                        current_music_message_id = msg.message_id
-                        music_message_timestamp = now
-                    last_track_id = track["id"]
-                except Exception as err:
-                    logger.error(f"❌ Ошибка отправки: {err}")
-                    current_music_message_id = None
-                    music_message_timestamp = None
-            await asyncio.sleep(MUSIC_CHECK_INTERVAL)
-        except Exception as e:
-            logger.error(f"💥 Ошибка цикла: {e}")
-            await asyncio.sleep(MUSIC_CHECK_INTERVAL)
-    logger.info("⏹️ Цикл остановлен")
-
-async def start_music_tracking():
-    global music_tracking_enabled, music_task, YANDEX_MUSIC_TOKEN
-    if music_tracking_enabled:
-        logger.warning("⚠️ Отслеживание музыки уже запущено")
-        return False
-    # ✅ ПРОВЕРКА ТОКЕНА (вместо init_yandex_music)
-    if not YANDEX_MUSIC_TOKEN:
-        logger.error("❌ YANDEX_MUSIC_TOKEN не задан")
-        return False
-    music_tracking_enabled = True
-    music_task = asyncio.create_task(update_music_status())
-    logger.info("🎵 Отслеживание музыки запущено")
-    return True
-
-async def stop_music_tracking():
-    global music_tracking_enabled, music_task
-    if not music_tracking_enabled:
-        return
-    music_tracking_enabled = False
-    if music_task:
-        music_task.cancel()
-        try:
-            await music_task
-        except asyncio.CancelledError:
-            pass
-    logger.info("⏹️ Отслеживание музыки остановлено")
-
-# ================= КОНЕЦ БЛОКА МУЗЫКИ =================
 
 
 
@@ -2103,24 +1766,32 @@ async def cmd_ai(m: Message):
             f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
             f"<b>Примеры:</b>\n"
             f"• /ai Объясни квантовую физику простыми словами\n"
-            f"• /ai Напиши код для сортировки списка на Python",
+            f"• /ai Напиши код для сортировки списка на Python\n"
+            f"• /ai Придумай идею для стартапа",
             parse_mode="HTML"
         )
         return
     
+    # Отправляем "думаю..."
     status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
-    result = await ask_gemini(prompt)
+    
+    # Запрашиваем ответ
+    result = await ask_gemini_http(prompt)
     
     if result["success"]:
+        # Форматируем ответ для Telegram HTML
         answer = safe_html_text(result["text"])
+        # Заменяем ```code``` на <code>
         answer = re.sub(r'```(\w*)\n?(.*?)```', r'<code>\2</code>', answer, flags=re.DOTALL)
         
         await status_msg.edit_text(
             f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
             parse_mode="HTML"
         )
+        logger.info(f"🤖 Gemini: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
     else:
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+        logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
 
 
 @dp.message(Command("loglevel"))
@@ -2565,6 +2236,7 @@ async def main():
     # Инициализация (функции уже определены выше)
     init_log_bot()
     mongo_ok = init_mongo()
+    init_gemini_http()
     load_forwarded()
     init_gemini()
     load_users()
