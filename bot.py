@@ -2183,9 +2183,7 @@ async def inline_search(query: InlineQuery):
                         switch_inline_query_current_chat="explain: "
                     )]
                 ]),
-                thumbnail_url="https://i.imgur.com/explain.png",
-                thumbnail_width=64,
-                thumbnail_height=64
+       
             ),
             # 📝 Пересказать
             InlineQueryResultArticle(
@@ -2205,10 +2203,7 @@ async def inline_search(query: InlineQuery):
                         switch_inline_query_current_chat="summarize: "
                     )]
                 ]),
-                thumbnail_url="https://i.imgur.com/summarize.png",
-                thumbnail_width=64,
-                thumbnail_height=64
-            ),
+       
             # ❓ Спросить
             InlineQueryResultArticle(
                 id="mode_ask",
@@ -2227,10 +2222,7 @@ async def inline_search(query: InlineQuery):
                         switch_inline_query_current_chat="ask: "
                     )]
                 ]),
-                thumbnail_url="https://i.imgur.com/ask.png",
-                thumbnail_width=64,
-                thumbnail_height=64
-            ),
+               
         ]
         await query.answer(results=results, cache_time=30, is_personal=True)
         return
