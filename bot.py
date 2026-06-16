@@ -107,7 +107,285 @@ SITE_BASE = "https://lynther.sytes.net"
 
 # ================= GEMINI AI =================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash" 
+
+# ================= GEMINI МОДЕЛИ (ВСЕ ДОСТУПНЫЕ) =================
+# Все модели с поддержкой generateContent из твоего списка
+AVAILABLE_GEMINI_MODELS = {
+    # === Gemini 2.5 ===
+    "2.5-flash": {
+        "name": "gemini-2.5-flash",
+        "display": "🚀 Gemini 2.5 Flash",
+        "desc": "Стабильная, 1M токенов, июнь 2025",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "2.5-pro": {
+        "name": "gemini-2.5-pro",
+        "display": "🧠 Gemini 2.5 Pro",
+        "desc": "Самая умная, 1M токенов, июнь 2025",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "2.5-flash-lite": {
+        "name": "gemini-2.5-flash-lite",
+        "display": "🪶 Gemini 2.5 Flash-Lite",
+        "desc": "Лёгкая версия, июль 2025",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "2.5-flash-tts": {
+        "name": "gemini-2.5-flash-preview-tts",
+        "display": "🔊 Gemini 2.5 Flash TTS",
+        "desc": "С синтезом речи (preview)",
+        "temp": 1.0,
+        "max_tokens": 16384
+    },
+    "2.5-pro-tts": {
+        "name": "gemini-2.5-pro-preview-tts",
+        "display": "🔊 Gemini 2.5 Pro TTS",
+        "desc": "Pro с синтезом речи (preview)",
+        "temp": 1.0,
+        "max_tokens": 16384
+    },
+    "2.5-computer-use": {
+        "name": "gemini-2.5-computer-use-preview-10-2025",
+        "display": "🖱️ Gemini 2.5 Computer Use",
+        "desc": "Для управления компьютером (октябрь 2025)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Gemini 2.0 ===
+    "2.0-flash": {
+        "name": "gemini-2.0-flash",
+        "display": "⚡ Gemini 2.0 Flash",
+        "desc": "Быстрая и универсальная, январь 2025",
+        "temp": 1.0,
+        "max_tokens": 8192
+    },
+    "2.0-flash-001": {
+        "name": "gemini-2.0-flash-001",
+        "display": "⚡ Gemini 2.0 Flash 001",
+        "desc": "Стабильная версия 2.0 Flash",
+        "temp": 1.0,
+        "max_tokens": 8192
+    },
+    "2.0-flash-lite": {
+        "name": "gemini-2.0-flash-lite",
+        "display": "🪶 Gemini 2.0 Flash-Lite",
+        "desc": "Лёгкая версия 2.0",
+        "temp": 1.0,
+        "max_tokens": 8192
+    },
+    "2.0-flash-lite-001": {
+        "name": "gemini-2.0-flash-lite-001",
+        "display": "🪶 Gemini 2.0 Flash-Lite 001",
+        "desc": "Стабильная лёгкая версия",
+        "temp": 1.0,
+        "max_tokens": 8192
+    },
+    
+    # === Gemini 3.x ===
+    "3-pro-preview": {
+        "name": "gemini-3-pro-preview",
+        "display": " Gemini 3 Pro Preview",
+        "desc": "Preview версия Gemini 3 Pro",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "3-flash-preview": {
+        "name": "gemini-3-flash-preview",
+        "display": "🚀 Gemini 3 Flash Preview",
+        "desc": "Preview версия Gemini 3 Flash (декабрь 2025)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "3.1-pro-preview": {
+        "name": "gemini-3.1-pro-preview",
+        "display": "🧠 Gemini 3.1 Pro Preview",
+        "desc": "Preview версия 3.1 Pro (январь 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "3.1-pro-customtools": {
+        "name": "gemini-3.1-pro-preview-customtools",
+        "display": "🛠️ Gemini 3.1 Pro Custom Tools",
+        "desc": "Оптимизирована для кастомных инструментов",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "3.1-flash-lite-preview": {
+        "name": "gemini-3.1-flash-lite-preview",
+        "display": "🪶 Gemini 3.1 Flash Lite Preview",
+        "desc": "Preview лёгкой версии (март 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "3.1-flash-lite": {
+        "name": "gemini-3.1-flash-lite",
+        "display": "🪶 Gemini 3.1 Flash Lite",
+        "desc": "Стабильная лёгкая версия (май 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "3.1-flash-tts-preview": {
+        "name": "gemini-3.1-flash-tts-preview",
+        "display": "🔊 Gemini 3.1 Flash TTS",
+        "desc": "С синтезом речи (preview)",
+        "temp": 1.0,
+        "max_tokens": 16384
+    },
+    "3.5-flash": {
+        "name": "gemini-3.5-flash",
+        "display": "🚀 Gemini 3.5 Flash",
+        "desc": "Последняя Flash версия (май 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Nano Banana (Image Generation) 🍌 ===
+    "nano-banana": {
+        "name": "gemini-2.5-flash-image",
+        "display": "🍌 Nano Banana",
+        "desc": "Генерация изображений (2.5 Flash Image)",
+        "temp": 1.0,
+        "max_tokens": 32768
+    },
+    "nano-banana-pro-preview": {
+        "name": "gemini-3-pro-image-preview",
+        "display": "🍌 Nano Banana Pro Preview",
+        "desc": "Pro версия генерации изображений (preview)",
+        "temp": 1.0,
+        "max_tokens": 32768
+    },
+    "nano-banana-pro": {
+        "name": "gemini-3-pro-image",
+        "display": "🍌🚀 Nano Banana Pro",
+        "desc": "Pro версия генерации изображений",
+        "temp": 1.0,
+        "max_tokens": 32768
+    },
+    "nano-banana-2-preview": {
+        "name": "gemini-3.1-flash-image-preview",
+        "display": "🍌🍌 Nano Banana 2 Preview",
+        "desc": "Второе поколение (3.1 Flash Image)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "nano-banana-2": {
+        "name": "gemini-3.1-flash-image",
+        "display": "🍌🍌 Nano Banana 2",
+        "desc": "Стабильная версия Nano Banana 2",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Gemma 4 ===
+    "gemma-4-26b": {
+        "name": "gemma-4-26b-a4b-it",
+        "display": "💎 Gemma 4 26B A4B IT",
+        "desc": "26B параметров, instruction-tuned",
+        "temp": 1.0,
+        "max_tokens": 32768
+    },
+    "gemma-4-31b": {
+        "name": "gemma-4-31b-it",
+        "display": "💎 Gemma 4 31B IT",
+        "desc": "31B параметров, instruction-tuned",
+        "temp": 1.0,
+        "max_tokens": 32768
+    },
+    
+    # === Latest (auto-updating) ===
+    "flash-latest": {
+        "name": "gemini-flash-latest",
+        "display": "🔄 Flash Latest",
+        "desc": "Последняя Flash (авто-обновляется)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "flash-lite-latest": {
+        "name": "gemini-flash-lite-latest",
+        "display": "🔄 Flash-Lite Latest",
+        "desc": "Последняя Flash-Lite",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "pro-latest": {
+        "name": "gemini-pro-latest",
+        "display": "🔄 Pro Latest",
+        "desc": "Последняя Pro версия",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Lyria (Music) ===
+    "lyria-3-clip": {
+        "name": "lyria-3-clip-preview",
+        "display": "🎵 Lyria 3 Clip Preview",
+        "desc": "Генерация музыки (30 сек, preview)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "lyria-3-pro": {
+        "name": "lyria-3-pro-preview",
+        "display": "🎵 Lyria 3 Pro Preview",
+        "desc": "Pro версия генерации музыки",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Robotics ===
+    "robotics-er-1.5": {
+        "name": "gemini-robotics-er-1.5-preview",
+        "display": "🤖 Robotics-ER 1.5",
+        "desc": "Для робототехники (preview)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "robotics-er-1.6": {
+        "name": "gemini-robotics-er-1.6-preview",
+        "display": "🤖 Robotics-ER 1.6",
+        "desc": "Для робототехники (1.6 preview)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Deep Research ===
+    "deep-research-max": {
+        "name": "deep-research-max-preview-04-2026",
+        "display": "🔬 Deep Research Max",
+        "desc": "Максимальное исследование (апрель 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "deep-research": {
+        "name": "deep-research-preview-04-2026",
+        "display": "🔬 Deep Research",
+        "desc": "Глубокое исследование (апрель 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    "deep-research-pro": {
+        "name": "deep-research-pro-preview-12-2025",
+        "display": "🔬 Deep Research Pro",
+        "desc": "Pro исследование (декабрь 2025)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+    
+    # === Antigravity ===
+    "antigravity": {
+        "name": "antigravity-preview-05-2026",
+        "display": "🚀 Antigravity Agent",
+        "desc": "Агент для сложных задач (май 2026)",
+        "temp": 1.0,
+        "max_tokens": 65536
+    },
+}
+
+# Модель по умолчанию
+DEFAULT_GEMINI_MODEL = "2.5-flash"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
@@ -166,6 +444,7 @@ awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
 gemini_session = None
+current_gemini_model = DEFAULT_GEMINI_MODEL  # ← Выбранная модель (ключ из AVAILABLE_GEMINI_MODELS)
 gemini_client = None
 gemini_model = None
 log_handler = None
@@ -690,21 +969,26 @@ def mark_user_forwarded(user_id):
         save_users()
 
 
-async def ask_gemini_http(prompt: str, history: list = None) -> dict:
+async def ask_gemini_http(prompt: str, history: list = None, model_key: str = None) -> dict:
     """
-    Отправляет запрос к Gemini API через прямой HTTP-запрос
+    Отправляет запрос к Gemini API
     
     Args:
-        prompt: Текст запроса от пользователя
-        history: Опционально, список предыдущих сообщений [{"role": "user"/"model", "text": "..."}]
-    
-    Returns:
-        dict: {"success": bool, "text": str, "error": str}
+        prompt: Текст запроса
+        history: Опционально, история диалога
+        model_key: Опционально, ключ модели из AVAILABLE_GEMINI_MODELS (если None — используется current_gemini_model)
     """
+    # Определяем какую модель использовать
+    model_key = model_key or current_gemini_model
+    model_info = AVAILABLE_GEMINI_MODELS.get(model_key, AVAILABLE_GEMINI_MODELS[DEFAULT_GEMINI_MODEL])
+    model_name = model_info["name"]
+    
     if not gemini_session or not GEMINI_API_KEY:
         return {"success": False, "error": "Gemini не инициализирован"}
     
+    
     try:
+        
         # 🔹 Формируем содержимое запроса
         if history:
             # Многоходовой чат с историей
@@ -733,7 +1017,7 @@ async def ask_gemini_http(prompt: str, history: list = None) -> dict:
                 "temperature": 0.7,
                 "topP": 0.95,
                 "topK": 40,
-                "maxOutputTokens": 2048,
+                "maxOutputTokens": 65536,
             },
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
@@ -744,7 +1028,7 @@ async def ask_gemini_http(prompt: str, history: list = None) -> dict:
         }
         
         # 🔹 URL запроса
-        url = f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        url = f"{GEMINI_API_URL}/{model_name}:generateContent?key={GEMINI_API_KEY}"
         
         # 🔹 Выполняем запрос в отдельном потоке (requests блокирующий)
         def make_request():
@@ -1805,6 +2089,61 @@ async def cmd_ai(m: Message):
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
         logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
 
+@dp.message(Command("model"))
+async def cmd_model(m: Message):
+    """Показать или сменить модель Gemini: /model [ключ]"""
+    if m.from_user.id != OWNER_ID_INT:
+        await m.answer(f"{EMOJI['lock']} Только для владельца", parse_mode="HTML")
+        return
+    
+    global current_gemini_model
+    
+    parts = m.text.split()
+    
+    # Если без аргумента — показать список
+    if len(parts) < 2:
+        txt = f"{EMOJI['settings']} <b>Доступные модели Gemini:</b>\n\n"
+        
+        for key, info in AVAILABLE_GEMINI_MODELS.items():
+            current = "✅ " if key == current_gemini_model else "• "
+            txt += f"{current}{info['display']}\n"
+            txt += f"   <i>{info['desc']}</i>\n"
+            txt += f"   <code>/model {key}</code>\n\n"
+        
+        txt += f"<b>Текущая:</b> <code>{current_gemini_model}</code>\n"
+        txt += f"<i>Используй /model &lt;ключ&gt; чтобы сменить</i>"
+        
+        await m.answer(txt, parse_mode="HTML")
+        return
+    
+    # Если с аргументом — сменить модель
+    new_model_key = parts[1].lower()
+    
+    if new_model_key not in AVAILABLE_GEMINI_MODELS:
+        available = ", ".join(AVAILABLE_GEMINI_MODELS.keys())
+        await m.answer(
+            f"{EMOJI['error']} <b>Неизвестная модель:</b> <code>{new_model_key}</code>\n\n"
+            f"<b>Доступно:</b> <code>{available}</code>\n"
+            f"<i>Используй /model без аргумента чтобы увидеть список</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Сменяем модель
+    old_model = current_gemini_model
+    current_gemini_model = new_model_key
+    model_info = AVAILABLE_GEMINI_MODELS[new_model_key]
+    
+    await m.answer(
+        f"{EMOJI['check']} <b>Модель сменена!</b>\n\n"
+        f"🔄 Было: <code>{old_model}</code>\n"
+        f"✅ Стало: {model_info['display']}\n"
+        f"📝 <i>{model_info['desc']}</i>",
+        parse_mode="HTML"
+    )
+    
+    logger.info(f"🔄 Модель Gemini сменена: {old_model} → {new_model_key}")
+
 
 @dp.message(Command("loglevel"))
 async def cmd_loglevel(m: Message):
@@ -2055,6 +2394,7 @@ async def cmd_status(message: Message):
     can_use, remaining = check_cooldown(message.from_user.id)
     txt += f"⏱️ Кулдаун: <b>{'готов' if can_use else str(remaining) + ' сек'}</b>\n"
     txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
+    
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     if log_handler: txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
     # ← ИСПРАВЛЕНО НИЖЕ:
@@ -2062,6 +2402,14 @@ async def cmd_status(message: Message):
         txt += f"\n{PREMIUM_EMOJI['sparkle']} БД: <b>MongoDB подключена</b>"
     else:
         txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
+    await message.answer(txt, parse_mode="HTML")
+        # ... после строки с БД ...
+    
+    # Добавь информацию о модели:
+    model_info = AVAILABLE_GEMINI_MODELS.get(current_gemini_model, {})
+    txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_gemini_model)}</b>"
+    txt += f"\n   <i>{model_info.get('desc', '')}</i>"
+    
     await message.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("stop"))
@@ -2153,10 +2501,11 @@ async def main():
         await asyncio.sleep(3600)
 
 
-# ================= INLINE AI MODE =================
+
 # ================= INLINE AI MODE (ПОЛНЫЙ) =================
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
+    logger.info(f"🔥🔥🔥 INLINE HANDLER CALLED! Query: '{query.query}'") 
     """Умный inline: @looniesbot → варианты действий"""
     user = query.from_user
     user_input = query.query.strip()
