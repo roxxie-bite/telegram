@@ -2336,59 +2336,6 @@ async def inline_search(query: InlineQuery):
     await query.answer(results=final_results, cache_time=0, is_personal=True)
 
 
-@dp.callback_query(F.data.startswith("inline_send:"))
-async def callback_inline_send(callback: CallbackQuery):
-    """Обрабатывает нажатие кнопки 'Отправить владельцу' в inline"""
-    # Извлекаем данные: inline_send:USER_ID:MESSAGE
-    try:
-        parts = callback.data.split(":", 2)
-        if len(parts) != 3:
-            await callback.answer("❌ Ошибка формата", show_alert=True)
-            return
-        
-        sender_id = int(parts[1])
-        message_text = parts[2]
-    except (ValueError, IndexError) as e:
-        logger.error(f"❌ Ошибка парсинга callback: {e}")
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    
-    # Получаем инфо о пользователе
-    try:
-        sender = await bot.get_chat(sender_id)
-        sender_name = sender.full_name
-        sender_username = f"@{sender.username}" if sender.username else "нет"
-    except:
-        sender_name = "Unknown"
-        sender_username = "нет"
-    
-    # Отправляем сообщение владельцу
-    try:
-        await bot.send_message(
-            chat_id=OWNER_ID_INT,
-            text=(
-                f"{PREMIUM_EMOJI['sparkle']} <b>✉️ Новое сообщение (inline):</b>\n\n"
-                f"👤 <b>От:</b> {safe_html_text(sender_name)} ({sender_username})\n"
-                f"🆔 <b>ID:</b> <code>{sender_id}</code>\n"
-                f"💬 <b>Текст:</b>\n{safe_html_text(message_text)}\n\n"
-                f"<i>Ответь на это сообщение чтобы ответить пользователю</i>"
-            ),
-            parse_mode="HTML"
-        )
-        logger.info(f"📩 Inline от {sender_id}: {message_text[:100]}")
-        
-        # Подтверждение пользователю
-        await callback.answer("✅ Отправлено!", show_alert=False)
-        await callback.message.edit_text(
-            f"{EMOJI['check']} <b>Сообщение отправлено!</b>\n\n<i>Ожидай ответа в ЛС</i>",
-            parse_mode="HTML",
-            reply_markup=None  # Убираем кнопку после отправки
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки inline: {e}")
-        await callback.answer("❌ Не удалось отправить", show_alert=True)
-
 if __name__ == "__main__":
     try:
         asyncio.run(main())
