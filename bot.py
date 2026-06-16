@@ -105,8 +105,20 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 MONGO_URI = os.getenv("MONGO_URI")
 SITE_BASE = "https://lynther.sytes.net"
 
+ALLOWED_AI_USERS = {
+    int(OWNER_ID),  # Владелец всегда имеет доступ
+    8371541704
+}
+    
+
+def is_user_allowed(user_id: int, allowed_set: set) -> bool:
+    """Проверяет, есть ли пользователь в списке разрешённых"""
+    return user_id in allowed_set
+
 # ================= GEMINI AI =================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+
 
 # ================= GEMINI МОДЕЛИ (ВСЕ ДОСТУПНЫЕ) =================
 # Все модели с поддержкой generateContent из твоего списка
@@ -443,6 +455,7 @@ user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
+allowed_ai_users = set(int(x) for x in os.getenv("ALLOWED_AI_USERS", OWNER_ID).split(","))
 gemini_session = None
 current_gemini_model = DEFAULT_GEMINI_MODEL  # ← Выбранная модель (ключ из AVAILABLE_GEMINI_MODELS)
 gemini_client = None
@@ -1965,6 +1978,71 @@ async def cmd_cat(m: Message):
         await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
         logger.error(f"❌ Ошибка /cat: {e}")
 
+@dp.message(Command("allowai"))
+async def cmd_allowai(m: Message):
+    """Добавить пользователя в список доступа к /ai: /allowai <user_id>"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split()
+    if len(parts) < 2:
+        await m.answer(f"{EMOJI['info']} Используй: <code>/allowai &lt;user_id&gt;</code>", parse_mode="HTML")
+        return
+    
+    try:
+        new_user_id = int(parts[1])
+        allowed_ai_users.add(new_user_id)
+        
+        # Получаем инфо о пользователе для лога
+        try:
+            user = await bot.get_chat(new_user_id)
+            name = user.full_name
+            username = f"@{user.username}" if user.username else "без ника"
+        except:
+            name = "Unknown"
+            username = "Unknown"
+        
+        await m.answer(
+            f"{EMOJI['check']} <b>Пользователь добавлен!</b>\n\n"
+            f"👤 {safe_html_text(name)} ({username})\n"
+            f"🆔 ID: <code>{new_user_id}</code>\n\n"
+            f"<i>Теперь может использовать /ai</i>",
+            parse_mode="HTML"
+        )
+        logger.info(f"✅ Добавлен доступ к /ai для {new_user_id} ({name})")
+        
+    except ValueError:
+        await m.answer(f"{EMOJI['error']} Неверный формат ID. Используй числа.", parse_mode="HTML")
+    except Exception as e:
+        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e)[:200])}", parse_mode="HTML")
+
+# Команда для просмотра списка:
+@dp.message(Command("aiallowed"))
+async def cmd_aiallowed(m: Message):
+    """Показать список пользователей с доступом к /ai"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    if not allowed_ai_users:
+        await m.answer(f"{EMOJI['info']} Список пуст", parse_mode="HTML")
+        return
+    
+    txt = f"{EMOJI['lock']} <b>Доступ к /ai ({len(allowed_ai_users)}):</b>\n\n"
+    
+    for uid in list(allowed_ai_users)[:20]:  # Показываем первые 20
+        try:
+            user = await bot.get_chat(uid)
+            name = user.full_name
+            username = f"@{user.username}" if user.username else ""
+            txt += f"• <code>{uid}</code> — {safe_html_text(name)} {username}\n"
+        except:
+            txt += f"• <code>{uid}</code> — Unknown\n"
+    
+    if len(allowed_ai_users) > 20:
+        txt += f"\n<i>...и ещё {len(allowed_ai_users) - 20} пользователей</i>"
+    
+    await m.answer(txt, parse_mode="HTML")
+
 @dp.message(Command("rm"))
 async def cmd_rm(m: Message):
     """Удалить файл: /rm <путь>"""
@@ -2054,6 +2132,18 @@ async def cmd_rmforce(m: Message):
 @dp.message(Command("ai"))
 async def cmd_ai(m: Message):
     """Запрос к нейросети Gemini: /ai <твой вопрос>"""
+    
+    # 🔹 ПРОВЕРКА ДОСТУПА
+    user_id = m.from_user.id
+    if not is_user_allowed(user_id, ALLOWED_AI_USERS):
+        logger.warning(f"🚫 Доступ к /ai запрещён для пользователя {user_id} (@{m.from_user.username})")
+        await m.answer(
+            f"{EMOJI['lock']} <b>Доступ запрещён</b>\n\n"
+            f"<i>Эта команда доступна только авторизованным пользователям</i>",
+            parse_mode="HTML"
+        )
+        return
+    """Запрос к нейросети Gemini: /ai <твой вопрос>"""
     prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     
     if not prompt:
@@ -2061,33 +2151,25 @@ async def cmd_ai(m: Message):
             f"{EMOJI['info']} <b>Нейросеть Gemini:</b>\n\n"
             f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
             f"<b>Примеры:</b>\n"
-            f"• /ai Объясни квантовую физику простыми словами\n"
-            f"• /ai Напиши код для сортировки списка на Python\n"
-            f"• /ai Придумай идею для стартапа",
+            f"• /ai Объясни квантовую физику простыми словами",
             parse_mode="HTML"
         )
         return
     
-    # Отправляем "думаю..."
     status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
-    
-    # Запрашиваем ответ
     result = await ask_gemini_http(prompt)
     
     if result["success"]:
-        # Форматируем ответ для Telegram HTML
         answer = safe_html_text(result["text"])
-        # Заменяем ```code``` на <code>
         answer = re.sub(r'```(\w*)\n?(.*?)```', r'<code>\2</code>', answer, flags=re.DOTALL)
         
         await status_msg.edit_text(
             f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
             parse_mode="HTML"
         )
-        logger.info(f"🤖 Gemini: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
     else:
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
-        logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
+
 
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
