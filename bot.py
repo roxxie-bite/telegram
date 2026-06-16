@@ -1960,6 +1960,179 @@ async def cmd_check(message: Message):
         update_settings(user_id, is_checking=False)
 
 
+
+@dp.message(Command("setdays"))
+async def cmd_setdays(message: Message):
+    if message.from_user.id != OWNER_ID_INT: return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) < 0:
+        await message.answer(EMOJI["warning"] + " Используй: <code>/setdays &lt;число&gt;</code>", parse_mode="HTML"); return
+    update_settings(message.from_user.id, min_days=int(parts[1]))
+    days_text = "все лоры" if int(parts[1])==0 else ">=" + parts[1] + " дней"
+    await message.answer(EMOJI["check"] + f" Порог: <b>{days_text}</b>", parse_mode="HTML")
+
+@dp.message(Command("addtag"))
+async def cmd_addtag(message: Message):
+    if message.from_user.id != OWNER_ID_INT: return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].strip().lower().isalnum():
+        await message.answer(EMOJI["warning"] + " Используй: <code>/addtag &lt;название&gt;</code>", parse_mode="HTML"); return
+    new_tag = parts[1].strip().lower()
+    settings = get_settings(message.from_user.id)
+    if new_tag in [t.lower() for t in settings["tags"]]: await message.answer(EMOJI["warning"] + " Тег уже в списке", parse_mode="HTML"); return
+    settings["tags"].append(new_tag)
+    update_settings(message.from_user.id, tags=settings["tags"])
+    await message.answer(EMOJI["check"] + f" Тег <b>{new_tag}</b> добавлен. Текущие: {', '.join(settings['tags'])}", parse_mode="HTML")
+
+@dp.message(Command("rmtag"))
+async def cmd_rmtag(message: Message):
+    if message.from_user.id != OWNER_ID_INT: return
+    parts = message.text.split()
+    if len(parts) != 2: await message.answer(EMOJI["warning"] + " Используй: <code>/rmtag &lt;название&gt;</code>", parse_mode="HTML"); return
+    tag_to_remove = parts[1].strip().lower()
+    settings = get_settings(message.from_user.id)
+    tag = next((t for t in settings["tags"] if t.lower() == tag_to_remove), None)
+    if not tag: await message.answer(EMOJI["warning"] + " Тег не найден", parse_mode="HTML"); return
+    settings["tags"].remove(tag)
+    update_settings(message.from_user.id, tags=settings["tags"])
+    await message.answer(EMOJI["check"] + f" Тег <b>{tag}</b> удалён. Текущие: {', '.join(settings['tags']) if settings['tags'] else 'нет'}", parse_mode="HTML")
+
+@dp.message(Command("tags"))
+async def cmd_tags(message: Message):
+    if message.from_user.id != OWNER_ID_INT: return
+    settings = get_settings(message.from_user.id)
+    if not settings["tags"]: await message.answer(EMOJI["tag"] + " <b>Теги:</b>\n<i>нет</i>\n\nИспользуй /addtag &lt;тег&gt;", parse_mode="HTML"); return
+    txt = EMOJI["tag"] + " <b>Теги:</b>\n" + "\n".join(f"{i}. <code>{t}</code>" for i,t in enumerate(settings["tags"], 1))
+    await message.answer(txt, parse_mode="HTML")
+
+@dp.message(Command("export"))
+async def cmd_export(m: Message):
+    """Экспортирует лоры из последнего поиска в файл (только если <50 лор)"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    global last_search_results, last_search_meta
+    
+    if not last_search_results or not last_search_meta:
+        # ← ИСПРАВЛЕНО: &lt; вместо <
+        await m.answer(
+            f"{EMOJI['warning']} Нет данных для экспорта.\n"
+            f"Сначала выполните <code>/check</code> с результатом &lt;50 лор.",
+            parse_mode="HTML"
+        )
+        return
+    
+    content = make_export_file(
+        last_search_results,
+        last_search_meta["min_days"],
+        last_search_meta["tags"]
+    )
+    
+    timestamp = last_search_meta["timestamp"].strftime("%Y%m%d_%H%M")
+    filename = f"loonie_export_{timestamp}.txt"
+    file = BufferedInputFile(file=content, filename=filename)
+    
+    caption = f"{PREMIUM_EMOJI['sparkle']} <b>Экспорт лор</b>\n"
+    caption += f"📅 {last_search_meta['timestamp'].strftime('%d.%m %H:%M')} МСК\n"
+    caption += f"📊 Лор: {len(last_search_results)}\n"
+    caption += f"🎯 Порог: >= {last_search_meta['min_days']} дней"
+    if last_search_meta["tags"]:
+        caption += f"\n🏷️ Теги: {', '.join(last_search_meta['tags'])}"
+    caption += f"\n\n<i>Файл готов к использованию с /dellora</i>"
+    
+    await m.answer_document(document=file, caption=caption, parse_mode="HTML")
+    logger.info(f"📤 Экспортировано {len(last_search_results)} лор в файл {filename}")
+
+
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    if message.from_user.id != OWNER_ID_INT: return
+    settings = get_settings(message.from_user.id)
+    moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
+    txt = f"{EMOJI['settings']} <b>Настройки:</b>\n🕐 МСК {moscow_time}\n"
+    txt += EMOJI["days"] + f" Порог: <b>{('все лоры' if settings['min_days']==0 else '>=' + str(settings['min_days']) + ' дней')}</b>\n"
+    txt += EMOJI["tag"] + f" Теги: <b>{(', '.join(settings['tags']) if settings['tags'] else 'нет (все лоры)')}</b>\n"
+    can_use, remaining = check_cooldown(message.from_user.id)
+    txt += f"⏱️ Кулдаун: <b>{'готов' if can_use else str(remaining) + ' сек'}</b>\n"
+    txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
+    txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
+    if log_handler: txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
+    # ← ИСПРАВЛЕНО НИЖЕ:
+    if db is not None:  # ← Было "if db:", стало "if db is not None:"
+        txt += f"\n{PREMIUM_EMOJI['sparkle']} БД: <b>MongoDB подключена</b>"
+    else:
+        txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
+    await message.answer(txt, parse_mode="HTML")
+
+@dp.message(Command("stop"))
+async def cmd_stop(message: Message):
+    if message.from_user.id != OWNER_ID_INT: return
+    parts = message.text.split()
+    if len(parts) != 2 or parts[1] != STOP_PASSWORD:
+        await message.answer(EMOJI["stop"] + f" Используй: <code>/stop {STOP_PASSWORD}</code>", parse_mode="HTML"); return
+    global bot_running
+    bot_running = False
+    await message.answer(EMOJI["stop"] + " <b>БОТ ОСТАНОВЛЕН!</b>\nНапиши /start для запуска.", parse_mode="HTML")
+    logger.warning("🛑 Бот остановлен владельцем")
+
+@dp.message(Command("start"))
+async def cmd_start(m: Message):
+    if m.from_user.id == OWNER_ID_INT:
+        
+        global bot_running
+        if not bot_running: bot_running = True; logger.info("🔄 Bot resumed by owner")
+        await m.answer(f"{EMOJI['check']} <b>Бот активен!</b>\n/help — команды", parse_mode="HTML")
+        return
+    ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
+    en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
+    await m.answer(ru + "\n\n" + en, parse_mode="HTML")
+
+@dp.message()
+async def silent_ignore(message: Message):
+    """Обрабатывает все необработанные сообщения"""
+    if message.from_user.id != OWNER_ID_INT:
+        # Для обычных пользователей — показываем обратную связь
+        ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
+        en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
+        await message.answer(ru + "\n\n" + en, parse_mode="HTML")
+        return
+    
+    # Для владельца — показываем справку по неизвестным командам
+    await message.answer(EMOJI["info"] + " Неизвестная команда. /help — справка", parse_mode="HTML")
+
+# ================= WEBHOOK SERVER =================
+async def webhook_handler(request):
+    try:
+        update = await request.json()
+        await dp.feed_webhook_update(bot, update)
+        return web.Response(text="OK")
+    except Exception as e:
+        logger.error("Webhook error: " + str(e))
+        return web.Response(text="Error", status=500)
+
+async def health_handler(request):
+    return web.Response(text="OK - " + ("running" if bot_running else "stopped"))
+
+async def run_web_server():
+    app = web.Application()
+    webhook_path = "/webhook/" + BOT_TOKEN.split(":")[0]
+    app.router.add_post(webhook_path, webhook_handler)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("🌐 Server on port " + str(port))
+    ext_url = os.getenv("RENDER_EXTERNAL_URL")
+    if ext_url and bot_running:
+        wh_url = ext_url + webhook_path
+        await bot.set_webhook(wh_url)
+        logger.info("✅ Webhook: " + wh_url)
+
+
+
 # ================= INLINE AI MODE =================
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
@@ -2195,179 +2368,6 @@ async def callback_inline_send(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки inline: {e}")
         await callback.answer("❌ Не удалось отправить", show_alert=True)
-
-
-
-
-@dp.message(Command("setdays"))
-async def cmd_setdays(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    parts = message.text.split()
-    if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) < 0:
-        await message.answer(EMOJI["warning"] + " Используй: <code>/setdays &lt;число&gt;</code>", parse_mode="HTML"); return
-    update_settings(message.from_user.id, min_days=int(parts[1]))
-    days_text = "все лоры" if int(parts[1])==0 else ">=" + parts[1] + " дней"
-    await message.answer(EMOJI["check"] + f" Порог: <b>{days_text}</b>", parse_mode="HTML")
-
-@dp.message(Command("addtag"))
-async def cmd_addtag(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    parts = message.text.split()
-    if len(parts) != 2 or not parts[1].strip().lower().isalnum():
-        await message.answer(EMOJI["warning"] + " Используй: <code>/addtag &lt;название&gt;</code>", parse_mode="HTML"); return
-    new_tag = parts[1].strip().lower()
-    settings = get_settings(message.from_user.id)
-    if new_tag in [t.lower() for t in settings["tags"]]: await message.answer(EMOJI["warning"] + " Тег уже в списке", parse_mode="HTML"); return
-    settings["tags"].append(new_tag)
-    update_settings(message.from_user.id, tags=settings["tags"])
-    await message.answer(EMOJI["check"] + f" Тег <b>{new_tag}</b> добавлен. Текущие: {', '.join(settings['tags'])}", parse_mode="HTML")
-
-@dp.message(Command("rmtag"))
-async def cmd_rmtag(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    parts = message.text.split()
-    if len(parts) != 2: await message.answer(EMOJI["warning"] + " Используй: <code>/rmtag &lt;название&gt;</code>", parse_mode="HTML"); return
-    tag_to_remove = parts[1].strip().lower()
-    settings = get_settings(message.from_user.id)
-    tag = next((t for t in settings["tags"] if t.lower() == tag_to_remove), None)
-    if not tag: await message.answer(EMOJI["warning"] + " Тег не найден", parse_mode="HTML"); return
-    settings["tags"].remove(tag)
-    update_settings(message.from_user.id, tags=settings["tags"])
-    await message.answer(EMOJI["check"] + f" Тег <b>{tag}</b> удалён. Текущие: {', '.join(settings['tags']) if settings['tags'] else 'нет'}", parse_mode="HTML")
-
-@dp.message(Command("tags"))
-async def cmd_tags(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    settings = get_settings(message.from_user.id)
-    if not settings["tags"]: await message.answer(EMOJI["tag"] + " <b>Теги:</b>\n<i>нет</i>\n\nИспользуй /addtag &lt;тег&gt;", parse_mode="HTML"); return
-    txt = EMOJI["tag"] + " <b>Теги:</b>\n" + "\n".join(f"{i}. <code>{t}</code>" for i,t in enumerate(settings["tags"], 1))
-    await message.answer(txt, parse_mode="HTML")
-
-@dp.message(Command("export"))
-async def cmd_export(m: Message):
-    """Экспортирует лоры из последнего поиска в файл (только если <50 лор)"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    global last_search_results, last_search_meta
-    
-    if not last_search_results or not last_search_meta:
-        # ← ИСПРАВЛЕНО: &lt; вместо <
-        await m.answer(
-            f"{EMOJI['warning']} Нет данных для экспорта.\n"
-            f"Сначала выполните <code>/check</code> с результатом &lt;50 лор.",
-            parse_mode="HTML"
-        )
-        return
-    
-    content = make_export_file(
-        last_search_results,
-        last_search_meta["min_days"],
-        last_search_meta["tags"]
-    )
-    
-    timestamp = last_search_meta["timestamp"].strftime("%Y%m%d_%H%M")
-    filename = f"loonie_export_{timestamp}.txt"
-    file = BufferedInputFile(file=content, filename=filename)
-    
-    caption = f"{PREMIUM_EMOJI['sparkle']} <b>Экспорт лор</b>\n"
-    caption += f"📅 {last_search_meta['timestamp'].strftime('%d.%m %H:%M')} МСК\n"
-    caption += f"📊 Лор: {len(last_search_results)}\n"
-    caption += f"🎯 Порог: >= {last_search_meta['min_days']} дней"
-    if last_search_meta["tags"]:
-        caption += f"\n🏷️ Теги: {', '.join(last_search_meta['tags'])}"
-    caption += f"\n\n<i>Файл готов к использованию с /dellora</i>"
-    
-    await m.answer_document(document=file, caption=caption, parse_mode="HTML")
-    logger.info(f"📤 Экспортировано {len(last_search_results)} лор в файл {filename}")
-
-
-@dp.message(Command("status"))
-async def cmd_status(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    settings = get_settings(message.from_user.id)
-    moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
-    txt = f"{EMOJI['settings']} <b>Настройки:</b>\n🕐 МСК {moscow_time}\n"
-    txt += EMOJI["days"] + f" Порог: <b>{('все лоры' if settings['min_days']==0 else '>=' + str(settings['min_days']) + ' дней')}</b>\n"
-    txt += EMOJI["tag"] + f" Теги: <b>{(', '.join(settings['tags']) if settings['tags'] else 'нет (все лоры)')}</b>\n"
-    can_use, remaining = check_cooldown(message.from_user.id)
-    txt += f"⏱️ Кулдаун: <b>{'готов' if can_use else str(remaining) + ' сек'}</b>\n"
-    txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
-    txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
-    if log_handler: txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
-    # ← ИСПРАВЛЕНО НИЖЕ:
-    if db is not None:  # ← Было "if db:", стало "if db is not None:"
-        txt += f"\n{PREMIUM_EMOJI['sparkle']} БД: <b>MongoDB подключена</b>"
-    else:
-        txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
-    await message.answer(txt, parse_mode="HTML")
-
-@dp.message(Command("stop"))
-async def cmd_stop(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    parts = message.text.split()
-    if len(parts) != 2 or parts[1] != STOP_PASSWORD:
-        await message.answer(EMOJI["stop"] + f" Используй: <code>/stop {STOP_PASSWORD}</code>", parse_mode="HTML"); return
-    global bot_running
-    bot_running = False
-    await message.answer(EMOJI["stop"] + " <b>БОТ ОСТАНОВЛЕН!</b>\nНапиши /start для запуска.", parse_mode="HTML")
-    logger.warning("🛑 Бот остановлен владельцем")
-
-@dp.message(Command("start"))
-async def cmd_start(m: Message):
-    if m.from_user.id == OWNER_ID_INT:
-        
-        global bot_running
-        if not bot_running: bot_running = True; logger.info("🔄 Bot resumed by owner")
-        await m.answer(f"{EMOJI['check']} <b>Бот активен!</b>\n/help — команды", parse_mode="HTML")
-        return
-    ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
-    en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
-    await m.answer(ru + "\n\n" + en, parse_mode="HTML")
-
-@dp.message()
-async def silent_ignore(message: Message):
-    """Обрабатывает все необработанные сообщения"""
-    if message.from_user.id != OWNER_ID_INT:
-        # Для обычных пользователей — показываем обратную связь
-        ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
-        en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
-        await message.answer(ru + "\n\n" + en, parse_mode="HTML")
-        return
-    
-    # Для владельца — показываем справку по неизвестным командам
-    await message.answer(EMOJI["info"] + " Неизвестная команда. /help — справка", parse_mode="HTML")
-
-# ================= WEBHOOK SERVER =================
-async def webhook_handler(request):
-    try:
-        update = await request.json()
-        await dp.feed_webhook_update(bot, update)
-        return web.Response(text="OK")
-    except Exception as e:
-        logger.error("Webhook error: " + str(e))
-        return web.Response(text="Error", status=500)
-
-async def health_handler(request):
-    return web.Response(text="OK - " + ("running" if bot_running else "stopped"))
-
-async def run_web_server():
-    app = web.Application()
-    webhook_path = "/webhook/" + BOT_TOKEN.split(":")[0]
-    app.router.add_post(webhook_path, webhook_handler)
-    app.router.add_get("/", health_handler)
-    app.router.add_get("/health", health_handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", "8080"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info("🌐 Server on port " + str(port))
-    ext_url = os.getenv("RENDER_EXTERNAL_URL")
-    if ext_url and bot_running:
-        wh_url = ext_url + webhook_path
-        await bot.set_webhook(wh_url)
-        logger.info("✅ Webhook: " + wh_url)
 
 # ================= MAIN =================
 async def main():
