@@ -2100,7 +2100,7 @@ async def cmd_model(m: Message):
     
     parts = m.text.split()
     
-    # Если без аргумента — показать список
+    # Если без аргумента — показать списокtr
     if len(parts) < 2:
         txt = f"{EMOJI['settings']} <b>Доступные модели Gemini:</b>\n\n"
         
