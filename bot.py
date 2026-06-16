@@ -120,15 +120,6 @@ EXPORT_THRESHOLD = 50
 COOLDOWN_SECONDS = 20
 FORWARDED_FILE = "forwarded.json"
 USERS_FILE = "users.json"
-# Yandex Music настройки
-YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN")
-MUSIC_STATUS_CHAT_ID = os.getenv("MUSIC_STATUS_CHAT_ID")
-MUSIC_CHECK_INTERVAL = int(os.getenv("MUSIC_CHECK_INTERVAL", "20")) if os.getenv("MUSIC_CHECK_INTERVAL") else 20
-music_tracking_enabled = False
-music_task = None
-current_music_message_id = None
-last_track_id = None
-music_message_timestamp = None
 # === Rate limiting для сайта с лорами ===
 LAST_REQUEST_TIME = 0  # Время последнего запроса
 REQUEST_DELAY = 30.0    # Мин. секунд между запросами (по просьбе владельца)
@@ -202,109 +193,6 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-async def ask_gemini_http(prompt: str, history: list = None) -> dict:
-    """
-    Отправляет запрос к Gemini API через прямой HTTP-запрос
-    
-    Args:
-        prompt: Текст запроса от пользователя
-        history: Опционально, список предыдущих сообщений [{"role": "user"/"model", "text": "..."}]
-    
-    Returns:
-        dict: {"success": bool, "text": str, "error": str}
-    """
-    if not gemini_session or not GEMINI_API_KEY:
-        return {"success": False, "error": "Gemini не инициализирован"}
-    
-    try:
-        # 🔹 Формируем содержимое запроса
-        if history:
-            # Многоходовой чат с историей
-            contents = []
-            for msg in history:
-                role = "user" if msg.get("role") == "user" else "model"
-                contents.append({
-                    "role": role,
-                    "parts": [{"text": msg.get("text", "")}]
-                })
-            contents.append({
-                "role": "user",
-                "parts": [{"text": prompt}]
-            })
-        else:
-            # Простой запрос
-            contents = [{
-                "role": "user",
-                "parts": [{"text": prompt}]
-            }]
-        
-        # 🔹 Формируем тело запроса
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": 0.7,
-                "topP": 0.95,
-                "topK": 40,
-                "maxOutputTokens": 2048,
-            },
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            ]
-        }
-        
-        # 🔹 URL запроса
-        url = f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-        
-        # 🔹 Выполняем запрос в отдельном потоке (requests блокирующий)
-        def make_request():
-            return gemini_session.post(url, json=payload, timeout=60)
-        
-        response = await asyncio.to_thread(make_request)
-        
-        # 🔹 Обрабатываем ответ
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Проверяем на блокировку контента
-            if "promptFeedback" in data and data["promptFeedback"].get("blockReason"):
-                return {
-                    "success": False,
-                    "error": f"⛔ Запрос заблокирован: {data['promptFeedback']['blockReason']}"
-                }
-            
-            # Извлекаем текст ответа
-            if "candidates" in data and len(data["candidates"]) > 0:
-                parts = data["candidates"][0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    text = parts[0]["text"].strip()
-                    return {"success": True, "text": text}
-            
-            return {"success": False, "error": "Пустой или неверный ответ от API"}
-            
-        elif response.status_code == 400:
-            return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать."}
-        elif response.status_code == 403:
-            return {"success": False, "error": "🔒 Ошибка доступа. Проверь API ключ."}
-        elif response.status_code == 429:
-            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту."}
-        elif response.status_code >= 500:
-            return {"success": False, "error": "⚠️ Серверная ошибка. Попробуй позже."}
-        else:
-            return {"success": False, "error": f"⚠️ HTTP {response.status_code}: {response.text[:150]}"}
-        
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": "⏱️ Таймаут ответа. Попробуй позже."}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "🌐 Ошибка соединения. Проверь интернет."}
-    except Exception as e:
-        logger.error(f"❌ Gemini HTTP error: {str(e)}")
-        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
-
-
-
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
     def __init__(self, bot_token, chat_id, min_level=logging.INFO):
@@ -336,6 +224,30 @@ class TelegramLogHandler(logging.Handler):
             self.last_send = now
         except Exception as e:
             print(f"Failed to send log to Telegram: {e}")
+
+# ================= GEMINI HTTP CLIENT =================
+def init_gemini_http():
+    """Инициализирует HTTP-сессию для Gemini API"""
+    global gemini_session
+    
+    if not GEMINI_API_KEY:
+        logger.warning("⚠️ GEMINI_API_KEY не задан — AI-функции недоступны")
+        return False
+    
+    try:
+        # Создаём сессию с настройками
+        gemini_session = requests.Session()
+        gemini_session.headers.update({
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (LoonieBot/1.0)",
+        })
+        
+        logger.info(f"✅ Gemini HTTP client инициализирован: {GEMINI_MODEL}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации Gemini HTTP: {e}")
+        return False
 
 # ================= MONGODB ИНИЦИАЛИЗАЦИЯ =================
 def init_mongo():
@@ -778,6 +690,106 @@ def mark_user_forwarded(user_id):
         save_users()
 
 
+async def ask_gemini_http(prompt: str, history: list = None) -> dict:
+    """
+    Отправляет запрос к Gemini API через прямой HTTP-запрос
+    
+    Args:
+        prompt: Текст запроса от пользователя
+        history: Опционально, список предыдущих сообщений [{"role": "user"/"model", "text": "..."}]
+    
+    Returns:
+        dict: {"success": bool, "text": str, "error": str}
+    """
+    if not gemini_session or not GEMINI_API_KEY:
+        return {"success": False, "error": "Gemini не инициализирован"}
+    
+    try:
+        # 🔹 Формируем содержимое запроса
+        if history:
+            # Многоходовой чат с историей
+            contents = []
+            for msg in history:
+                role = "user" if msg.get("role") == "user" else "model"
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": msg.get("text", "")}]
+                })
+            contents.append({
+                "role": "user",
+                "parts": [{"text": prompt}]
+            })
+        else:
+            # Простой запрос
+            contents = [{
+                "role": "user",
+                "parts": [{"text": prompt}]
+            }]
+        
+        # 🔹 Формируем тело запроса
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.95,
+                "topK": 40,
+                "maxOutputTokens": 2048,
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            ]
+        }
+        
+        # 🔹 URL запроса
+        url = f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        
+        # 🔹 Выполняем запрос в отдельном потоке (requests блокирующий)
+        def make_request():
+            return gemini_session.post(url, json=payload, timeout=60)
+        
+        response = await asyncio.to_thread(make_request)
+        
+        # 🔹 Обрабатываем ответ
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Проверяем на блокировку контента
+            if "promptFeedback" in data and data["promptFeedback"].get("blockReason"):
+                return {
+                    "success": False,
+                    "error": f"⛔ Запрос заблокирован: {data['promptFeedback']['blockReason']}"
+                }
+            
+            # Извлекаем текст ответа
+            if "candidates" in data and len(data["candidates"]) > 0:
+                parts = data["candidates"][0].get("content", {}).get("parts", [])
+                if parts and "text" in parts[0]:
+                    text = parts[0]["text"].strip()
+                    return {"success": True, "text": text}
+            
+            return {"success": False, "error": "Пустой или неверный ответ от API"}
+            
+        elif response.status_code == 400:
+            return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать."}
+        elif response.status_code == 403:
+            return {"success": False, "error": "🔒 Ошибка доступа. Проверь API ключ."}
+        elif response.status_code == 429:
+            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту."}
+        elif response.status_code >= 500:
+            return {"success": False, "error": "⚠️ Серверная ошибка. Попробуй позже."}
+        else:
+            return {"success": False, "error": f"⚠️ HTTP {response.status_code}: {response.text[:150]}"}
+        
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Таймаут ответа. Попробуй позже."}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "error": "🌐 Ошибка соединения. Проверь интернет."}
+    except Exception as e:
+        logger.error(f"❌ Gemini HTTP error: {str(e)}")
+        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
 
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
