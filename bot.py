@@ -902,6 +902,100 @@ def make_export_file(loras, min_days, tags):
         lines.append("/dellora " + l["id"] + "  # " + l["name"] + " (" + str(l["days"]) + " дней)")
     return "\n".join(lines).encode("utf-8")
 
+# ================= РАЗБИЕНИЕ ДЛИННЫХ СООБЩЕНИЙ =================
+MAX_MESSAGE_LENGTH = 4000  # Чуть меньше лимита 4096 для безопасности
+
+def split_long_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
+    """
+    Разбивает длинный текст на части для отправки в Telegram
+    
+    Args:
+        text: Исходный текст
+        max_length: Максимальная длина одной части (по умолчанию 4000)
+    
+    Returns:
+        list[str]: Список частей текста, каждая <= max_length
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current = ""
+    
+    # Разбиваем по строкам чтобы не резать слова
+    lines = text.split('\n')
+    
+    for line in lines:
+        # Если одна строка длиннее лимита — режем её по словам
+        if len(line) > max_length:
+            # Если есть текущий буфер — сохраняем его
+            if current:
+                parts.append(current)
+                current = ""
+            
+            # Режем длинную строку по словам
+            words = line.split(' ')
+            temp = ""
+            for word in words:
+                if len(temp + ' ' + word) <= max_length:
+                    temp += (' ' if temp else '') + word
+                else:
+                    if temp:
+                        parts.append(temp)
+                    temp = word
+            if temp:
+                current = temp
+        # Если строка помещается в текущую часть
+        elif len(current) + len(line) + 1 <= max_length:
+            current += ('\n' if current else '') + line
+        # Если не помещается — начинаем новую часть
+        else:
+            if current:
+                parts.append(current)
+            current = line
+    
+    # Добавляем последнюю часть
+    if current:
+        parts.append(current)
+    
+    return parts
+
+async def send_long_message(message: Message, text: str, parse_mode: str = "HTML", split_code: bool = True):
+    """
+    Отправляет длинное сообщение, разбивая его на части если нужно
+    
+    Args:
+        message: Исходное сообщение для ответа
+        text: Текст для отправки
+        parse_mode: Режим парсинга ("HTML", "Markdown", None)
+        split_code: Если True — стараться не разрывать код внутри ```
+    """
+    # Если текст короткий — отправляем как есть
+    if len(text) <= MAX_MESSAGE_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+        return
+    
+    # Разбиваем на части
+    parts = split_long_message(text, MAX_MESSAGE_LENGTH)
+    
+    # Отправляем частями с небольшой задержкой
+    for i, part in enumerate(parts, 1):
+        # Добавляем индикатор "продолжение" если частей больше одной
+        if len(parts) > 1:
+            prefix = f"<i>({i}/{len(parts)})</i>\n" if parse_mode == "HTML" else f"({i}/{len(parts)})\n"
+            part = prefix + part
+        
+        try:
+            await message.answer(part, parse_mode=parse_mode)
+            # Небольшая задержка чтобы не получить 429 от Telegram
+            if i < len(parts):
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки части {i}: {e}")
+            # Если не вышло с HTML — пробуем без парсинга
+            if parse_mode:
+                await message.answer(part, parse_mode=None)
+
 async def send_loras_to_chat(message, loras, total_pages):
     await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
     for i, lora in enumerate(loras, 1):
@@ -2136,39 +2230,54 @@ async def cmd_ai(m: Message):
     # 🔹 ПРОВЕРКА ДОСТУПА
     user_id = m.from_user.id
     if not is_user_allowed(user_id, ALLOWED_AI_USERS):
-        logger.warning(f"🚫 Доступ к /ai запрещён для пользователя {user_id} (@{m.from_user.username})")
+        logger.warning(f"🚫 Доступ к /ai запрещён для пользователя {user_id}")
         await m.answer(
             f"{EMOJI['lock']} <b>Доступ запрещён</b>\n\n"
             f"<i>Эта команда доступна только авторизованным пользователям</i>",
             parse_mode="HTML"
         )
         return
-    """Запрос к нейросети Gemini: /ai <твой вопрос>"""
+    
     prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     
     if not prompt:
-        await m.answer(
+        await send_long_message(m,
             f"{EMOJI['info']} <b>Нейросеть Gemini:</b>\n\n"
             f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
             f"<b>Примеры:</b>\n"
-            f"• /ai Объясни квантовую физику простыми словами",
+            f"• /ai Объясни квантовую физику простыми словами\n"
+            f"• /ai Напиши код для сортировки списка на Python",
             parse_mode="HTML"
         )
         return
     
+    # Отправляем "думаю..."
     status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
+    
+    # Запрашиваем ответ
     result = await ask_gemini_http(prompt)
     
     if result["success"]:
-        answer = safe_html_text(result["text"])
-        answer = re.sub(r'```(\w*)\n?(.*?)```', r'<code>\2</code>', answer, flags=re.DOTALL)
+        answer = result["text"]
         
-        await status_msg.edit_text(
+        # Форматируем код для HTML (но не разбиваем его!)
+        if '```' in answer:
+            # Заменяем ```code``` на <code> но сохраняем структуру
+            answer = re.sub(r'```(\w*)\n(.*?)```', r'<pre><code class="language-\1">\2</code></pre>', answer, flags=re.DOTALL)
+            answer = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', answer, flags=re.DOTALL)
+        
+        # Экранируем для HTML
+        answer = safe_html_text(answer)
+        
+        # 🔹 Отправляем с автоматическим разбиением
+        await send_long_message(status_msg,
             f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
             parse_mode="HTML"
         )
+        logger.info(f"🤖 Gemini: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
     else:
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+        logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
 
 
 @dp.message(Command("model"))
