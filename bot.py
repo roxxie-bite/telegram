@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
-from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import subprocess
 import asyncio
 import shlex
@@ -2141,7 +2141,7 @@ async def inline_search(query: InlineQuery):
     
     # 🔹 Отправляем финальный результат
     await query.answer(results=final_results, cache_time=0, is_personal=True)
-    
+
 
 @dp.callback_query(F.data.startswith("inline_send:"))
 async def callback_inline_send(callback: CallbackQuery):
