@@ -2250,7 +2250,6 @@ async def main():
     mongo_ok = init_mongo()
     init_gemini_http()
     load_forwarded()
-    init_gemini()
     load_users()
     load_settings()
     
