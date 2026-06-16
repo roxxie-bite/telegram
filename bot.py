@@ -207,9 +207,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ================= GEMINI ИНИЦИАЛИЗАЦИЯ =================
+# ================= GEMINI ИНИЦИАЛИЗАЦИЯ =================
 def init_gemini():
-    """Инициализирует клиент Gemini API"""
-    global gemini_client
+    """Инициализирует клиент Gemini API с авто-выбором модели"""
+    global gemini_client, gemini_model, GEMINI_MODEL
     
     if not GEMINI_API_KEY:
         logger.warning("⚠️ GEMINI_API_KEY не задан — AI-функции недоступны")
@@ -219,29 +220,90 @@ def init_gemini():
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # Создаём модель с настройками
-        global gemini_model
-        gemini_model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            generation_config={
-                "temperature": 0.7,  # Креативность: 0.0-1.0
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 2048,
-            },
-            safety_settings=[
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            ]
-        )
+        # 🔹 Список моделей по приоритету (от лучшей к запасной)
+        models_to_try = [
+            "gemini-pro",
+            "chat-bison-001",
+            "text-bison-001",
+            "embedding-gecko-001",
+            "gemini-1.0-pro-vision-latest",
+            "gemini-pro-vision",
+            "gemini-1.5-pro-latest",
+            "gemini-1.5-pro-001",
+            "gemini-1.5-pro-002",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash-001",
+            "gemini-1.5-flash-001-tuning",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-002",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-flash-8b-001",
+            "gemini-1.5-flash-8b-latest",
+            "gemini-1.5-flash-8b-exp-0827",
+            "gemini-1.5-flash-8b-exp-0924",
+            "gemini-2.5-pro-exp-03-25",
+            "gemini-2.0-flash-exp",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-001",
+            "gemini-2.0-flash-exp-image-generation",
+            "gemini-2.0-flash-lite-001",
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash-lite-preview-02-05",
+            "gemini-2.0-flash-lite-preview",
+            "gemini-2.0-pro-exp",
+            "gemini-2.0-pro-exp-02-05",
+            "gemini-exp-1206",
+            "gemini-2.0-flash-thinking-exp-01-21",
+            "gemini-2.0-flash-thinking-exp",
+            "gemini-2.0-flash-thinking-exp-1219",
+            "learnlm-1.5-pro-experimental",
+            "gemma-3-27b-it",
+            "embedding-001",
+            "text-embedding-004",
+            "gemini-embedding-exp-03-07",
+            "gemini-embedding-exp",
+            "aqa",            
+        ]
         
-        logger.info(f"✅ Gemini инициализирован: {GEMINI_MODEL}")
-        return True
+        # 🔹 Пробуем модели по очереди
+        for model_name in models_to_try:
+            try:
+                logger.info(f"🔍 Пробую модель: {model_name}")
+                test_model = genai.GenerativeModel(model_name=model_name)
+                # Простой тестовый запрос чтобы проверить доступ
+                test_model.generate_content("Hi", generation_config={"max_output_tokens": 1})
+                
+                # Если дошли сюда — модель работает!
+                GEMINI_MODEL = model_name
+                gemini_model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config={
+                        "temperature": 0.7,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                        "max_output_tokens": 2048,
+                    },
+                    safety_settings=[
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                    ]
+                )
+                logger.info(f"✅ Gemini инициализирован: {GEMINI_MODEL}")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Модель {model_name} недоступна: {str(e)[:100]}")
+                continue
+        
+        # 🔹 Если ни одна модель не сработала
+        logger.error("❌ Ни одна из моделей Gemini не доступна")
+        return False
         
     except ImportError:
-        logger.error("❌ Модуль google-generativeai не установлен — выполни: pip install google-generativeai")
+        logger.error("❌ Модуль google-generativeai не установлен")
         return False
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации Gemini: {e}")
