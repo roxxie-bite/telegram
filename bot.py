@@ -327,6 +327,90 @@ def safe_html_text(text: str) -> str:
     """
     return html.escape(text)
 
+def markdown_to_html(text: str) -> str:
+    """
+    Конвертирует Markdown, который обычно присылают нейросети (заголовки,
+    **жирный**, *курсив*, ~~зачёркнутый~~, `код`, блоки ```код```,
+    [ссылки](url), > цитаты, списки - / *), в HTML-разметку, понятную Telegram
+    (parse_mode="HTML").
+
+    ВАЖНО: экранирование HTML (html.escape) выполняется ПОСЛЕ разбора
+    markdown-синтаксиса — через служебные маркеры из непечатных символов,
+    которые html.escape не трогает. Если экранировать текст раньше, то уже
+    вставленные теги <b>, <code> и т.п. сами потом превратятся в &lt;b&gt; —
+    именно так раньше ломалось форматирование ответов AI.
+    """
+    if not text:
+        return ""
+
+    code_blocks = []
+    inline_codes = []
+    links = []
+
+    # 1) Блоки кода ```...``` — извлекаем целиком, экранируем содержимое и сразу
+    #    собираем готовый HTML. Дальше эти куски никто не трогает.
+    def stash_code_block(m):
+        lang = (m.group(1) or "").strip()
+        code = html.escape(m.group(2))
+        lang_attr = f' class="language-{html.escape(lang)}"' if lang else ""
+        code_blocks.append(f"<pre><code{lang_attr}>{code}</code></pre>")
+        return f"\x00CB{len(code_blocks)-1}\x00"
+    text = re.sub(r'```(\w*)\n?(.*?)```', stash_code_block, text, flags=re.DOTALL)
+
+    # 2) Инлайн-код `...`
+    def stash_inline_code(m):
+        inline_codes.append(f"<code>{html.escape(m.group(1))}</code>")
+        return f"\x00IC{len(inline_codes)-1}\x00"
+    text = re.sub(r'`([^`\n]+?)`', stash_inline_code, text)
+
+    # 3) Ссылки [текст](url) — тоже целиком защищаем, экранируя текст и url
+    def stash_link(m):
+        label, url = html.escape(m.group(1)), html.escape(m.group(2))
+        links.append(f'<a href="{url}">{label}</a>')
+        return f"\x00LK{len(links)-1}\x00"
+    text = re.sub(r'\[([^\]]+)\]\((https?://[^\s\)]+)\)', stash_link, text)
+
+    # 4) Заголовки "# Текст" -> жирная строка (Telegram не умеет в заголовки)
+    text = re.sub(r'^#{1,6}[ \t]+(.+?)[ \t]*$', lambda m: f"\x01B\x01{m.group(1)}\x01b\x01", text, flags=re.MULTILINE)
+
+    # 5) Цитаты "> текст" (склеиваем подряд идущие строки в один блок) -> <blockquote>
+    def stash_blockquote(m):
+        lines = [re.sub(r'^>[ \t]?', '', line) for line in m.group(0).split('\n')]
+        return "\x01Q\x01" + "\n".join(lines) + "\x01q\x01"
+    text = re.sub(r'^>.*(?:\n>.*)*', stash_blockquote, text, flags=re.MULTILINE)
+
+    # 6) Маркированные списки "- item" / "* item" / "+ item" -> "• item"
+    text = re.sub(r'^([ \t]*)[-*+][ \t]+', r'\1• ', text, flags=re.MULTILINE)
+
+    # 7) Полужирный **text** / __text__
+    text = re.sub(r'\*\*(.+?)\*\*', lambda m: f"\x01B\x01{m.group(1)}\x01b\x01", text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__', lambda m: f"\x01B\x01{m.group(1)}\x01b\x01", text, flags=re.DOTALL)
+
+    # 8) Курсив *text* / _text_ (одиночные — двойные уже разобраны выше)
+    text = re.sub(r'(?<!\*)\*([^\*\n]+?)\*(?!\*)', lambda m: f"\x01I\x01{m.group(1)}\x01i\x01", text)
+    text = re.sub(r'(?<![\w_])_([^_\n]+?)_(?![\w_])', lambda m: f"\x01I\x01{m.group(1)}\x01i\x01", text)
+
+    # 9) Зачёркнутый ~~text~~
+    text = re.sub(r'~~(.+?)~~', lambda m: f"\x01S\x01{m.group(1)}\x01s\x01", text, flags=re.DOTALL)
+
+    # 10) Экранируем весь оставшийся обычный текст (служебные маркеры — непечатные
+    #     символы, html.escape их не трогает)
+    text = html.escape(text)
+
+    # 11) Превращаем служебные маркеры в реальные HTML-теги
+    text = (text
+            .replace('\x01B\x01', '<b>').replace('\x01b\x01', '</b>')
+            .replace('\x01I\x01', '<i>').replace('\x01i\x01', '</i>')
+            .replace('\x01S\x01', '<s>').replace('\x01s\x01', '</s>')
+            .replace('\x01Q\x01', '<blockquote>').replace('\x01q\x01', '</blockquote>'))
+
+    # 12) Возвращаем защищённые код-блоки, инлайн-код и ссылки
+    text = re.sub(r'\x00CB(\d+)\x00', lambda m: code_blocks[int(m.group(1))], text)
+    text = re.sub(r'\x00IC(\d+)\x00', lambda m: inline_codes[int(m.group(1))], text)
+    text = re.sub(r'\x00LK(\d+)\x00', lambda m: links[int(m.group(1))], text)
+
+    return text
+
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 user_settings = {}
@@ -2009,16 +2093,9 @@ async def cmd_ai(m: Message):
     result = await ask_ai_http(prompt)
     
     if result["success"]:
-        answer = result["text"]
-        
-        # Форматируем код для HTML (но не разбиваем его!)
-        if '```' in answer:
-            # Заменяем ```code``` на <code> но сохраняем структуру
-            answer = re.sub(r'```(\w*)\n(.*?)```', r'<pre><code class="language-\1">\2</code></pre>', answer, flags=re.DOTALL)
-            answer = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', answer, flags=re.DOTALL)
-        
-        # Экранируем для HTML
-        answer = safe_html_text(answer)
+        # Конвертируем Markdown от нейросети (заголовки, **жирный**, код, ссылки
+        # и т.д.) в HTML, которое понимает Telegram parse_mode="HTML"
+        answer = markdown_to_html(result["text"])
         
         # 🔹 Отправляем с автоматическим разбиением
         await send_long_message(status_msg,
@@ -2578,8 +2655,7 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     logger.info(f"🤖 Ответ от AI: success={result['success']}" + ("" if result["success"] else f" error='{result['error']}'"))
 
     if result["success"]:
-        answer = safe_html_text(result["text"])
-        answer = re.sub(r'```(?:\w*\n)?(.*?)```', r'<code>\1</code>', answer, flags=re.DOTALL)
+        answer = markdown_to_html(result["text"])
         final_text = f"✨ <b>AI:</b>\n\n{answer}"
     else:
         final_text = f"❌ {result['error']}"
