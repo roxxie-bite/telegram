@@ -2589,7 +2589,7 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
         model_used = result.get("model", current_ai_model)
         
         final_text = (
-            f"{PREMIUM_EMOJI['sparkle']} <b>AI ({model_used}):</b>\n\n"
+            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b> <em>({model_used})</em>:\n\n"
             f"{answer}"
         )
     else:
