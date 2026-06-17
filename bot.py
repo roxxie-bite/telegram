@@ -2654,9 +2654,11 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     result = await ask_ai_http(full_prompt)
     logger.info(f"🤖 Ответ от AI: success={result['success']}" + ("" if result["success"] else f" error='{result['error']}'"))
 
-    if result["success"]:
+        if result["success"]:
         answer = markdown_to_html(result["text"])
-        final_text = f"✨ <b>AI:</b>\n\n{answer}"
+        display_query = text[:400] + "…" if len(text) > 400 else text
+        safe_query = safe_html_text(display_query)
+        final_text = f"✨ <b>AI:</b>\n\n<b>Запрос:</b> {safe_query}\n\n{answer}"
     else:
         final_text = f"❌ {result['error']}"
 
