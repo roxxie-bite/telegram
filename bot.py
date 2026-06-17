@@ -105,9 +105,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 MONGO_URI = os.getenv("MONGO_URI")
 SITE_BASE = "https://lynther.sytes.net"
 
-ALLOWED_AI_USERS = {
-    int(OWNER_ID),  # Владелец всегда имеет доступ
-    8371541704
+EXTRA_ALLOWED_AI_USERS = {
+    8371541704  # Доп. ID, у которого всегда есть доступ к /ai (помимо владельца)
 }
     
 
@@ -115,290 +114,124 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
     """Проверяет, есть ли пользователь в списке разрешённых"""
     return user_id in allowed_set
 
-# ================= GEMINI AI =================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# ================= OPENROUTER AI =================
+# OpenRouter — единый OpenAI-совместимый шлюз к десяткам провайдеров
+# (OpenAI, Anthropic, Google, DeepSeek, Meta, Mistral и т.д.), включая бесплатные модели.
+# Это снимает проблему лимита запросов одного провайдера (например Gemini) —
+# можно переключаться между моделями/провайдерами одним параметром.
+# Документация: https://openrouter.ai/docs
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# ================= AI МОДЕЛИ (КАТАЛОГ OPENROUTER) =================
+# ⚠️ "name" — это id модели в формате "провайдер/модель" (иногда с суффиксом ":free").
+# Каталог OpenRouter часто меняется (особенно бесплатные модели) — актуальный список
+# смотри на https://openrouter.ai/models и поправь нужные строки здесь при необходимости.
+AVAILABLE_AI_MODELS = {
+    # === Авто-роутер OpenRouter (бесплатно, сам выбирает доступную бесплатную модель) ===
+    "auto-free": {
+        "name": "openrouter/free",
+        "display": "🎲 Auto Free",
+        "desc": "Авто-выбор бесплатной модели — не зависит от лимита одного провайдера",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
 
+    # === OpenAI ===
+    "gpt-4o": {
+        "name": "openai/gpt-4o",
+        "display": "🤖 GPT-4o",
+        "desc": "Флагман OpenAI, универсальная",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
+    "gpt-4o-mini": {
+        "name": "openai/gpt-4o-mini",
+        "display": "⚡ GPT-4o mini",
+        "desc": "Быстрая и дешёвая версия GPT-4o",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
 
-# ================= GEMINI МОДЕЛИ (ВСЕ ДОСТУПНЫЕ) =================
-# Все модели с поддержкой generateContent из твоего списка
-AVAILABLE_GEMINI_MODELS = {
-    # === Gemini 2.5 ===
-    "2.5-flash": {
-        "name": "gemini-2.5-flash",
+    # === Anthropic ===
+    "claude-sonnet": {
+        "name": "anthropic/claude-sonnet-4.6",
+        "display": "🧠 Claude Sonnet 4.6",
+        "desc": "Сбалансированная флагманская модель Anthropic",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
+    "claude-haiku": {
+        "name": "anthropic/claude-haiku-4.5",
+        "display": "🪶 Claude Haiku 4.5",
+        "desc": "Быстрая и лёгкая модель Anthropic",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
+
+    # === Google (через OpenRouter — без лимита прямого Gemini API) ===
+    "gemini-flash": {
+        "name": "google/gemini-2.5-flash",
         "display": "🚀 Gemini 2.5 Flash",
-        "desc": "Стабильная, 1M токенов, июнь 2025",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "2.5-pro": {
-        "name": "gemini-2.5-pro",
-        "display": "🧠 Gemini 2.5 Pro",
-        "desc": "Самая умная, 1M токенов, июнь 2025",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "2.5-flash-lite": {
-        "name": "gemini-2.5-flash-lite",
-        "display": "🪶 Gemini 2.5 Flash-Lite",
-        "desc": "Лёгкая версия, июль 2025",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "2.5-flash-tts": {
-        "name": "gemini-2.5-flash-preview-tts",
-        "display": "🔊 Gemini 2.5 Flash TTS",
-        "desc": "С синтезом речи (preview)",
-        "temp": 1.0,
+        "desc": "Google, доступ через OpenRouter",
+        "temp": 0.7,
         "max_tokens": 16384
     },
-    "2.5-pro-tts": {
-        "name": "gemini-2.5-pro-preview-tts",
-        "display": "🔊 Gemini 2.5 Pro TTS",
-        "desc": "Pro с синтезом речи (preview)",
-        "temp": 1.0,
+    "gemini-pro": {
+        "name": "google/gemini-3-pro-preview",
+        "display": "✨ Gemini 3 Pro",
+        "desc": "Google, доступ через OpenRouter",
+        "temp": 0.7,
         "max_tokens": 16384
     },
-    "2.5-computer-use": {
-        "name": "gemini-2.5-computer-use-preview-10-2025",
-        "display": "🖱️ Gemini 2.5 Computer Use",
-        "desc": "Для управления компьютером (октябрь 2025)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    
-    # === Gemini 2.0 ===
-    "2.0-flash": {
-        "name": "gemini-2.0-flash",
-        "display": "⚡ Gemini 2.0 Flash",
-        "desc": "Быстрая и универсальная, январь 2025",
-        "temp": 1.0,
-        "max_tokens": 8192
-    },
-    "2.0-flash-001": {
-        "name": "gemini-2.0-flash-001",
-        "display": "⚡ Gemini 2.0 Flash 001",
-        "desc": "Стабильная версия 2.0 Flash",
-        "temp": 1.0,
-        "max_tokens": 8192
-    },
-    "2.0-flash-lite": {
-        "name": "gemini-2.0-flash-lite",
-        "display": "🪶 Gemini 2.0 Flash-Lite",
-        "desc": "Лёгкая версия 2.0",
-        "temp": 1.0,
-        "max_tokens": 8192
-    },
-    "2.0-flash-lite-001": {
-        "name": "gemini-2.0-flash-lite-001",
-        "display": "🪶 Gemini 2.0 Flash-Lite 001",
-        "desc": "Стабильная лёгкая версия",
-        "temp": 1.0,
-        "max_tokens": 8192
-    },
-    
-    # === Gemini 3.x ===
-    "3-pro-preview": {
-        "name": "gemini-3-pro-preview",
-        "display": " Gemini 3 Pro Preview",
-        "desc": "Preview версия Gemini 3 Pro",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "3-flash-preview": {
-        "name": "gemini-3-flash-preview",
-        "display": "🚀 Gemini 3 Flash Preview",
-        "desc": "Preview версия Gemini 3 Flash (декабрь 2025)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "3.1-pro-preview": {
-        "name": "gemini-3.1-pro-preview",
-        "display": "🧠 Gemini 3.1 Pro Preview",
-        "desc": "Preview версия 3.1 Pro (январь 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "3.1-pro-customtools": {
-        "name": "gemini-3.1-pro-preview-customtools",
-        "display": "🛠️ Gemini 3.1 Pro Custom Tools",
-        "desc": "Оптимизирована для кастомных инструментов",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "3.1-flash-lite-preview": {
-        "name": "gemini-3.1-flash-lite-preview",
-        "display": "🪶 Gemini 3.1 Flash Lite Preview",
-        "desc": "Preview лёгкой версии (март 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "3.1-flash-lite": {
-        "name": "gemini-3.1-flash-lite",
-        "display": "🪶 Gemini 3.1 Flash Lite",
-        "desc": "Стабильная лёгкая версия (май 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "3.1-flash-tts-preview": {
-        "name": "gemini-3.1-flash-tts-preview",
-        "display": "🔊 Gemini 3.1 Flash TTS",
-        "desc": "С синтезом речи (preview)",
-        "temp": 1.0,
+
+    # === DeepSeek ===
+    "deepseek-r1": {
+        "name": "deepseek/deepseek-r1",
+        "display": "🔬 DeepSeek R1",
+        "desc": "Рассуждающая модель, хороша в коде и логике",
+        "temp": 0.7,
         "max_tokens": 16384
     },
-    "3.5-flash": {
-        "name": "gemini-3.5-flash",
-        "display": "🚀 Gemini 3.5 Flash",
-        "desc": "Последняя Flash версия (май 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
+    "deepseek-r1-free": {
+        "name": "deepseek/deepseek-r1:free",
+        "display": "🔬 DeepSeek R1 (free)",
+        "desc": "Бесплатная версия (свой лимит запросов в минуту/день)",
+        "temp": 0.7,
+        "max_tokens": 8192
     },
-    
-    # === Nano Banana (Image Generation) 🍌 ===
-    "nano-banana": {
-        "name": "gemini-2.5-flash-image",
-        "display": "🍌 Nano Banana",
-        "desc": "Генерация изображений (2.5 Flash Image)",
-        "temp": 1.0,
-        "max_tokens": 32768
+
+    # === Meta Llama (бесплатная) ===
+    "llama-3.3-70b-free": {
+        "name": "meta-llama/llama-3.3-70b-instruct:free",
+        "display": "🦙 Llama 3.3 70B (free)",
+        "desc": "Бесплатная модель Meta",
+        "temp": 0.7,
+        "max_tokens": 8192
     },
-    "nano-banana-pro-preview": {
-        "name": "gemini-3-pro-image-preview",
-        "display": "🍌 Nano Banana Pro Preview",
-        "desc": "Pro версия генерации изображений (preview)",
-        "temp": 1.0,
-        "max_tokens": 32768
+
+    # === Qwen (бесплатная, заточена под код) ===
+    "qwen-coder-free": {
+        "name": "qwen/qwen3-coder:free",
+        "display": "👨‍💻 Qwen3 Coder (free)",
+        "desc": "Бесплатная модель, хороша в коде",
+        "temp": 0.7,
+        "max_tokens": 8192
     },
-    "nano-banana-pro": {
-        "name": "gemini-3-pro-image",
-        "display": "🍌🚀 Nano Banana Pro",
-        "desc": "Pro версия генерации изображений",
-        "temp": 1.0,
-        "max_tokens": 32768
-    },
-    "nano-banana-2-preview": {
-        "name": "gemini-3.1-flash-image-preview",
-        "display": "🍌🍌 Nano Banana 2 Preview",
-        "desc": "Второе поколение (3.1 Flash Image)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "nano-banana-2": {
-        "name": "gemini-3.1-flash-image",
-        "display": "🍌🍌 Nano Banana 2",
-        "desc": "Стабильная версия Nano Banana 2",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    
-    # === Gemma 4 ===
-    "gemma-4-26b": {
-        "name": "gemma-4-26b-a4b-it",
-        "display": "💎 Gemma 4 26B A4B IT",
-        "desc": "26B параметров, instruction-tuned",
-        "temp": 1.0,
-        "max_tokens": 32768
-    },
-    "gemma-4-31b": {
-        "name": "gemma-4-31b-it",
-        "display": "💎 Gemma 4 31B IT",
-        "desc": "31B параметров, instruction-tuned",
-        "temp": 1.0,
-        "max_tokens": 32768
-    },
-    
-    # === Latest (auto-updating) ===
-    "flash-latest": {
-        "name": "gemini-flash-latest",
-        "display": "🔄 Flash Latest",
-        "desc": "Последняя Flash (авто-обновляется)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "flash-lite-latest": {
-        "name": "gemini-flash-lite-latest",
-        "display": "🔄 Flash-Lite Latest",
-        "desc": "Последняя Flash-Lite",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "pro-latest": {
-        "name": "gemini-pro-latest",
-        "display": "🔄 Pro Latest",
-        "desc": "Последняя Pro версия",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    
-    # === Lyria (Music) ===
-    "lyria-3-clip": {
-        "name": "lyria-3-clip-preview",
-        "display": "🎵 Lyria 3 Clip Preview",
-        "desc": "Генерация музыки (30 сек, preview)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "lyria-3-pro": {
-        "name": "lyria-3-pro-preview",
-        "display": "🎵 Lyria 3 Pro Preview",
-        "desc": "Pro версия генерации музыки",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    
-    # === Robotics ===
-    "robotics-er-1.5": {
-        "name": "gemini-robotics-er-1.5-preview",
-        "display": "🤖 Robotics-ER 1.5",
-        "desc": "Для робототехники (preview)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "robotics-er-1.6": {
-        "name": "gemini-robotics-er-1.6-preview",
-        "display": "🤖 Robotics-ER 1.6",
-        "desc": "Для робототехники (1.6 preview)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    
-    # === Deep Research ===
-    "deep-research-max": {
-        "name": "deep-research-max-preview-04-2026",
-        "display": "🔬 Deep Research Max",
-        "desc": "Максимальное исследование (апрель 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "deep-research": {
-        "name": "deep-research-preview-04-2026",
-        "display": "🔬 Deep Research",
-        "desc": "Глубокое исследование (апрель 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    "deep-research-pro": {
-        "name": "deep-research-pro-preview-12-2025",
-        "display": "🔬 Deep Research Pro",
-        "desc": "Pro исследование (декабрь 2025)",
-        "temp": 1.0,
-        "max_tokens": 65536
-    },
-    
-    # === Antigravity ===
-    "antigravity": {
-        "name": "antigravity-preview-05-2026",
-        "display": "🚀 Antigravity Agent",
-        "desc": "Агент для сложных задач (май 2026)",
-        "temp": 1.0,
-        "max_tokens": 65536
+
+    # === Mistral (бесплатная) ===
+    "mistral-small-free": {
+        "name": "mistralai/mistral-small-3.1-24b-instruct:free",
+        "display": "🌬️ Mistral Small (free)",
+        "desc": "Бесплатная модель Mistral",
+        "temp": 0.7,
+        "max_tokens": 8192
     },
 }
 
-# Модель по умолчанию
-DEFAULT_GEMINI_MODEL = "2.5-flash"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+# Модель по умолчанию — бесплатный авто-роутер, чтобы из коробки не зависеть
+# от лимита конкретного провайдера (именно то, от чего вы уходите с Gemini)
+DEFAULT_AI_MODEL = "auto-free"
 
 
 
@@ -455,11 +288,9 @@ user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
-allowed_ai_users = set(int(x) for x in os.getenv("ALLOWED_AI_USERS", OWNER_ID).split(","))
-gemini_session = None
-current_gemini_model = DEFAULT_GEMINI_MODEL  # ← Выбранная модель (ключ из AVAILABLE_GEMINI_MODELS)
-gemini_client = None
-gemini_model = None
+allowed_ai_users = set(int(x) for x in os.getenv("ALLOWED_AI_USERS", OWNER_ID).split(",")) | EXTRA_ALLOWED_AI_USERS | {int(OWNER_ID)}
+openrouter_session = None
+current_ai_model = DEFAULT_AI_MODEL  # ← Выбранная модель (ключ из AVAILABLE_AI_MODELS)
 log_handler = None
 mongo_client = None
 db = None
@@ -517,28 +348,31 @@ class TelegramLogHandler(logging.Handler):
         except Exception as e:
             print(f"Failed to send log to Telegram: {e}")
 
-# ================= GEMINI HTTP CLIENT =================
-def init_gemini_http():
-    """Инициализирует HTTP-сессию для Gemini API"""
-    global gemini_session
+# ================= OPENROUTER HTTP CLIENT =================
+def init_openrouter_http():
+    """Инициализирует HTTP-сессию для OpenRouter API"""
+    global openrouter_session
     
-    if not GEMINI_API_KEY:
-        logger.warning("⚠️ GEMINI_API_KEY не задан — AI-функции недоступны")
+    if not OPENROUTER_API_KEY:
+        logger.warning("⚠️ OPENROUTER_API_KEY не задан — AI-функции недоступны")
         return False
     
     try:
         # Создаём сессию с настройками
-        gemini_session = requests.Session()
-        gemini_session.headers.update({
+        openrouter_session = requests.Session()
+        openrouter_session.headers.update({
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (LoonieBot/1.0)",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            # Необязательные заголовки — OpenRouter использует их для статистики в дашборде
+            "HTTP-Referer": "https://github.com/",
+            "X-Title": "LoonieBot",
         })
         
-        logger.info(f"✅ Gemini HTTP client инициализирован: {GEMINI_MODEL}")
+        logger.info(f"✅ OpenRouter HTTP client инициализирован: модель по умолчанию {AVAILABLE_AI_MODELS[DEFAULT_AI_MODEL]['name']}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации Gemini HTTP: {e}")
+        logger.error(f"❌ Ошибка инициализации OpenRouter HTTP: {e}")
         return False
 
 # ================= MONGODB ИНИЦИАЛИЗАЦИЯ =================
@@ -1076,70 +910,46 @@ def mark_user_forwarded(user_id):
         save_users()
 
 
-async def ask_gemini_http(prompt: str, history: list = None, model_key: str = None) -> dict:
+async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) -> dict:
     """
-    Отправляет запрос к Gemini API
-    
+    Отправляет запрос к нейросети через OpenRouter (OpenAI-совместимый формат)
+
     Args:
         prompt: Текст запроса
-        history: Опционально, история диалога
-        model_key: Опционально, ключ модели из AVAILABLE_GEMINI_MODELS (если None — используется current_gemini_model)
+        history: Опционально, история диалога — список {"role": "user"/"assistant", "text": "..."}
+        model_key: Опционально, ключ модели из AVAILABLE_AI_MODELS (если None — используется current_ai_model)
     """
     # Определяем какую модель использовать
-    model_key = model_key or current_gemini_model
-    model_info = AVAILABLE_GEMINI_MODELS.get(model_key, AVAILABLE_GEMINI_MODELS[DEFAULT_GEMINI_MODEL])
+    model_key = model_key or current_ai_model
+    model_info = AVAILABLE_AI_MODELS.get(model_key, AVAILABLE_AI_MODELS[DEFAULT_AI_MODEL])
     model_name = model_info["name"]
     
-    if not gemini_session or not GEMINI_API_KEY:
-        return {"success": False, "error": "Gemini не инициализирован"}
+    if not openrouter_session or not OPENROUTER_API_KEY:
+        return {"success": False, "error": "OpenRouter не инициализирован (нет OPENROUTER_API_KEY)"}
     
     
     try:
         
-        # 🔹 Формируем содержимое запроса
+        # 🔹 Формируем сообщения в формате OpenAI chat (role/content)
+        messages = []
         if history:
             # Многоходовой чат с историей
-            contents = []
             for msg in history:
-                role = "user" if msg.get("role") == "user" else "model"
-                contents.append({
-                    "role": role,
-                    "parts": [{"text": msg.get("text", "")}]
-                })
-            contents.append({
-                "role": "user",
-                "parts": [{"text": prompt}]
-            })
-        else:
-            # Простой запрос
-            contents = [{
-                "role": "user",
-                "parts": [{"text": prompt}]
-            }]
+                role = "user" if msg.get("role") == "user" else "assistant"
+                messages.append({"role": role, "content": msg.get("text", "")})
+        messages.append({"role": "user", "content": prompt})
         
         # 🔹 Формируем тело запроса
         payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": 0.7,
-                "topP": 0.95,
-                "topK": 40,
-                "maxOutputTokens": 65536,
-            },
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            ]
+            "model": model_name,
+            "messages": messages,
+            "temperature": model_info.get("temp", 0.7),
+            "max_tokens": model_info.get("max_tokens", 8192),
         }
-        
-        # 🔹 URL запроса
-        url = f"{GEMINI_API_URL}/{model_name}:generateContent?key={GEMINI_API_KEY}"
         
         # 🔹 Выполняем запрос в отдельном потоке (requests блокирующий)
         def make_request():
-            return gemini_session.post(url, json=payload, timeout=60)
+            return openrouter_session.post(OPENROUTER_API_URL, json=payload, timeout=60)
         
         response = await asyncio.to_thread(make_request)
         
@@ -1147,30 +957,33 @@ async def ask_gemini_http(prompt: str, history: list = None, model_key: str = No
         if response.status_code == 200:
             data = response.json()
             
-            # Проверяем на блокировку контента
-            if "promptFeedback" in data and data["promptFeedback"].get("blockReason"):
-                return {
-                    "success": False,
-                    "error": f"⛔ Запрос заблокирован: {data['promptFeedback']['blockReason']}"
-                }
-            
-            # Извлекаем текст ответа
-            if "candidates" in data and len(data["candidates"]) > 0:
-                parts = data["candidates"][0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    text = parts[0]["text"].strip()
+            # Извлекаем текст ответа (стандартный формат OpenAI chat completion)
+            choices = data.get("choices", [])
+            if choices:
+                message = choices[0].get("message", {})
+                text = (message.get("content") or "").strip()
+                if text:
                     return {"success": True, "text": text}
+                # Некоторые reasoning-модели кладут рассуждение в отдельное поле,
+                # если content пустой — на всякий случай подстрахуемся
+                reasoning = message.get("reasoning")
+                if reasoning:
+                    return {"success": True, "text": reasoning.strip()}
             
             return {"success": False, "error": "Пустой или неверный ответ от API"}
             
         elif response.status_code == 400:
-            return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать."}
-        elif response.status_code == 403:
-            return {"success": False, "error": "🔒 Ошибка доступа. Проверь API ключ."}
+            return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать или смени модель."}
+        elif response.status_code == 401:
+            return {"success": False, "error": "🔒 Неверный или отсутствующий OPENROUTER_API_KEY."}
+        elif response.status_code == 402:
+            return {"success": False, "error": "💳 Недостаточно кредитов на балансе OpenRouter."}
+        elif response.status_code == 404:
+            return {"success": False, "error": f"❓ Модель не найдена: {model_name}. Проверь название на openrouter.ai/models."}
         elif response.status_code == 429:
-            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту."}
+            return {"success": False, "error": "🔄 Лимит запросов (особенно у бесплатных моделей). Подожди минуту или смени модель."}
         elif response.status_code >= 500:
-            return {"success": False, "error": "⚠️ Серверная ошибка. Попробуй позже."}
+            return {"success": False, "error": "⚠️ Серверная ошибка провайдера. Попробуй позже или смени модель."}
         else:
             return {"success": False, "error": f"⚠️ HTTP {response.status_code}: {response.text[:150]}"}
         
@@ -1179,9 +992,8 @@ async def ask_gemini_http(prompt: str, history: list = None, model_key: str = No
     except requests.exceptions.ConnectionError:
         return {"success": False, "error": "🌐 Ошибка соединения. Проверь интернет."}
     except Exception as e:
-        logger.error(f"❌ Gemini HTTP error: {str(e)}")
+        logger.error(f"❌ OpenRouter HTTP error: {str(e)}")
         return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
-
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 @dp.message(F.from_user.id != OWNER_ID_INT)
@@ -2225,11 +2037,11 @@ async def cmd_rmforce(m: Message):
 
 @dp.message(Command("ai"))
 async def cmd_ai(m: Message):
-    """Запрос к нейросети Gemini: /ai <твой вопрос>"""
+    """Запрос к нейросети через OpenRouter: /ai <твой вопрос>"""
     
     # 🔹 ПРОВЕРКА ДОСТУПА
     user_id = m.from_user.id
-    if not is_user_allowed(user_id, ALLOWED_AI_USERS):
+    if not is_user_allowed(user_id, allowed_ai_users):
         logger.warning(f"🚫 Доступ к /ai запрещён для пользователя {user_id}")
         await m.answer(
             f"{EMOJI['lock']} <b>Доступ запрещён</b>\n\n"
@@ -2241,8 +2053,9 @@ async def cmd_ai(m: Message):
     prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     
     if not prompt:
+        model_display = AVAILABLE_AI_MODELS.get(current_ai_model, {}).get("display", current_ai_model)
         await send_long_message(m,
-            f"{EMOJI['info']} <b>Нейросеть Gemini:</b>\n\n"
+            f"{EMOJI['info']} <b>Нейросеть ({model_display}):</b>\n\n"
             f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
             f"<b>Примеры:</b>\n"
             f"• /ai Объясни квантовую физику простыми словами\n"
@@ -2255,7 +2068,7 @@ async def cmd_ai(m: Message):
     status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
     
     # Запрашиваем ответ
-    result = await ask_gemini_http(prompt)
+    result = await ask_ai_http(prompt)
     
     if result["success"]:
         answer = result["text"]
@@ -2271,36 +2084,36 @@ async def cmd_ai(m: Message):
         
         # 🔹 Отправляем с автоматическим разбиением
         await send_long_message(status_msg,
-            f"{PREMIUM_EMOJI['sparkle']} <b>Gemini:</b>\n\n{answer}",
+            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}",
             parse_mode="HTML"
         )
-        logger.info(f"🤖 Gemini: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
+        logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
     else:
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
-        logger.warning(f"⚠️ Gemini ошибка: {result['error']}")
+        logger.warning(f"⚠️ AI ошибка: {result['error']}")
 
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
-    """Показать или сменить модель Gemini: /model [ключ]"""
+    """Показать или сменить AI-модель (OpenRouter): /model [ключ]"""
     if m.from_user.id != OWNER_ID_INT:
         await m.answer(f"{EMOJI['lock']} Только для владельца", parse_mode="HTML")
         return
     
-    global current_gemini_model
+    global current_ai_model
     
     parts = m.text.split()
     
-    # Если без аргумента — показать списокtr
+    # Если без аргумента — показать список
     if len(parts) < 2:
-        txt = f"{EMOJI['settings']} <b>Доступные модели Gemini:</b>\n\n"
+        txt = f"{EMOJI['settings']} <b>Доступные AI-модели (OpenRouter):</b>\n\n"
         
-        for key, info in AVAILABLE_GEMINI_MODELS.items():
-            current = "✅ " if key == current_gemini_model else "• "
+        for key, info in AVAILABLE_AI_MODELS.items():
+            current = "✅ " if key == current_ai_model else "• "
             txt += f"{current}{info['display']}\n"
             txt += f"   <i>{info['desc']}</i>\n"
             txt += f"   <code>/model {key}</code>\n\n"
         
-        txt += f"<b>Текущая:</b> <code>{current_gemini_model}</code>\n"
+        txt += f"<b>Текущая:</b> <code>{current_ai_model}</code>\n"
         txt += f"<i>Используй /model &lt;ключ&gt; чтобы сменить</i>"
         
         await m.answer(txt, parse_mode="HTML")
@@ -2309,8 +2122,8 @@ async def cmd_model(m: Message):
     # Если с аргументом — сменить модель
     new_model_key = parts[1].lower()
     
-    if new_model_key not in AVAILABLE_GEMINI_MODELS:
-        available = ", ".join(AVAILABLE_GEMINI_MODELS.keys())
+    if new_model_key not in AVAILABLE_AI_MODELS:
+        available = ", ".join(AVAILABLE_AI_MODELS.keys())
         await m.answer(
             f"{EMOJI['error']} <b>Неизвестная модель:</b> <code>{new_model_key}</code>\n\n"
             f"<b>Доступно:</b> <code>{available}</code>\n"
@@ -2320,9 +2133,9 @@ async def cmd_model(m: Message):
         return
     
     # Сменяем модель
-    old_model = current_gemini_model
-    current_gemini_model = new_model_key
-    model_info = AVAILABLE_GEMINI_MODELS[new_model_key]
+    old_model = current_ai_model
+    current_ai_model = new_model_key
+    model_info = AVAILABLE_AI_MODELS[new_model_key]
     
     await m.answer(
         f"{EMOJI['check']} <b>Модель сменена!</b>\n\n"
@@ -2332,7 +2145,7 @@ async def cmd_model(m: Message):
         parse_mode="HTML"
     )
     
-    logger.info(f"🔄 Модель Gemini сменена: {old_model} → {new_model_key}")
+    logger.info(f"🔄 AI-модель сменена: {old_model} → {new_model_key}")
 
 
 @dp.message(Command("loglevel"))
@@ -2596,8 +2409,8 @@ async def cmd_status(message: Message):
         # ... после строки с БД ...
     
     # Добавь информацию о модели:
-    model_info = AVAILABLE_GEMINI_MODELS.get(current_gemini_model, {})
-    txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_gemini_model)}</b>"
+    model_info = AVAILABLE_AI_MODELS.get(current_ai_model, {})
+    txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_ai_model)}</b>"
     txt += f"\n   <i>{model_info.get('desc', '')}</i>"
     
     await message.answer(txt, parse_mode="HTML")
@@ -2683,7 +2496,7 @@ async def main():
     # Инициализация (функции уже определены выше)
     init_log_bot()
     mongo_ok = init_mongo()
-    init_gemini_http()
+    init_openrouter_http()
     load_forwarded()
     load_users()
     load_settings()
@@ -2768,7 +2581,7 @@ async def inline_search(query: InlineQuery):
     
     # 🔹 Есть режим и текст — отдаём ОДИН результат с плейсхолдером.
     # ВАЖНО: Telegram не даёт ответить на один и тот же inline_query дважды,
-    # поэтому реальный запрос к Gemini переносим в обработчик chosen_inline_result
+    # поэтому реальный запрос к нейросети переносим в обработчик chosen_inline_result
     # (срабатывает, когда пользователь реально выбрал этот вариант),
     # а готовый ответ доставляем через edit_message_text по inline_message_id.
     # reply_markup обязателен — без него Telegram не передаст inline_message_id.
@@ -2778,7 +2591,7 @@ async def inline_search(query: InlineQuery):
     results = [
         InlineQueryResultArticle(
             id=result_id,
-            title="✨ Спросить у Gemini",
+            title="✨ Спросить у AI",
             description=text[:64],
             input_message_content=InputTextMessageContent(message_text="⏳ <i>Думаю...</i>", parse_mode="HTML"),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2807,12 +2620,12 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     }
     full_prompt = f"{prompts.get(mode, prompts['ask'])}\n\n{text}"
 
-    result = await ask_gemini_http(full_prompt)
+    result = await ask_ai_http(full_prompt)
 
     if result["success"]:
         answer = safe_html_text(result["text"])
         answer = re.sub(r'```(?:\w*\n)?(.*?)```', r'<code>\1</code>', answer, flags=re.DOTALL)
-        final_text = f"✨ <b>Gemini:</b>\n\n{answer}"
+        final_text = f"✨ <b>AI:</b>\n\n{answer}"
     else:
         final_text = f"❌ {result['error']}"
 
