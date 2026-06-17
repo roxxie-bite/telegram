@@ -276,7 +276,7 @@ AVAILABLE_AI_MODELS = {
 
 # Модель по умолчанию — бесплатный авто-роутер, чтобы из коробки не зависеть
 # от лимита конкретного провайдера (именно то, от чего вы уходите с Gemini)
-DEFAULT_AI_MODEL = "auto-free"
+DEFAULT_AI_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
 
@@ -2161,6 +2161,7 @@ async def ping_model(model_name: str) -> tuple[bool, float]:
         logger.debug(f"Ping error {model_name}: {e}")
         return False, 0.0
 
+
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
     """Показать или сменить AI-модель (OpenRouter): /model [ключ]"""
@@ -2169,77 +2170,29 @@ async def cmd_model(m: Message):
         return
     
     global current_ai_model
-    
     parts = m.text.split()
     
-    # === БЕЗ АРГУМЕНТА: показать список с проверкой доступности ===
+    # === БЕЗ АРГУМЕНТА: просто показать список (без пинга) ===
     if len(parts) < 2:
-        status_msg = await m.answer(
-            f"{EMOJI['settings']} <b>Проверяю доступность моделей...</b>",
-            parse_mode="HTML"
-        )
-        
-        # Получаем список моделей из каталога OpenRouter
-        available_ids = await fetch_available_models()
-        
-        # Пингуем модели (макс 5 параллельно, чтобы не спамить API)
-        semaphore = asyncio.Semaphore(5)
-        
-        async def ping_limited(key, info):
-            async with semaphore:
-                ok, latency = await ping_model(info["name"])
-                return key, ok, latency
-        
-        ping_tasks = [
-            ping_limited(k, v) for k, v in AVAILABLE_AI_MODELS.items()
-        ]
-        ping_results = await asyncio.gather(*ping_tasks, return_exceptions=True)
-        
-        # Собираем результаты в словарь
-        ping_map = {}
-        for res in ping_results:
-            if isinstance(res, tuple) and len(res) == 3:
-                ping_map[res[0]] = (res[1], res[2])
-        
         txt = f"{EMOJI['settings']} <b>Доступные AI-модели (OpenRouter):</b>\n\n"
         
         for key, info in AVAILABLE_AI_MODELS.items():
             current = "✅ " if key == current_ai_model else "• "
-            
-            ping_ok, ping_sec = ping_map.get(key, (None, 0))
-            in_catalog = info["name"] in available_ids
             is_free = ":free" in info["name"]
+            free_badge = " <code>[free]</code>" if is_free else ""
             
-            # Определяем статус
-            if ping_ok is True:
-                if ping_sec < 3:
-                    status_icon = "🟢"
-                else:
-                    status_icon = "🟡"
-                latency_str = f" ⏱️{ping_sec:.1f}с"
-            elif ping_ok is False:
-                status_icon = "🔴"
-                latency_str = " ⏱️—"
-            else:
-                status_icon = "⚪"
-                latency_str = ""
-            
-            # Если модели нет в каталоге и она не free (free иногда не listed)
-            if not in_catalog and not is_free and key != "auto-free":
-                status_icon = "⚠️"
-            
-            txt += f"{current}{status_icon} {info['display']}{latency_str}\n"
+            txt += f"{current}{info['display']}{free_badge}\n"
             txt += f"   <i>{info['desc']}</i>\n"
             txt += f"   <code>/model {key}</code>\n\n"
         
         txt += f"<b>Текущая:</b> <code>{current_ai_model}</code>\n"
-        txt += f"<i>🟢 — быстрая, 🟡 — медленная, 🔴 — недоступна, ⚠️ — не в каталоге</i>\n"
-        txt += f"<i>Используй /model &lt;ключ&gt; чтобы сменить</i>"
+        txt += f"<i>Используй /model &lt;ключ&gt; чтобы сменить. "
+        txt += f"При смене модель будет проверена автоматически.</i>"
         
-        await status_msg.edit_text(txt, parse_mode="HTML")
+        await m.answer(txt, parse_mode="HTML")
         return
     
-    # === С АРГУМЕНТОМ: сменить модель ===
+    # === С АРГУМЕНТОМ: проверяем и только потом меняем ===
     new_model_key = parts[1].lower()
     
     if new_model_key not in AVAILABLE_AI_MODELS:
@@ -2252,8 +2205,9 @@ async def cmd_model(m: Message):
         )
         return
     
-    # Проверяем доступность перед сменой
     new_model_info = AVAILABLE_AI_MODELS[new_model_key]
+    
+    # Проверяем доступность перед сменой
     check_msg = await m.answer(
         f"{EMOJI['settings']} Проверяю <b>{new_model_info['display']}</b>...",
         parse_mode="HTML"
@@ -2552,6 +2506,7 @@ async def cmd_status(message: Message):
     
     await message.answer(txt, parse_mode="HTML")
 
+
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message):
     if message.from_user.id != OWNER_ID_INT: return
@@ -2677,6 +2632,9 @@ async def inline_search(query: InlineQuery):
             InlineQueryResultArticle(
                 id="mode_ask",
                 title="❓ Спросить",
+                thumbnail_url="https://img.magnific.com/free-photo/closeup-shot-cute-fox-lying-ground-with-fallen-autumn-leaves_181624-32660.jpg?semt=ais_hybrid&w=740&q=80",
+                thumbnail_width=300,
+                thumbnail_height=300,
                 description="Задать вопрос нейросети",
                 input_message_content=InputTextMessageContent(
                     message_text="❓ Напиши вопрос после выбора..."
@@ -2688,6 +2646,9 @@ async def inline_search(query: InlineQuery):
             InlineQueryResultArticle(
                 id="mode_explain",
                 title="📚 Объяснить",
+                thumbnail_url="https://99px.ru/sstorage/53/2022/10/mid_345671_479468.jpg",
+                thumbnail_width=300,
+                thumbnail_height=300,
                 description="Объяснить текст просто",
                 input_message_content=InputTextMessageContent(
                     message_text="📚 Введи текст для объяснения..."
@@ -2709,6 +2670,9 @@ async def inline_search(query: InlineQuery):
             InlineQueryResultArticle(
                 id=f"prompt_{mode}",
                 title="✍️ Введи текст",
+                thumbnail_url="https://99px.ru/sstorage/53/2018/12/mid_245780_602075.jpg",
+                thumbnail_width=300,
+                thumbnail_height=300,
                 description="Продолжи писать после режима...",
                 input_message_content=InputTextMessageContent(
                     message_text=f"✍️ Пиши: @looniesbot {mode}: твой текст"
@@ -2738,6 +2702,9 @@ async def inline_search(query: InlineQuery):
         InlineQueryResultArticle(
             id=result_id,
             title="✨ Спросить у AI",
+            thumbnail_url="https://st.aestatic.net/items-img-8/R/7/I/L/A39468cbf296f4d35a51de52f5d2e3e3f4.jpeg_960x960.jpg",
+            thumbnail_width=300,   
+            thumbnail_height=300,
             description=text[:64],
             input_message_content=InputTextMessageContent(message_text="⏳ <i>Думаю...</i>", parse_mode="HTML"),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2779,8 +2746,7 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     if result["success"]:
         answer = markdown_to_html(result["text"])
         display_query = text[:400] + "..." if len(text) > 400 else text
-        safe_query = save_html_text(display_query)
-        final_text = f"✨ <b>AI:</b>\n\n Промт: {safe_query}\n\n {answer}"
+        final_text = f"✨ <b>AI:</b>\n\n{answer}"
     else:
         final_text = f"❌ {result['error']}"
 
