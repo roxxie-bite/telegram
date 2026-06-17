@@ -276,7 +276,7 @@ AVAILABLE_AI_MODELS = {
 
 # Модель по умолчанию — бесплатный авто-роутер, чтобы из коробки не зависеть
 # от лимита конкретного провайдера (именно то, от чего вы уходите с Gemini)
-DEFAULT_AI_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+DEFAULT_AI_MODEL = "nvidia-nemotron-3-nano-omni-30b-a3b"  # ← Выберите модель по умолчанию из AVAILABLE_AI_MODELS
 
 
 
