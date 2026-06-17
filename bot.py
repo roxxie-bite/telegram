@@ -153,14 +153,6 @@ AVAILABLE_AI_MODELS = {
         "max_tokens": 16384
     },
 
-    "nvidia": {
-        "name": "nvidia/nemotron-3-ultra-550b-a55b:free",
-        "display": "🟩 NVIDIA Nemotron 3 Ultra 550B (free)",
-        "desc": "Бесплатная модель от NVIDIA, хороша в генерации текста и кода",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-
     # === Anthropic ===
     "claude-sonnet": {
         "name": "anthropic/claude-sonnet-4.6",
@@ -2520,10 +2512,17 @@ async def main():
 
 
 # ================= INLINE AI MODE (ПОЛНЫЙ) =================
-# 🔹 Хранилище ожидающих запросов: result_id -> (mode, text)
-# Простой словарь в памяти достаточен (запись живёт секунды до выбора варианта
-# пользователем), но при перезапуске процесса он очищается — это нормально.
-PENDING_AI_QUERIES = {}
+def parse_ai_inline_query(user_input: str) -> tuple[str, str]:
+    """Разбирает текст инлайн-запроса вида 'режим: текст' на (режим, текст).
+    Используется и в inline_query, и в chosen_inline_result — специально без
+    общего состояния между ними (см. комментарий в on_inline_result_chosen)."""
+    mode = "ask"
+    text = user_input.strip()
+    if ":" in text:
+        parts = text.split(":", 1)
+        mode = parts[0].strip().lower()
+        text = parts[1].strip() if len(parts) > 1 else ""
+    return mode, text
 
 
 @dp.inline_query()
@@ -2565,12 +2564,7 @@ async def inline_search(query: InlineQuery):
         return
     
     # 🔹 Есть ввод — парсим режим:текст
-    mode = "ask"
-    text = user_input
-    if ":" in user_input:
-        parts = user_input.split(":", 1)
-        mode = parts[0].strip().lower()
-        text = parts[1].strip() if len(parts) > 1 else ""
+    mode, text = parse_ai_inline_query(user_input)
     
     # 🔹 Нет текста — подсказка
     if not text:
@@ -2593,8 +2587,15 @@ async def inline_search(query: InlineQuery):
     # (срабатывает, когда пользователь реально выбрал этот вариант),
     # а готовый ответ доставляем через edit_message_text по inline_message_id.
     # reply_markup обязателен — без него Telegram не передаст inline_message_id.
+    #
+    # Принципиально НЕ храним (mode, text) в словаре в памяти процесса: между ответом
+    # на inline_query и моментом, когда пользователь реально выберет результат, может
+    # пройти много времени, а процесс бота может успеть перезапуститься (передеплой,
+    # "усыпление" на бесплатном хостинге) — тогда словарь в памяти потеряется, и
+    # сообщение зависнет на "Думаю" навсегда без единой ошибки в логах. Вместо этого
+    # в chosen_inline_result заново парсим chosen.query — Telegram сам присылает
+    # исходный текст запроса, так что это не зависит от состояния процесса.
     result_id = f"ai_{query.id}"
-    PENDING_AI_QUERIES[result_id] = (mode, text)
 
     results = [
         InlineQueryResultArticle(
@@ -2613,14 +2614,20 @@ async def inline_search(query: InlineQuery):
 @dp.chosen_inline_result()
 async def on_inline_result_chosen(chosen: ChosenInlineResult):
     """Срабатывает, когда пользователь реально выбрал результат из inline-меню."""
-    data = PENDING_AI_QUERIES.pop(chosen.result_id, None)
-    if not data:
-        return
+    logger.info(f"🔥🔥🔥 CHOSEN_INLINE_RESULT CALLED! result_id={chosen.result_id} query='{chosen.query}'")
+
+    if not chosen.result_id.startswith("ai_"):
+        return  # выбрали не AI-результат (например, пункт меню) — обрабатывать нечего
+
     if not chosen.inline_message_id:
         logger.warning("⚠️ Нет inline_message_id — не могу отредактировать сообщение")
         return
 
-    mode, text = data
+    mode, text = parse_ai_inline_query(chosen.query)
+    if not text:
+        logger.warning(f"⚠️ Пустой текст после парсинга chosen.query='{chosen.query}'")
+        return
+
     prompts = {
         "explain": "Объясни просто на русском:",
         "summarize": "Кратко перескажи на русском в 2-3 предложениях:",
@@ -2628,7 +2635,9 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     }
     full_prompt = f"{prompts.get(mode, prompts['ask'])}\n\n{text}"
 
+    logger.info(f"🤖 Запрос к AI (модель {current_ai_model}): mode={mode} text='{text[:60]}'")
     result = await ask_ai_http(full_prompt)
+    logger.info(f"🤖 Ответ от AI: success={result['success']}" + ("" if result["success"] else f" error='{result['error']}'"))
 
     if result["success"]:
         answer = safe_html_text(result["text"])
@@ -2643,6 +2652,7 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
             inline_message_id=chosen.inline_message_id,
             parse_mode="HTML",
         )
+        logger.info("✅ Inline-сообщение отредактировано с финальным ответом")
     except Exception as e:
         logger.error(f"❌ Не удалось отредактировать inline-сообщение: {e}")
 
