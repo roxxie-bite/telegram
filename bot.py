@@ -2107,6 +2107,60 @@ async def cmd_ai(m: Message):
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
         logger.warning(f"⚠️ AI ошибка: {result['error']}")
 
+# ================= ПРОВЕРКА МОДЕЛЕЙ =================
+async def fetch_available_models() -> set[str]:
+    """Запрашивает список доступных моделей у OpenRouter"""
+    if not openrouter_session or not OPENROUTER_API_KEY:
+        return set()
+    try:
+        def _get():
+            r = openrouter_session.get(
+                "https://openrouter.ai/api/v1/models",
+                timeout=15
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return {m.get("id", "") for m in data.get("data", [])}
+            return set()
+        return await asyncio.to_thread(_get)
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось получить список моделей OpenRouter: {e}")
+        return set()
+
+async def ping_model(model_name: str) -> tuple[bool, float]:
+    """Тестовый пинг модели. Возвращает (успех, секунды)."""
+    if not openrouter_session or not OPENROUTER_API_KEY:
+        return False, 0.0
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+    }
+    start = time.time()
+    try:
+        def _post():
+            return openrouter_session.post(
+                OPENROUTER_API_URL,
+                json=payload,
+                timeout=10
+            )
+        r = await asyncio.wait_for(asyncio.to_thread(_post), timeout=12)
+        elapsed = time.time() - start
+        
+        if r.status_code == 200:
+            return True, elapsed
+        elif r.status_code in (429, 402):
+            # Модель доступна, но лимит/кредиты — считаем доступной
+            return True, elapsed
+        else:
+            return False, elapsed
+    except asyncio.TimeoutError:
+        return False, time.time() - start
+    except Exception as e:
+        logger.debug(f"Ping error {model_name}: {e}")
+        return False, 0.0
+
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
     """Показать или сменить AI-модель (OpenRouter): /model [ключ]"""
@@ -2118,23 +2172,74 @@ async def cmd_model(m: Message):
     
     parts = m.text.split()
     
-    # Если без аргумента — показать список
+    # === БЕЗ АРГУМЕНТА: показать список с проверкой доступности ===
     if len(parts) < 2:
+        status_msg = await m.answer(
+            f"{EMOJI['settings']} <b>Проверяю доступность моделей...</b>",
+            parse_mode="HTML"
+        )
+        
+        # Получаем список моделей из каталога OpenRouter
+        available_ids = await fetch_available_models()
+        
+        # Пингуем модели (макс 5 параллельно, чтобы не спамить API)
+        semaphore = asyncio.Semaphore(5)
+        
+        async def ping_limited(key, info):
+            async with semaphore:
+                ok, latency = await ping_model(info["name"])
+                return key, ok, latency
+        
+        ping_tasks = [
+            ping_limited(k, v) for k, v in AVAILABLE_AI_MODELS.items()
+        ]
+        ping_results = await asyncio.gather(*ping_tasks, return_exceptions=True)
+        
+        # Собираем результаты в словарь
+        ping_map = {}
+        for res in ping_results:
+            if isinstance(res, tuple) and len(res) == 3:
+                ping_map[res[0]] = (res[1], res[2])
+        
         txt = f"{EMOJI['settings']} <b>Доступные AI-модели (OpenRouter):</b>\n\n"
         
         for key, info in AVAILABLE_AI_MODELS.items():
             current = "✅ " if key == current_ai_model else "• "
-            txt += f"{current}{info['display']}\n"
+            
+            ping_ok, ping_sec = ping_map.get(key, (None, 0))
+            in_catalog = info["name"] in available_ids
+            is_free = ":free" in info["name"]
+            
+            # Определяем статус
+            if ping_ok is True:
+                if ping_sec < 3:
+                    status_icon = "🟢"
+                else:
+                    status_icon = "🟡"
+                latency_str = f" ⏱️{ping_sec:.1f}с"
+            elif ping_ok is False:
+                status_icon = "🔴"
+                latency_str = " ⏱️—"
+            else:
+                status_icon = "⚪"
+                latency_str = ""
+            
+            # Если модели нет в каталоге и она не free (free иногда не listed)
+            if not in_catalog and not is_free and key != "auto-free":
+                status_icon = "⚠️"
+            
+            txt += f"{current}{status_icon} {info['display']}{latency_str}\n"
             txt += f"   <i>{info['desc']}</i>\n"
             txt += f"   <code>/model {key}</code>\n\n"
         
         txt += f"<b>Текущая:</b> <code>{current_ai_model}</code>\n"
+        txt += f"<i>🟢 — быстрая, 🟡 — медленная, 🔴 — недоступна, ⚠️ — не в каталоге</i>\n"
         txt += f"<i>Используй /model &lt;ключ&gt; чтобы сменить</i>"
         
-        await m.answer(txt, parse_mode="HTML")
+        await status_msg.edit_text(txt, parse_mode="HTML")
         return
     
-    # Если с аргументом — сменить модель
+    # === С АРГУМЕНТОМ: сменить модель ===
     new_model_key = parts[1].lower()
     
     if new_model_key not in AVAILABLE_AI_MODELS:
@@ -2147,20 +2252,38 @@ async def cmd_model(m: Message):
         )
         return
     
+    # Проверяем доступность перед сменой
+    new_model_info = AVAILABLE_AI_MODELS[new_model_key]
+    check_msg = await m.answer(
+        f"{EMOJI['settings']} Проверяю <b>{new_model_info['display']}</b>...",
+        parse_mode="HTML"
+    )
+    ok, latency = await ping_model(new_model_info["name"])
+    
+    if not ok:
+        await check_msg.edit_text(
+            f"{EMOJI['warning']} <b>Модель недоступна!</b>\n\n"
+            f"{new_model_info['display']}\n"
+            f"<i>Не удалось получить ответ. Возможно, модель offline или достигнут лимит.</i>\n\n"
+            f"<i>Смена отменена. Попробуй другую модель.</i>",
+            parse_mode="HTML"
+        )
+        return
+    
     # Сменяем модель
     old_model = current_ai_model
     current_ai_model = new_model_key
-    model_info = AVAILABLE_AI_MODELS[new_model_key]
     
-    await m.answer(
+    await check_msg.edit_text(
         f"{EMOJI['check']} <b>Модель сменена!</b>\n\n"
         f"🔄 Было: <code>{old_model}</code>\n"
-        f"✅ Стало: {model_info['display']}\n"
-        f"📝 <i>{model_info['desc']}</i>",
+        f"✅ Стало: {new_model_info['display']}\n"
+        f"⏱️ Ответ: <b>{latency:.1f}с</b>\n"
+        f"📝 <i>{new_model_info['desc']}</i>",
         parse_mode="HTML"
     )
     
-    logger.info(f"🔄 AI-модель сменена: {old_model} → {new_model_key}")
+    logger.info(f"🔄 AI-модель сменена: {old_model} → {new_model_key} (ping {latency:.1f}s)")
 
 
 @dp.message(Command("loglevel"))
@@ -2400,10 +2523,10 @@ async def cmd_export(m: Message):
     await m.answer_document(document=file, caption=caption, parse_mode="HTML")
     logger.info(f"📤 Экспортировано {len(last_search_results)} лор в файл {filename}")
 
-
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
+    if message.from_user.id != OWNER_ID_INT: 
+        return
     settings = get_settings(message.from_user.id)
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
     txt = f"{EMOJI['settings']} <b>Настройки:</b>\n🕐 МСК {moscow_time}\n"
@@ -2414,16 +2537,15 @@ async def cmd_status(message: Message):
     txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
     
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
-    if log_handler: txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
-    # ← ИСПРАВЛЕНО НИЖЕ:
-    if db is not None:  # ← Было "if db:", стало "if db is not None:"
+    if log_handler: 
+        txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
+    
+    if db is not None:
         txt += f"\n{PREMIUM_EMOJI['sparkle']} БД: <b>MongoDB подключена</b>"
     else:
         txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
-    await message.answer(txt, parse_mode="HTML")
-        # ... после строки с БД ...
     
-    # Добавь информацию о модели:
+    # Информация о модели (теперь добавляется ДО отправки)
     model_info = AVAILABLE_AI_MODELS.get(current_ai_model, {})
     txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_ai_model)}</b>"
     txt += f"\n   <i>{model_info.get('desc', '')}</i>"
