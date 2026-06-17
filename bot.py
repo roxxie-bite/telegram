@@ -2016,7 +2016,7 @@ async def cmd_ai(m: Message):
     
     if result["success"]:
         answer = result["text"]
-        model_used = result.get("model", current_ai_model)
+        model_used = result.get("display", current_ai_model)
         
         # Форматируем код для HTML (но не разбиваем его!)
         if '```' in answer:
@@ -2029,7 +2029,7 @@ async def cmd_ai(m: Message):
         
         # 🔹 Отправляем с автоматическим разбиением
         await send_long_message(status_msg,
-            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>{model_used}\n\n{prepare_ai_markdown(answer)}",
+            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b> {model_used}\n\n{prepare_ai_markdown(answer)}",
             parse_mode="HTML"
         )
         logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
