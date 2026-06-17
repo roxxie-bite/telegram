@@ -327,12 +327,6 @@ def safe_html_text(text: str) -> str:
     """
     return html.escape(text)
 
-def prepare_ai_markdown(text: str) -> str:
-    """
-    Подготовка ответа ИИ под Telegram Markdown
-    """
-    return text.strip()
-
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_running = True
 user_settings = {}
@@ -1014,12 +1008,12 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
                 message = choices[0].get("message", {})
                 text = (message.get("content") or "").strip()
                 if text:
-                    return {"success": True, "text": text, "model": model_info.get("display_name", model_key), "model_id": model_name}
+                    return {"success": True, "text": text}
                 # Некоторые reasoning-модели кладут рассуждение в отдельное поле,
                 # если content пустой — на всякий случай подстрахуемся
                 reasoning = message.get("reasoning")
                 if reasoning:
-                    return {"success": True, "text": reasoning.strip(), "model": model_info.get("display_name", model_key), "model_id": model_name}
+                    return {"success": True, "text": reasoning.strip()}
             
             return {"success": False, "error": "Пустой или неверный ответ от API"}
             
@@ -2016,7 +2010,6 @@ async def cmd_ai(m: Message):
     
     if result["success"]:
         answer = result["text"]
-        model_used = result.get("display", current_ai_model)
         
         # Форматируем код для HTML (но не разбиваем его!)
         if '```' in answer:
@@ -2025,11 +2018,11 @@ async def cmd_ai(m: Message):
             answer = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', answer, flags=re.DOTALL)
         
         # Экранируем для HTML
-        
+        answer = safe_html_text(answer)
         
         # 🔹 Отправляем с автоматическим разбиением
         await send_long_message(status_msg,
-            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b> {model_used}\n\n{prepare_ai_markdown(answer)}",
+            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}",
             parse_mode="HTML"
         )
         logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
@@ -2585,13 +2578,9 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     logger.info(f"🤖 Ответ от AI: success={result['success']}" + ("" if result["success"] else f" error='{result['error']}'"))
 
     if result["success"]:
-        answer = result["text"]
-        model_used = result.get("model", current_ai_model)
-        
-        final_text = (
-            f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b> <em>({model_used})</em>:\n\n"
-            f"{answer}"
-        )
+        answer = safe_html_text(result["text"])
+        answer = re.sub(r'```(?:\w*\n)?(.*?)```', r'<code>\1</code>', answer, flags=re.DOTALL)
+        final_text = f"✨ <b>AI:</b>\n\n{answer}"
     else:
         final_text = f"❌ {result['error']}"
 
