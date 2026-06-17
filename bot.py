@@ -210,6 +210,14 @@ AVAILABLE_AI_MODELS = {
         "max_tokens": 8192
     },
 
+    "nvidia-nemotron-3-nano-omni-30b-a3b": {
+        "name": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "display": "🎮 NVIDIA NeMo 3 Nano Omni 30B (free)",
+        "desc": "Бесплатная модель от NVIDIA, хороша в коде и логике",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+
 
     # === DeepSeek ===
     "deepseek-r1": {
@@ -219,6 +227,7 @@ AVAILABLE_AI_MODELS = {
         "temp": 0.7,
         "max_tokens": 16384
     },
+
     "deepseek-r1-free": {
         "name": "deepseek/deepseek-r1:free",
         "display": "🔬 DeepSeek R1 (free)",
