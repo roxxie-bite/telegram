@@ -185,6 +185,32 @@ AVAILABLE_AI_MODELS = {
         "max_tokens": 16384
     },
 
+    "owl": {
+        "name": "openrouter/owl-alpha",
+        "display": "🦉 Owl Alpha",
+        "desc": "Модель от неизвестного провайдера, хороша в коде и логике",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
+
+
+    "qwen": {
+        "name": "qwen/qwen3-coder:free",
+        "display": "👨‍💻 Qwen3 Coder (free)",
+        "desc": "Бесплатная модель, хороша в коде",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+
+    "nvidia": {
+        "name":"nvidia/nemotron-3-ultra-550b-a55b:free",
+        "display": "🎮 NVIDIA NeMo 3 Ultra (free)",
+        "desc": "Бесплатная модель от NVIDIA, хороша в коде и логике",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+
+
     # === DeepSeek ===
     "deepseek-r1": {
         "name": "deepseek/deepseek-r1",
