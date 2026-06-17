@@ -146,6 +146,15 @@ AVAILABLE_AI_MODELS = {
         "temp": 0.7,
         "max_tokens": 16384
     },
+
+    "nex-agi": {
+        "name": "nex-agi/nex-n2-pro:free",
+        "display": "🚀 NEX AGI N2 Pro",
+        "desc": "Новая модель от OpenAI, хороша в коде и логике",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
+
     "gpt-4o-mini": {
         "name": "openai/gpt-4o-mini",
         "display": "⚡ GPT-4o mini",
