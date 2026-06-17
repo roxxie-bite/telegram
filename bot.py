@@ -2779,7 +2779,8 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     if result["success"]:
         answer = markdown_to_html(result["text"])
         display_query = text[:400] + "..." if len(text) > 400 else text
-        final_text = f"✨ <b>AI:</b>\n\n{answer}"
+        safe_query = save_html_text(display_query)
+        final_text = f"✨ <b>AI:</b>\n\n Промт: {safe_query}\n\n {answer}"
     else:
         final_text = f"❌ {result['error']}"
 
