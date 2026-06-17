@@ -153,6 +153,14 @@ AVAILABLE_AI_MODELS = {
         "max_tokens": 16384
     },
 
+    "nvidia": {
+        "name": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "display": "🟩 NVIDIA Nemotron 3 Ultra 550B (free)",
+        "desc": "Бесплатная модель от NVIDIA, хороша в генерации текста и кода",
+        "temp": 0.7,
+        "max_tokens": 16384
+    },
+
     # === Anthropic ===
     "claude-sonnet": {
         "name": "anthropic/claude-sonnet-4.6",
