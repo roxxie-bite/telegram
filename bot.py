@@ -2599,7 +2599,7 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
         await bot.edit_message_text(
             text=final_text,
             inline_message_id=chosen.inline_message_id,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         logger.info("✅ Inline-сообщение отредактировано с финальным ответом")
     except Exception as e:
