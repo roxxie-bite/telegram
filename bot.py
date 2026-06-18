@@ -419,7 +419,9 @@ forwarded_messages = {}
 known_users = {}
 allowed_ai_users = set(int(x) for x in os.getenv("ALLOWED_AI_USERS", OWNER_ID).split(",")) | EXTRA_ALLOWED_AI_USERS | {int(OWNER_ID)}
 openrouter_session = None
-current_ai_model = DEFAULT_AI_MODEL  # ← Выбранная модель (ключ из AVAILABLE_AI_MODELS)
+current_ai_model = DEFAULT_AI_MODEL
+ai_memory = {}
+MEMORY_FILE = "ai_memory.json"
 log_handler = None
 mongo_client = None
 db = None
@@ -704,6 +706,48 @@ def save_settings(user_id):
             )
         except Exception as e:
             logger.warning("⚠️ Ошибка сохранения настроек в MongoDB: " + str(e))
+
+    
+
+def load_memory():
+    global ai_memory
+    if db is not None:
+        try:
+            doc = db[SETTINGS_COLLECTION].find_one({"_id": "ai_memory"})
+            if doc:
+                ai_memory = doc.get("memory", {})
+                logger.info(f"🧠 Загружена память AI для {len(ai_memory)} моделей")
+                return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка загрузки памяти AI из MongoDB: " + str(e))
+    try:
+        if os.path.exists(MEMORY_FILE):
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                ai_memory = json.load(f)
+            logger.info(f"🧠 Загружена память AI для {len(ai_memory)} моделей из файла")
+    except Exception as e:
+        logger.error("❌ Ошибка загрузки ai_memory.json: " + str(e))
+        ai_memory = {}
+
+def save_memory():
+    if db is not None:
+        try:
+            db[SETTINGS_COLLECTION].update_one(
+                {"_id": "ai_memory"},
+                {"$set": {
+                    "memory": ai_memory,
+                    "updated_at": datetime.now(timezone(timedelta(hours=3)))
+                }},
+                upsert=True
+            )
+            return
+        except Exception as e:
+            logger.warning("⚠️ Ошибка сохранения памяти AI в MongoDB: " + str(e))
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(ai_memory, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error("❌ Ошибка сохранения ai_memory.json: " + str(e))
 
 
 # ================= НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =================
@@ -1061,6 +1105,15 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
         
         # 🔹 Формируем сообщения в формате OpenAI chat (role/content)
         messages = []
+
+                # 🔹 Формируем сообщения в формате OpenAI chat (role/content)
+        messages = []
+        
+        # Добавляем system prompt (память) для текущей модели
+        memory_text = ai_memory.get(model_key, "")
+        if memory_text:
+            messages.append({"role": "system", "content": memory_text})
+
         if history:
             # Многоходовой чат с историей
             for msg in history:
@@ -2215,13 +2268,18 @@ async def cmd_model(m: Message):
     ok, latency = await ping_model(new_model_info["name"])
     
     if not ok:
-        await check_msg.edit_text(
-            f"{EMOJI['warning']} <b>Модель недоступна!</b>\n\n"
-            f"{new_model_info['display']}\n"
-            f"<i>Не удалось получить ответ. Возможно, модель offline или достигнут лимит.</i>\n\n"
-            f"<i>Смена отменена. Попробуй другую модель.</i>",
-            parse_mode="HTML"
-        )
+            mem_status = ""
+    if new_model_key in ai_memory and ai_memory[new_model_key]:
+        mem_status = f"\n🧠 <i>Память:</i> <code>{safe_html_text(ai_memory[new_model_key][:50])}...</code>"
+    
+    await check_msg.edit_text(
+        f"{EMOJI['check']} <b>Модель сменена!</b>\n\n"
+        f"🔄 Было: <code>{old_model}</code>\n"
+        f"✅ Стало: {new_model_info['display']}\n"
+        f"⏱️ Ответ: <b>{latency:.1f}с</b>\n"
+        f"📝 <i>{new_model_info['desc']}</i>{mem_status}",
+        parse_mode="HTML"
+    )
         return
     
     # Сменяем модель
@@ -2239,6 +2297,89 @@ async def cmd_model(m: Message):
     
     logger.info(f"🔄 AI-модель сменена: {old_model} → {new_model_key} (ping {latency:.1f}s)")
 
+
+@dp.message(Command("setmemory"))
+async def cmd_setmemory(m: Message):
+    """Задать память (system prompt) для текущей модели: /setmemory <текст>"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        current_mem = ai_memory.get(current_ai_model, "")
+        await m.answer(
+            f"{EMOJI['brain']} <b>Память AI (system prompt)</b>\n\n"
+            f"🤖 Модель: <b>{AVAILABLE_AI_MODELS.get(current_ai_model, {}).get('display', current_ai_model)}</b>\n"
+            f"📝 Текущая память:\n<code>{safe_html_text(current_mem) if current_mem else '(пусто)'}</code>\n\n"
+            f"<b>Использование:</b>\n"
+            f"<code>/setmemory Отвечай кратко и по делу</code>\n"
+            f"<code>/setmemory Ты эксперт по Python</code>\n\n"
+            f"<i>Память будет прикрепляться к каждому запросу как системная инструкция</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    memory_text = parts[1].strip()
+    ai_memory[current_ai_model] = memory_text
+    save_memory()
+    
+    await m.answer(
+        f"{EMOJI['check']} <b>Память задана!</b>\n\n"
+        f"🤖 Модель: <b>{AVAILABLE_AI_MODELS.get(current_ai_model, {}).get('display', current_ai_model)}</b>\n"
+        f"📝 Память: <code>{safe_html_text(memory_text[:200])}{'...' if len(memory_text) > 200 else ''}</code>\n\n"
+        f"<i>Теперь каждый запрос к этой модели будет с этой инструкцией</i>",
+        parse_mode="HTML"
+    )
+    logger.info(f"🧠 Память задана для {current_ai_model}: {memory_text[:50]}...")
+
+
+@dp.message(Command("clearmemory"))
+async def cmd_clearmemory(m: Message):
+    """Очистить память для текущей модели"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    if current_ai_model in ai_memory:
+        del ai_memory[current_ai_model]
+        save_memory()
+        await m.answer(
+            f"{EMOJI['check']} <b>Память очищена!</b>\n\n"
+            f"🤖 Модель: <b>{AVAILABLE_AI_MODELS.get(current_ai_model, {}).get('display', current_ai_model)}</b>\n\n"
+            f"<i>Теперь модель работает без системной инструкции</i>",
+            parse_mode="HTML"
+        )
+        logger.info(f"🧠 Память очищена для {current_ai_model}")
+    else:
+        await m.answer(
+            f"{EMOJI['info']} Для этой модели память не задана.",
+            parse_mode="HTML"
+        )
+
+
+@dp.message(Command("memory"))
+async def cmd_memory(m: Message):
+    """Показать память для всех моделей"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    
+    if not ai_memory:
+        await m.answer(
+            f"{EMOJI['info']} <b>Память AI не задана ни для одной модели</b>\n\n"
+            f"<i>Используй /setmemory &lt;текст&gt; для текущей модели</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    txt = f"{EMOJI['brain']} <b>Память AI (system prompts):</b>\n\n"
+    for key, mem in ai_memory.items():
+        info = AVAILABLE_AI_MODELS.get(key, {})
+        display = info.get('display', key)
+        is_current = " ✅" if key == current_ai_model else ""
+        mem_preview = mem[:150] + "…" if len(mem) > 150 else mem
+        txt += f"🤖 <b>{display}</b>{is_current}\n"
+        txt += f"<code>{safe_html_text(mem_preview)}</code>\n\n"
+    
+    await m.answer(txt, parse_mode="HTML")
 
 @dp.message(Command("loglevel"))
 async def cmd_loglevel(m: Message):
@@ -2503,6 +2644,11 @@ async def cmd_status(message: Message):
     model_info = AVAILABLE_AI_MODELS.get(current_ai_model, {})
     txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_ai_model)}</b>"
     txt += f"\n   <i>{model_info.get('desc', '')}</i>"
+        mem = ai_memory.get(current_ai_model, "")
+    if mem:
+        txt += f"\n🧠 Память: <code>{safe_html_text(mem[:40])}{'...' if len(mem) > 40 else ''}</code>"
+
+    
     
     await message.answer(txt, parse_mode="HTML")
 
@@ -2592,6 +2738,7 @@ async def main():
     load_forwarded()
     load_users()
     load_settings()
+    load_memory()
     
     await run_web_server()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
