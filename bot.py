@@ -1105,9 +1105,6 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
         
         # 🔹 Формируем сообщения в формате OpenAI chat (role/content)
         messages = []
-
-                # 🔹 Формируем сообщения в формате OpenAI chat (role/content)
-        messages = []
         
         # Добавляем system prompt (память) для текущей модели
         memory_text = ai_memory.get(model_key, "")
@@ -2268,7 +2265,20 @@ async def cmd_model(m: Message):
     ok, latency = await ping_model(new_model_info["name"])
     
     if not ok:
-            mem_status = ""
+        await check_msg.edit_text(
+            f"{EMOJI['warning']} <b>Модель недоступна!</b>\n\n"
+            f"{new_model_info['display']}\n"
+            f"<i>Не удалось получить ответ. Возможно, модель offline или достигнут лимит.</i>\n\n"
+            f"<i>Смена отменена. Попробуй другую модель.</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Сменяем модель
+    old_model = current_ai_model
+    current_ai_model = new_model_key
+    
+    mem_status = ""
     if new_model_key in ai_memory and ai_memory[new_model_key]:
         mem_status = f"\n🧠 <i>Память:</i> <code>{safe_html_text(ai_memory[new_model_key][:50])}...</code>"
     
@@ -2278,20 +2288,6 @@ async def cmd_model(m: Message):
         f"✅ Стало: {new_model_info['display']}\n"
         f"⏱️ Ответ: <b>{latency:.1f}с</b>\n"
         f"📝 <i>{new_model_info['desc']}</i>{mem_status}",
-        parse_mode="HTML"
-    )
-        return
-    
-    # Сменяем модель
-    old_model = current_ai_model
-    current_ai_model = new_model_key
-    
-    await check_msg.edit_text(
-        f"{EMOJI['check']} <b>Модель сменена!</b>\n\n"
-        f"🔄 Было: <code>{old_model}</code>\n"
-        f"✅ Стало: {new_model_info['display']}\n"
-        f"⏱️ Ответ: <b>{latency:.1f}с</b>\n"
-        f"📝 <i>{new_model_info['desc']}</i>",
         parse_mode="HTML"
     )
     
@@ -2644,12 +2640,11 @@ async def cmd_status(message: Message):
     model_info = AVAILABLE_AI_MODELS.get(current_ai_model, {})
     txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_ai_model)}</b>"
     txt += f"\n   <i>{model_info.get('desc', '')}</i>"
-        mem = ai_memory.get(current_ai_model, "")
+    
+    mem = ai_memory.get(current_ai_model, "")
     if mem:
         txt += f"\n🧠 Память: <code>{safe_html_text(mem[:40])}{'...' if len(mem) > 40 else ''}</code>"
 
-    
-    
     await message.answer(txt, parse_mode="HTML")
 
 
@@ -2890,7 +2885,7 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     result = await ask_ai_http(full_prompt)
     logger.info(f"🤖 Ответ от AI: success={result['success']}" + ("" if result["success"] else f" error='{result['error']}'"))
 
-        if result["success"]:
+    if result["success"]:
         answer = markdown_to_html(result["text"])
         # Показываем исходный запрос пользователя (обрезаем, если очень длинный)
         display_query = text[:400] + "…" if len(text) > 400 else text
