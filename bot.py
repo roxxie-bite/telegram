@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
+from dotenv import load_dotenv
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
 
 
@@ -2011,6 +2012,7 @@ async def run_web_server():
 async def main():
     # Инициализация (функции уже определены выше)
     init_log_bot()
+    load_dotenv()
     init_openrouter_http()
     load_forwarded()
     load_users()
