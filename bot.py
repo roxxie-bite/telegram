@@ -1,6 +1,5 @@
 import os
 import re
-import os
 import aiofiles
 import asyncio
 import logging
@@ -15,84 +14,8 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
-import subprocess
-import asyncio
-import shlex
-
-# ================= SHELL COMMANDS (БЕЗОПАСНОСТЬ) =================
-SHELL_ALLOWED_COMMANDS = [
-    # Безопасные команды для мониторинга
-    "ls", "pwd", "whoami", "date", "uptime", "free", "df", "ps", "top", "cat", "head", "tail",
-    # Git и деплой
-    "git", "pip", "python", "python3",
-    # Сеть (осторожно)
-    "curl", "wget", "ping",
-    # Файлы (только чтение)
-    "grep", "find", "wc", "du"
-]
-
-SHELL_BLACKLISTED = [
-    "rm -rf", "mkfs", "dd", "chmod 777", "chown", "sudo", "su",
-    ":(){:|:&};:", "fork", "eval", "exec", "source", ".", 
-    "wget http", "curl http",  # Запрещаем скачивание извне
-    ">", ">>", "|", "&", ";", "`", "$(",  # Запрещаем перенаправления и подстановки
-]
-
-def is_command_safe(cmd: str) -> tuple[bool, str]:
-    """Проверяет команду на безопасность"""
-    cmd_lower = cmd.lower().strip()
-    
-    # Проверка чёрного списка
-    for blocked in SHELL_BLACKLISTED:
-        if blocked in cmd_lower:
-            return False, f"❌ Команда содержит запрещённый элемент: `{blocked}`"
-    
-    # Проверка белого списка (первое слово команды)
-    first_word = cmd_lower.split()[0] if cmd_lower.split() else ""
-    if SHELL_ALLOWED_COMMANDS and first_word not in SHELL_ALLOWED_COMMANDS:
-        return False, f"❌ Команда `{first_word}` не в списке разрешённых.\nРазрешено: {', '.join(SHELL_ALLOWED_COMMANDS[:10])}..."
-    
-    return True, ""
-
-async def run_shell_command(cmd: str, timeout: int = 30) -> tuple[str, str, int]:
-    """
-    Запускает команду и возвращает (stdout, stderr, return_code)
-    """
-    try:
-        # Безопасный запуск: shell=False + shlex.split
-        process = await asyncio.create_subprocess_exec(
-            *shlex.split(cmd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/opt/render/project/src",  # Ограничиваем рабочую директорию
-            env={**os.environ, "PATH": "/usr/local/bin:/usr/bin:/bin"}  # Безопасный PATH
-        )
-        
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout
-        )
-        
-        return (
-            stdout.decode("utf-8", errors="replace")[:4000],  # Ограничиваем вывод
-            stderr.decode("utf-8", errors="replace")[:4000],
-            process.returncode
-        )
-    except asyncio.TimeoutError:
-        return "", f"⏱️ Таймаут: команда выполнялась дольше {timeout} сек", -1
-    except FileNotFoundError:
-        return "", f"❌ Команда не найдена: `{cmd.split()[0]}`", 127
-    except Exception as e:
-        return "", f"❌ Ошибка: {str(e)}", -1
 
 
-
-# Пытаемся импортировать pymongo
-try:
-    from pymongo import MongoClient
-    MONGO_AVAILABLE = True
-except ImportError:
-    MONGO_AVAILABLE = False
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -102,7 +25,6 @@ MIN_DAYS_ENV = os.getenv("MIN_DAYS")
 LOG_BOT_TOKEN = os.getenv("LOG_BOT_TOKEN")
 LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-MONGO_URI = os.getenv("MONGO_URI")
 SITE_BASE = "https://lynther.sytes.net"
 
 EXTRA_ALLOWED_AI_USERS = {
@@ -423,8 +345,6 @@ current_ai_model = DEFAULT_AI_MODEL
 ai_memory = {}
 MEMORY_FILE = "ai_memory.json"
 log_handler = None
-mongo_client = None
-db = None
 last_search_results = None  # ← Кэш последних найденных лор (<50)
 last_search_meta = None     # ← Метаданные последнего поиска
 # =============================================
@@ -506,52 +426,7 @@ def init_openrouter_http():
         logger.error(f"❌ Ошибка инициализации OpenRouter HTTP: {e}")
         return False
 
-# ================= MONGODB ИНИЦИАЛИЗАЦИЯ =================
-def init_mongo():
-    """Инициализирует MongoDB подключение с Stable API"""
-    global mongo_client, db
-    
-    if not MONGO_AVAILABLE:
-        logger.warning("⚠️ pymongo не установлен — работаю в режиме без БД")
-        return False
-    
-    if not MONGO_URI:
-        logger.warning("⚠️ MONGO_URI не задан — работаю в режиме без БД")
-        return False
-    
-    try:
-        # Импортируем ServerApi для Stable API
-        from pymongo.server_api import ServerApi
-        
-        # Создаём клиент с обязательным указанием версии API
-        mongo_client = MongoClient(
-            MONGO_URI,
-            server_api=ServerApi('1'),  # ← Ключевое исправление!
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
-            socketTimeoutMS=10000
-        )
-        
-        # Тест подключения с пингом
-        mongo_client.admin.command('ping')
-        
-        # Получаем базу данных
-        db = mongo_client.get_database("loonie_bot")
-        
-        # Создаём индексы (идемпотентно)
-        db.forwarded.create_index("message_id", unique=True)
-        db.users.create_index("user_id", unique=True)
-        
-        logger.info("✅ MongoDB подключена (Stable API v1)")
-        return True
-        
-    except Exception as e:
-        error_msg = str(e)
-        # Логируем только первые 300 символов ошибки
-        logger.error("❌ Ошибка подключения к MongoDB: " + error_msg[:300])
-        mongo_client = None
-        db = None
-        return False
+
 
 # ================= ИНИЦИАЛИЗАЦИЯ ЛОГ-БОТА =================
 def init_log_bot():
@@ -568,7 +443,6 @@ def init_log_bot():
                 "chat_id": LOG_CHAT_ID,
                 "text": "🟢 <b>Бот запущен!</b>\n\n" +
                         f"🕐 МСК {moscow_time}\n" +
-                        f"🌐 Render: {os.getenv('RENDER_EXTERNAL_URL', 'N/A')}\n" +
                         f"📊 Лог-уровень: {LOG_LEVEL}",
                 "parse_mode": "HTML"
             }
@@ -578,45 +452,20 @@ def init_log_bot():
     else:
         logger.warning("⚠️ LOG_BOT_TOKEN или LOG_CHAT_ID не заданы")
 
-# ================= ХРАНИЛИЩЕ (исправлено: db is not None) =================
+# ================= ХРАНИЛИЩЕ (JSON-файлы) =================
 def load_forwarded():
     global forwarded_messages
-    if db is not None:
-        try:
-            cutoff = datetime.now(timezone(timedelta(hours=3))) - timedelta(hours=168)
-            result = db.forwarded.delete_many({"timestamp": {"$lt": cutoff.isoformat()}})
-            if result.deleted_count > 0:
-                logger.info(f"🧹 Удалено {result.deleted_count} старых записей forwarded")
-            
-            # Загружаем оставшиеся
-            for doc in db.forwarded.find():
-                forwarded_messages[doc["message_id"]] = doc["user_id"]
-            logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из MongoDB")
-            return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка загрузки из MongoDB: " + str(e))
     try:
         if os.path.exists(FORWARDED_FILE):
             with open(FORWARDED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             forwarded_messages = {int(k): v for k, v in data.items()}
             logger.info(f"📦 Загружено {len(forwarded_messages)} пересланных сообщений из файла")
-            # Отладка: покажи первые 3 записи
-            for i, (k, v) in enumerate(list(forwarded_messages.items())[:3]):
-                logger.debug(f"  - {k} → {v}")
     except Exception as e:
         logger.error("❌ Ошибка загрузки forwarded.json: " + str(e))
         forwarded_messages = {}
 
 def save_forwarded():
-    if db is not None:  # ← ИСПРАВЛЕНО
-        try:
-            db.forwarded.delete_many({})
-            for msg_id, user_id in forwarded_messages.items():
-                db.forwarded.insert_one({"message_id": msg_id, "user_id": user_id})
-            return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка сохранения в MongoDB: " + str(e))
     try:
         data = {str(k): v for k, v in forwarded_messages.items()}
         with open(FORWARDED_FILE, "w", encoding="utf-8") as f:
@@ -626,35 +475,17 @@ def save_forwarded():
 
 def load_users():
     global known_users
-    if db is not None:  # ← ИСПРАВЛЕНО
-        try:
-            for doc in db.users.find():
-                known_users[doc["user_id"]] = doc["data"]
-            logger.info(f"👥 Загружено {len(known_users)} пользователей из MongoDB")
-            return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка загрузки users из MongoDB: " + str(e))
     try:
         if os.path.exists(USERS_FILE):
             with open(USERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             known_users = {int(k): v for k, v in data.items()}
+            logger.info(f"👥 Загружено {len(known_users)} пользователей из файла")
     except Exception as e:
         logger.error("❌ Ошибка загрузки users.json: " + str(e))
         known_users = {}
 
 def save_users():
-    if db is not None:  # ← ИСПРАВЛЕНО
-        try:
-            for user_id, data in known_users.items():
-                db.users.update_one(
-                    {"user_id": user_id},
-                    {"$set": {"data": data, "updated_at": datetime.now(timezone(timedelta(hours=3)))}},
-                    upsert=True
-                )
-            return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка сохранения users в MongoDB: " + str(e))
     try:
         data = {str(k): v for k, v in known_users.items()}
         with open(USERS_FILE, "w", encoding="utf-8") as f:
@@ -663,86 +494,48 @@ def save_users():
         logger.error("❌ Ошибка сохранения users.json: " + str(e))
 
 
-# ================= НАСТРОЙКИ В БД =================
-SETTINGS_COLLECTION = "bot_settings"
-OWNER_SETTINGS_ID = "owner"  # Фиксированный ID для настроек владельца
+# ================= НАСТРОЙКИ =================
+SETTINGS_FILE = "settings.json"
 
 def load_settings():
-    """Загружает настройки владельца из БД"""
+    """Загружает настройки владельца из файла"""
     global user_settings
-    if db is not None:
-        try:
-            doc = db[SETTINGS_COLLECTION].find_one({"_id": OWNER_SETTINGS_ID})
-            if doc:
-                # Загружаем настройки для владельца
-                owner_id = OWNER_ID_INT
-                user_settings[owner_id] = {
-                    "min_days": doc.get("min_days", DEFAULT_MIN_DAYS),
-                    "tags": doc.get("tags", DEFAULT_TAGS.copy()),
-                    "schedule": doc.get("schedule", []),
-                    "last_check": doc.get("last_check", 0),
-                    "is_checking": doc.get("is_checking", False)
-                }
-                logger.info(f"⚙️ Загружены настройки владельца из MongoDB")
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data:
+                user_settings[OWNER_ID_INT] = data
+                logger.info("⚙️ Загружены настройки из файла")
                 return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка загрузки настроек из MongoDB: " + str(e))
-    
-    # Fallback: настройки по умолчанию (уже в памяти)
+    except Exception as e:
+        logger.warning("⚠️ Ошибка загрузки настроек: " + str(e))
     logger.info("⚙️ Используем настройки по умолчанию")
 
 def save_settings(user_id):
-    """Сохраняет настройки пользователя в БД"""
-    if db is not None and user_id == OWNER_ID_INT:
+    """Сохраняет настройки владельца в файл"""
+    if user_id == OWNER_ID_INT:
         try:
             settings = user_settings.get(user_id, {})
-            db[SETTINGS_COLLECTION].update_one(
-                {"_id": OWNER_SETTINGS_ID},
-                {"$set": {
-                    **settings,
-                    "updated_at": datetime.now(timezone(timedelta(hours=3)))
-                }},
-                upsert=True
-            )
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.warning("⚠️ Ошибка сохранения настроек в MongoDB: " + str(e))
+            logger.warning("⚠️ Ошибка сохранения настроек: " + str(e))
 
     
 
 def load_memory():
     global ai_memory
-    if db is not None:
-        try:
-            doc = db[SETTINGS_COLLECTION].find_one({"_id": "ai_memory"})
-            if doc:
-                ai_memory = doc.get("memory", {})
-                logger.info(f"🧠 Загружена память AI для {len(ai_memory)} моделей")
-                return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка загрузки памяти AI из MongoDB: " + str(e))
     try:
         if os.path.exists(MEMORY_FILE):
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
                 ai_memory = json.load(f)
-            logger.info(f"🧠 Загружена память AI для {len(ai_memory)} моделей из файла")
+            logger.info(f"🧠 Загружена память AI для {len(ai_memory)} моделей")
     except Exception as e:
         logger.error("❌ Ошибка загрузки ai_memory.json: " + str(e))
         ai_memory = {}
 
 def save_memory():
-    if db is not None:
-        try:
-            db[SETTINGS_COLLECTION].update_one(
-                {"_id": "ai_memory"},
-                {"$set": {
-                    "memory": ai_memory,
-                    "updated_at": datetime.now(timezone(timedelta(hours=3)))
-                }},
-                upsert=True
-            )
-            return
-        except Exception as e:
-            logger.warning("⚠️ Ошибка сохранения памяти AI в MongoDB: " + str(e))
     try:
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(ai_memory, f, indent=2, ensure_ascii=False)
@@ -763,7 +556,7 @@ def update_settings(user_id, **kwargs):
     settings = get_settings(user_id)
     settings.update(kwargs)
     user_settings[user_id] = settings
-    if db is not None and user_id == OWNER_ID_INT:
+    if user_id == OWNER_ID_INT:
         save_settings(user_id)
 
 def check_cooldown(user_id):
@@ -1550,411 +1343,7 @@ async def cmd_blocked(m: Message):
     txt += f"\n<i>Используй /unblock &lt;id&gt; чтобы разблокировать</i>"
     await m.answer(txt, parse_mode="HTML")
 
-@dp.message(Command("shell"))
-async def cmd_shell(m: Message):
-    """Выполняет shell-команду: /shell <command>"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await m.answer(
-            f"{EMOJI['info']} <b>Shell-доступ (только для владельца):</b>\n\n"
-            f"<code>/shell &lt;команда&gt;</code>\n\n"
-            f"<b>Примеры:</b>\n"
-            f"<code>/shell ls -la</code>\n"
-            f"<code>/shell pwd</code>\n"
-            f"<code>/shell git status</code>\n\n"
-            f"<i>⚠️ Команды проверяются на безопасность</i>",
-            parse_mode="HTML"
-        )
-        return
-    
-    command = parts[1].strip()
-    
-    # Проверка безопасности
-    is_safe, error_msg = is_command_safe(command)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        logger.warning(f"🚫 Заблокирована опасная команда от владельца: {command}")
-        return
-    
-    # Отправляем "задумался"
-    status_msg = await m.answer(f"⏳ Выполняю: <code>{safe_html_text(command)}</code>...", parse_mode="HTML")
-    
-    start_time = time.time()
-    stdout, stderr, returncode = await run_shell_command(command)
-    exec_time = time.time() - start_time
-    
-    # Формируем ответ
-    result = f"{EMOJI['info']} <b>Результат:</b>\n\n"
-    result += f"🔹 Команда: <code>{safe_html_text(command)}</code>\n"
-    result += f"🔹 Время: <b>{exec_time:.2f} сек</b>\n"
-    result += f"🔹 Код возврата: <code>{returncode}</code>\n\n"
-    
-    if stdout:
-        result += f"<b>📤 STDOUT:</b>\n<code>{safe_html_text(stdout)}</code>\n"
-    if stderr:
-        result += f"<b>📥 STDERR:</b>\n<code>{safe_html_text(stderr)}</code>\n"
-    if not stdout and not stderr:
-        result += "<i>(нет вывода)</i>\n"
-    
-    # Если вывод очень длинный — отправляем файлом
-    if len(result) > 4000:
-        await status_msg.delete()
-        file = BufferedInputFile(
-            file=result.encode("utf-8"),
-            filename=f"shell_output_{datetime.now(timezone(timedelta(hours=3))).strftime('%Y%m%d_%H%M')}.txt"
-        )
-        await m.answer_document(document=file, caption=f"📄 Вывод команды `{command}` (обрезан до 4000 символов)")
-    else:
-        await status_msg.edit_text(result, parse_mode="HTML")
-    
-    logger.info(f"🐚 Shell: {command} → код {returncode} за {exec_time:.2f} сек")
-
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-def create_ls_keyboard(path: str, items: list) -> InlineKeyboardMarkup:
-    """Создаёт инлайн-клавиатуру для навигации по файлам"""
-    keyboard = []
-    
-    # Кнопка "Наверх" (если не в корне)
-    if path != "/opt/render/project/src" and path != ".":
-        parent = os.path.dirname(path) if path != "." else "/opt/render/project/src"
-        keyboard.append([
-            InlineKeyboardButton(text="🔙 Наверх", callback_data=f"ls:{parent}")
-        ])
-    
-    # Кнопки для директорий (первые 10)
-    dirs = [item for item in items if item['type'] == 'dir'][:10]
-    if dirs:
-        row = []
-        for d in dirs:
-            # Обрезаем длинные имена
-            name = d['name'][:20] + "…" if len(d['name']) > 20 else d['name']
-            row.append(InlineKeyboardButton(text=f"📁 {name}", callback_data=f"ls:{d['path']}"))
-        keyboard.append(row)
-    
-    # Кнопки для файлов (первые 10) - только действия
-    files = [item for item in items if item['type'] == 'file'][:10]
-    if files:
-        row = []
-        for f in files:
-            name = f['name'][:15] + "…" if len(f['name']) > 15 else f['name']
-            # Кнопка для просмотра/скачивания файла
-            row.append(InlineKeyboardButton(text=f"📄 {name}", callback_data=f"file:{f['path']}"))
-        keyboard.append(row)
-    
-    # Кнопки действий
-    action_row = [
-        InlineKeyboardButton(text="🔄 Обновить", callback_data=f"ls:{path}"),
-        InlineKeyboardButton(text="📤 Загрузить всё", callback_data=f"upload_dir:{path}"),
-    ]
-    keyboard.append(action_row)
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-
-# ================= FILE MANAGEMENT =================
-ALLOWED_DIRECTORIES = [
-    "/opt/render/project/src",
-    "/opt/render/project/src/logs",
-]
-
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB лимит Telegram
-
-def is_path_safe(path: str) -> tuple[bool, str]:
-    """Проверяет безопасность пути"""
-    # Нормализуем путь
-    abs_path = os.path.abspath(path)
-    
-    # Проверка на выход за пределы разрешённых директорий
-    is_allowed = any(abs_path.startswith(allowed) for allowed in ALLOWED_DIRECTORIES)
-    if not is_allowed:
-        return False, f"❌ Доступ за пределы разрешённых директорий запрещён.\nРазрешено: {', '.join(ALLOWED_DIRECTORIES)}"
-    
-    # Проверка на опасные символы
-    dangerous_chars = ["|", "&", ";", ">", "<", "`", "$", "(", ")"]
-    for char in dangerous_chars:
-        if char in path:
-            return False, f"❌ Опасный символ в пути: `{char}`"
-    
-    return True, ""
-
-@dp.message(Command("ls"))
-async def cmd_ls(m: Message):
-    """Список файлов в директории: /ls [путь]"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split()
-    path = parts[1] if len(parts) > 1 else "."
-    
-    # Проверка безопасности
-    is_safe, error_msg = is_path_safe(path)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        return
-    
-    try:
-        # Нормализуем путь
-        abs_path = os.path.abspath(path)
-        
-        if not os.path.exists(abs_path):
-            await m.answer(f"{EMOJI['error']} Путь не существует: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        if not os.path.isdir(abs_path):
-            await m.answer(f"{EMOJI['error']} Это не директория: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        # Получаем список файлов
-        items = os.listdir(abs_path)
-        items.sort()
-        
-        txt = f"{EMOJI['file']} <b>Список файлов:</b>\n"
-        txt += f"📁 Путь: <code>{safe_html_text(abs_path)}</code>\n\n"
-        
-        dirs = []
-        files = []
-        
-        for item in items:
-            item_path = os.path.join(abs_path, item)
-            if os.path.isdir(item_path):
-                dirs.append(f"📁 <code>{safe_html_text(item)}</code>/")
-            else:
-                size = os.path.getsize(item_path)
-                size_str = f"{size / 1024:.1f} KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB"
-                files.append(f"📄 <code>{safe_html_text(item)}</code> ({size_str})")
-        
-        txt += "\n".join(dirs[:20]) + "\n" if dirs else ""
-        txt += "\n".join(files[:20]) + "\n" if files else ""
-        
-        if len(dirs) > 20 or len(files) > 20:
-            txt += f"\n<i>...и ещё {len(dirs) + len(files) - 40} файлов (показано первые 40)</i>"
-        
-        await m.answer(txt, parse_mode="HTML")
-        
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
-        logger.error(f"❌ Ошибка /ls: {e}")
-
-@dp.message(Command("upload"))
-async def cmd_upload(m: Message):
-    """Загрузить файл с сервера в Telegram: /upload <путь>"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await m.answer(
-            f"{EMOJI['info']} <b>Загрузка файла с сервера:</b>\n\n"
-            f"<code>/upload &lt;путь к файлу&gt;</code>\n\n"
-            f"<b>Примеры:</b>\n"
-            f"<code>/upload bot.py</code>\n"
-            f"<code>/upload /opt/render/project/src/bot.py</code>\n"
-            f"<code>/upload logs/error.log</code>\n\n"
-            f"<i>Макс. размер: 50 MB</i>",
-            parse_mode="HTML"
-        )
-        return
-    
-    file_path = parts[1].strip()
-    
-    # Проверка безопасности
-    is_safe, error_msg = is_path_safe(file_path)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        return
-    
-    try:
-        abs_path = os.path.abspath(file_path)
-        
-        if not os.path.exists(abs_path):
-            await m.answer(f"{EMOJI['error']} Файл не найден: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        if os.path.isdir(abs_path):
-            await m.answer(f"{EMOJI['error']} Это директория, укажите файл: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        file_size = os.path.getsize(abs_path)
-        
-        if file_size > MAX_FILE_SIZE:
-            await m.answer(
-                f"{EMOJI['warning']} <b>Файл слишком большой!</b>\n\n"
-                f"📦 Размер: <b>{file_size / 1024 / 1024:.1f} MB</b>\n"
-                f"⚠️ Максимум: <b>{MAX_FILE_SIZE / 1024 / 1024:.0f} MB</b>",
-                parse_mode="HTML"
-            )
-            return
-        
-        # Отправляем "задумался"
-        status_msg = await m.answer(f"⏳ Загружаю файл... <code>{safe_html_text(os.path.basename(abs_path))}</code>", parse_mode="HTML")
-        
-        # Отправляем файл
-        async with aiofiles.open(abs_path, 'rb') as f:
-            file_data = await f.read()
-        
-        file = BufferedInputFile(file=file_data, filename=os.path.basename(abs_path))
-        
-        # Определяем тип файла
-        if abs_path.endswith('.py'):
-            await status_msg.delete()
-            await m.answer_document(document=file, caption=f"📄 <code>{safe_html_text(abs_path)}</code>\n📦 Размер: {file_size / 1024:.1f} KB")
-        elif abs_path.endswith(('.txt', '.log', '.json', '.md', '.csv')):
-            await status_msg.delete()
-            await m.answer_document(document=file, caption=f"📄 <code>{safe_html_text(abs_path)}</code>\n📦 Размер: {file_size / 1024:.1f} KB")
-        else:
-            await status_msg.delete()
-            await m.answer_document(document=file, caption=f"📄 <code>{safe_html_text(abs_path)}</code>\n📦 Размер: {file_size / 1024:.1f} KB")
-        
-        logger.info(f"📤 Upload: {abs_path} ({file_size} байт)")
-        
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
-        logger.error(f"❌ Ошибка /upload: {e}")
-
-@dp.message(Command("download"))
-async def cmd_download(m: Message):
-    """Скачать файл из Telegram на сервер: /download <путь> (ответом на файл)"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    if not m.reply_to_message or not m.reply_to_message.document:
-        await m.answer(
-            f"{EMOJI['info']} <b>Скачивание файла на сервер:</b>\n\n"
-            f"1️⃣ Отправь файл боту\n"
-            f"2️⃣ Ответь на него командой:\n"
-            f"<code>/download &lt;путь сохранения&gt;</code>\n\n"
-            f"<b>Пример:</b>\n"
-            f"<code>/download /opt/render/project/src/config.json</code>\n\n"
-            f"<i>Макс. размер: 50 MB</i>",
-            parse_mode="HTML"
-        )
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await m.answer(f"{EMOJI['warning']} Укажи путь сохранения: <code>/download &lt;путь&gt;</code>", parse_mode="HTML")
-        return
-    
-    save_path = parts[1].strip()
-    
-    # Проверка безопасности
-    is_safe, error_msg = is_path_safe(save_path)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        return
-    
-    try:
-        abs_path = os.path.abspath(save_path)
-        
-        # Создаём директории если нужно
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        
-        file = m.reply_to_message.document
-        file_size = file.file_size
-        
-        if file_size > MAX_FILE_SIZE:
-            await m.answer(
-                f"{EMOJI['warning']} <b>Файл слишком большой!</b>\n\n"
-                f"📦 Размер: <b>{file_size / 1024 / 1024:.1f} MB</b>\n"
-                f"⚠️ Максимум: <b>{MAX_FILE_SIZE / 1024 / 1024:.0f} MB</b>",
-                parse_mode="HTML"
-            )
-            return
-        
-        # Отправляем "задумался"
-        status_msg = await m.answer(f"⏳ Скачиваю файл... <code>{safe_html_text(file.file_name)}</code>", parse_mode="HTML")
-        
-        # Скачиваем файл
-        file_data = await bot.get_file(file.file_id)
-        file_content = await bot.download_file(file_data.file_path)
-        
-        # Сохраняем на сервер
-        async with aiofiles.open(abs_path, 'wb') as f:
-            await f.write(file_content.read())
-        
-        await status_msg.edit_text(
-            f"{EMOJI['check']} <b>Файл сохранён!</b>\n\n"
-            f"📄 Имя: <code>{safe_html_text(file.file_name)}</code>\n"
-            f"📁 Путь: <code>{safe_html_text(abs_path)}</code>\n"
-            f"📦 Размер: <b>{file_size / 1024:.1f} KB</b>",
-            parse_mode="HTML"
-        )
-        
-        logger.info(f"📥 Download: {file.file_name} → {abs_path} ({file_size} байт)")
-        
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
-        logger.error(f"❌ Ошибка /download: {e}")
-
-@dp.message(Command("cat"))
-async def cmd_cat(m: Message):
-    """Показать содержимое файла: /cat <путь>"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await m.answer(f"{EMOJI['warning']} Используй: <code>/cat &lt;путь к файлу&gt;</code>", parse_mode="HTML")
-        return
-    
-    file_path = parts[1].strip()
-    
-    # Проверка безопасности
-    is_safe, error_msg = is_path_safe(file_path)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        return
-    
-    try:
-        abs_path = os.path.abspath(file_path)
-        
-        if not os.path.exists(abs_path):
-            await m.answer(f"{EMOJI['error']} Файл не найден: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        if os.path.isdir(abs_path):
-            await m.answer(f"{EMOJI['error']} Это директория, укажите файл: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        file_size = os.path.getsize(abs_path)
-        
-        if file_size > 10 * 1024 * 1024:  # 10 MB лимит для текста
-            await m.answer(
-                f"{EMOJI['warning']} <b>Файл слишком большой для просмотра!</b>\n\n"
-                f"📦 Размер: <b>{file_size / 1024 / 1024:.1f} MB</b>\n"
-                f"⚠️ Максимум: <b>10 MB</b>\n\n"
-                f"<i>Используй /upload чтобы скачать файл</i>",
-                parse_mode="HTML"
-            )
-            return
-        
-        # Читаем файл
-        async with aiofiles.open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = await f.read()
-        
-        # Форматируем вывод
-        txt = f"{EMOJI['file']} <b>Содержимое файла:</b>\n"
-        txt += f"📁 Путь: <code>{safe_html_text(abs_path)}</code>\n"
-        txt += f"📦 Размер: <b>{file_size / 1024:.1f} KB</b>\n\n"
-        txt += f"<code>{safe_html_text(content[:4000])}</code>"  # Ограничиваем вывод
-        
-        if len(content) > 4000:
-            txt += f"\n\n<i>...обрезано до 4000 символов. Используй /upload для полного файла</i>"
-        
-        await m.answer(txt, parse_mode="HTML")
-        
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
-        logger.error(f"❌ Ошибка /cat: {e}")
 
 @dp.message(Command("allowai"))
 async def cmd_allowai(m: Message):
@@ -2021,91 +1410,7 @@ async def cmd_aiallowed(m: Message):
     
     await m.answer(txt, parse_mode="HTML")
 
-@dp.message(Command("rm"))
-async def cmd_rm(m: Message):
-    """Удалить файл: /rm <путь>"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await m.answer(f"{EMOJI['warning']} Используй: <code>/rm &lt;путь к файлу&gt;</code>", parse_mode="HTML")
-        return
-    
-    file_path = parts[1].strip()
-    
-    # Проверка безопасности
-    is_safe, error_msg = is_path_safe(file_path)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        return
-    
-    # Дополнительная проверка на опасные пути
-    if any(x in file_path.lower() for x in ["requirements.txt", "bot.py", ".env", "config"]):
-        await m.answer(
-            f"{EMOJI['warning']} <b>⚠️ Внимание!</b>\n\n"
-            f"Вы пытаетесь удалить важный файл системы!\n"
-            f"Это может сломать бота.\n\n"
-            f"Для подтверждения отправьте: <code>/rmforce {safe_html_text(file_path)}</code>",
-            parse_mode="HTML"
-        )
-        return
-    
-    try:
-        abs_path = os.path.abspath(file_path)
-        
-        if not os.path.exists(abs_path):
-            await m.answer(f"{EMOJI['error']} Файл не найден: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-            return
-        
-        if os.path.isdir(abs_path):
-            await m.answer(f"{EMOJI['error']} Это директория. Используйте /shell rm -rf для удаления папок.", parse_mode="HTML")
-            return
-        
-        os.remove(abs_path)
-        
-        await m.answer(
-            f"{EMOJI['check']} <b>Файл удалён!</b>\n\n"
-            f"📁 Путь: <code>{safe_html_text(abs_path)}</code>",
-            parse_mode="HTML"
-        )
-        
-        logger.info(f"🗑️ RM: {abs_path}")
-        
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
-        logger.error(f"❌ Ошибка /rm: {e}")
 
-@dp.message(Command("rmforce"))
-async def cmd_rmforce(m: Message):
-    """Принудительное удаление важных файлов: /rmforce <путь>"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await m.answer(f"{EMOJI['warning']} Используй: <code>/rmforce &lt;путь&gt;</code>", parse_mode="HTML")
-        return
-    
-    file_path = parts[1].strip()
-    
-    is_safe, error_msg = is_path_safe(file_path)
-    if not is_safe:
-        await m.answer(error_msg, parse_mode="HTML")
-        return
-    
-    try:
-        abs_path = os.path.abspath(file_path)
-        os.remove(abs_path)
-        
-        await m.answer(f"{EMOJI['check']} Файл удалён: <code>{safe_html_text(abs_path)}</code>", parse_mode="HTML")
-        logger.warning(f"🗑️ RMFORCE: {abs_path}")
-        
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {safe_html_text(str(e))}", parse_mode="HTML")
-        logger.error(f"❌ Ошибка /rmforce: {e}")
 
 @dp.message(Command("ai"))
 async def cmd_ai(m: Message):
@@ -2394,37 +1699,7 @@ async def cmd_loglevel(m: Message):
     await m.answer(f"{EMOJI['check']} Уровень логов изменён на: <b>{level_name}</b>", parse_mode="HTML")
     logger.info(f"📊 Уровень логов изменён пользователем на: {level_name}")
 
-@dp.message(Command("dbstats"))
-async def cmd_dbstats(m: Message):
-    """Показывает статистику использования MongoDB"""
-    if m.from_user.id != OWNER_ID_INT or db is None:
-        return
-    
-    try:
-        stats = db.command("dbstats")
-        users_count = db.users.count_documents({})
-        forwarded_count = db.forwarded.count_documents({})
-        settings_count = db[SETTINGS_COLLECTION].count_documents({})
-        
-        # Конвертируем байты в читаемый формат
-        def format_size(bytes_val):
-            for unit in ['B', 'KB', 'MB', 'GB']:
-                if bytes_val < 1024:
-                    return f"{bytes_val:.1f} {unit}"
-                bytes_val /= 1024
-            return f"{bytes_val:.1f} TB"
-        
-        txt = f"{EMOJI['db']} <b>Статистика MongoDB:</b>\n\n"
-        txt += f"💾 Всего занято: <b>{format_size(stats['storageSize'])}</b>\n"
-        txt += f"📊 Всего документов: <b>{stats['objects']}</b>\n"
-        txt += f"👥 Пользователей: <b>{users_count}</b>\n"
-        txt += f"📬 Forwarded: <b>{forwarded_count}</b>\n"
-        txt += f"⚙️ Настроек: <b>{settings_count}</b>\n\n"
-        txt += f"<i>Лимит тарифа: 512 MB</i>"
-        
-        await m.answer(txt, parse_mode="HTML")
-    except Exception as e:
-        await m.answer(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
 
 
 @dp.message(Command("convert"))
@@ -2631,11 +1906,6 @@ async def cmd_status(message: Message):
     if log_handler: 
         txt += f"\n📊 Лог-уровень: <b>{logging.getLevelName(log_handler.min_level)}</b>"
     
-    if db is not None:
-        txt += f"\n{PREMIUM_EMOJI['sparkle']} БД: <b>MongoDB подключена</b>"
-    else:
-        txt += f"\n{EMOJI['warning']} БД: <b>не подключена (данные сбросятся при рестарте)</b>"
-    
     # Информация о модели (теперь добавляется ДО отправки)
     model_info = AVAILABLE_AI_MODELS.get(current_ai_model, {})
     txt += f"\n🤖 AI модель: <b>{model_info.get('display', current_ai_model)}</b>"
@@ -2709,7 +1979,7 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info("🌐 Server on port " + str(port))
-    ext_url = os.getenv("RENDER_EXTERNAL_URL")
+    ext_url = os.getenv("EXTERNAL_URL") or os.getenv("RENDER_EXTERNAL_URL")
     if ext_url and bot_running:
         wh_url = ext_url + webhook_path
         await bot.set_webhook(
@@ -2728,7 +1998,6 @@ async def run_web_server():
 async def main():
     # Инициализация (функции уже определены выше)
     init_log_bot()
-    mongo_ok = init_mongo()
     init_openrouter_http()
     load_forwarded()
     load_users()
@@ -2737,8 +2006,7 @@ async def main():
     
     await run_web_server()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
-    db_status = "✅ MongoDB" if mongo_ok else "❌ память"
-    logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time} | DB: {db_status}")
+    logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time}")
     
     while True:
         await asyncio.sleep(3600)
