@@ -29,7 +29,7 @@ SITE_BASE = "https://lynther.sytes.net"
 
 EXTRA_ALLOWED_AI_USERS = {
     8371541704,
-    5802195555  # Доп. ID, у которого всегда есть доступ к /ai (помимо владельца)
+    5802195555  # gvno
 }
     
 
