@@ -339,7 +339,20 @@ user_settings = {}
 awaiting_conversion = set()
 forwarded_messages = {}
 known_users = {}
-allowed_ai_users = set(int(x) for x in os.getenv("ALLOWED_AI_USERS", OWNER_ID).split(",")) | EXTRA_ALLOWED_AI_USERS | {int(OWNER_ID)}
+allowed_ai_users = set()
+if OWNER_ID:
+    allowed_ai_users.add(int(OWNER_ID))
+allowed_ai_users |= EXTRA_ALLOWED_AI_USERS
+
+allowed_ai_users_env = os.getenv("ALLOWED_AI_USERS", "")
+if allowed_ai_users_env:
+    for uid_str in allowed_ai_users_env.split(","):
+        uid_str = uid_str.strip()
+        if uid_str:
+            try:
+                allowed_ai_users.add(int(uid_str))
+            except ValueError:
+                logger.warning(f"⚠️ Неверный ID в ALLOWED_AI_USERS: {uid_str}")
 openrouter_session = None
 current_ai_model = DEFAULT_AI_MODEL
 ai_memory = {}
