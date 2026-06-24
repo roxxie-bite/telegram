@@ -14,7 +14,6 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
-from aiogram.dispatcher.event.handler import CancelHandler
 
 
 
@@ -828,6 +827,7 @@ async def handle_user_message(message: Message):
 
 @dp.message(F.from_user.id == OWNER_ID_INT, F.reply_to_message)
 async def handle_owner_reply(message: Message):
+    """Обрабатывает ТОЛЬКО ответы владельца на пересланные сообщения"""
     reply_msg_id = message.reply_to_message.message_id
     logger.info(f"📨 Владелец ответил на message_id={reply_msg_id}")
     if reply_msg_id in forwarded_messages:
@@ -851,11 +851,11 @@ async def handle_owner_reply(message: Message):
             await message.answer(f"{EMOJI['check']} Ответ отправлен пользователю {user_id}", parse_mode="HTML")
             del forwarded_messages[reply_msg_id]
             save_forwarded()
-            raise CancelHandler()
+            return  # Останавливаем propagation
         except Exception as e:
             logger.error("Ошибка отправки ответа: " + str(e))
             await message.answer(f"{EMOJI['error']} Не удалось отправить: {str(e)[:100]}", parse_mode="HTML")
-            raise CancelHandler()
+            return  # Останавливаем propagation
     else:
         logger.info(f"⚠️ message_id={reply_msg_id} не найден в forwarded_messages")
 
