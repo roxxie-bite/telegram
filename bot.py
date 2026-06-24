@@ -375,7 +375,14 @@ logging.basicConfig(level=log_level, format="%(asctime)s МСК | %(levelname)s 
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN or not OWNER_ID:
-    raise ValueError("❌ Переменные BOT_TOKEN и OWNER_ID не заданы!")
+    print("❌❌❌ КРИТИЧЕСКАЯ ОШИБКА ❌❌❌")
+    print(f"BOT_TOKEN: {BOT_TOKEN}")
+    print(f"OWNER_ID: {OWNER_ID}")
+    print("Переменные окружения не загружены. Проверь .env файл.")
+    print("Список всех env-переменных (только ключи):")
+    for k in sorted(os.environ.keys()):
+        print(f"  - {k}")
+    sys.exit(1)  # чистый выход, не raise
 
 OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
