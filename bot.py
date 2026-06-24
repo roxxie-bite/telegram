@@ -16,7 +16,6 @@ from aiogram.types import Message, BufferedInputFile
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
 
 
-
 # === РУЧНАЯ ЗАГРУЗКА .env (без python-dotenv) ===
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
@@ -50,134 +49,166 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
     """Проверяет, есть ли пользователь в списке разрешённых"""
     return user_id in allowed_set
 
-# ================= OPENROUTER AI =================
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# ================= FREELLM API =================
+FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY")
+FREELLMAPI_BASE_URL = os.getenv("FREELLMAPI_BASE_URL", "http://localhost:3001/v1").rstrip("/")
+FREELLMAPI_CHAT_URL = FREELLMAPI_BASE_URL + "/chat/completions"
+FREELLMAPI_MODELS_URL = FREELLMAPI_BASE_URL + "/models"
 
-# ================= AI МОДЕЛИ (КАТАЛОГ OPENROUTER) =================
+# ================= AI МОДЕЛИ (КАТАЛОГ FREELLM API) =================
+# FreeLLM API поддерживает "auto" для авто-роутинга, а также конкретные модели.
+# Имена взяты из актуального каталога free-tier моделей.
 AVAILABLE_AI_MODELS = {
-    "auto-free": {
-        "name": "openrouter/free",
-        "display": "🎲 Auto Free",
-        "desc": "Авто-выбор бесплатной модели — не зависит от лимита одного провайдера",
+    "auto": {
+        "name": "auto",
+        "display": "🎲 Auto (FreeLLM Router)",
+        "desc": "Авто-выбор лучшей доступной бесплатной модели",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "gemini-2.5-flash": {
+        "name": "gemini-2.5-flash",
+        "display": "🚀 Gemini 2.5 Flash",
+        "desc": "Google, быстрая и умная модель",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "gemini-2.5-pro": {
+        "name": "gemini-2.5-pro",
+        "display": "✨ Gemini 2.5 Pro",
+        "desc": "Google, флагманская модель",
         "temp": 0.7,
         "max_tokens": 8192
     },
     "gpt-4o": {
-        "name": "openai/gpt-4o",
+        "name": "gpt-4o",
         "display": "🤖 GPT-4o",
-        "desc": "Флагман OpenAI, универсальная",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "nex-agi": {
-        "name": "nex-agi/nex-n2-pro:free",
-        "display": "🚀 NEX AGI N2 Pro",
-        "desc": "Новая модель от OpenAI, хороша в коде и логике",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "gpt-4o-mini": {
-        "name": "openai/gpt-4o-mini",
-        "display": "⚡ GPT-4o mini",
-        "desc": "Быстрая и дешёвая версия GPT-4o",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "claude-sonnet": {
-        "name": "anthropic/claude-sonnet-4.6",
-        "display": "🧠 Claude Sonnet 4.6",
-        "desc": "Сбалансированная флагманская модель Anthropic",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "claude-haiku": {
-        "name": "anthropic/claude-haiku-4.5",
-        "display": "🪶 Claude Haiku 4.5",
-        "desc": "Быстрая и лёгкая модель Anthropic",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "gemini-flash": {
-        "name": "google/gemini-2.5-flash",
-        "display": "🚀 Gemini 2.5 Flash",
-        "desc": "Google, доступ через OpenRouter",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "gemini-pro": {
-        "name": "google/gemini-3-pro-preview",
-        "display": "✨ Gemini 3 Pro",
-        "desc": "Google, доступ через OpenRouter",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "owl": {
-        "name": "openrouter/owl-alpha",
-        "display": "🦉 Owl Alpha",
-        "desc": "Модель от неизвестного провайдера, хороша в коде и логике",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "qwen": {
-        "name": "qwen/qwen3-coder:free",
-        "display": "👨‍💻 Qwen3 Coder (free)",
-        "desc": "Бесплатная модель, хороша в коде",
+        "desc": "OpenAI через GitHub Models",
         "temp": 0.7,
         "max_tokens": 8192
     },
-    "nvidia": {
-        "name":"nvidia/nemotron-3-ultra-550b-a55b:free",
-        "display": "🎮 NVIDIA NeMo 3 Ultra (free)",
-        "desc": "Бесплатная модель от NVIDIA, хороша в коде и логике",
+    "gpt-4.1": {
+        "name": "gpt-4.1",
+        "display": "🤖 GPT-4.1",
+        "desc": "OpenAI через GitHub Models",
         "temp": 0.7,
         "max_tokens": 8192
     },
-    "nvidia-nemotron-3-nano-omni-30b-a3b": {
-        "name": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "display": "🎮 NVIDIA NeMo 3 Nano Omni 30B (free)",
-        "desc": "Бесплатная модель от NVIDIA, хороша в коде и логике",
+    "llama-3.3-70b": {
+        "name": "llama-3.3-70b",
+        "display": "🦙 Llama 3.3 70B",
+        "desc": "Meta через Groq/Cerebras/NV",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "llama-4-scout": {
+        "name": "llama-4-scout",
+        "display": "🦙 Llama 4 Scout",
+        "desc": "Meta через Groq",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "qwen3-235b": {
+        "name": "qwen3-235b",
+        "display": "🔥 Qwen3 235B",
+        "desc": "Alibaba через Cerebras",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "qwen3-coder-480b": {
+        "name": "qwen3-coder-480b",
+        "display": "👨‍💻 Qwen3 Coder 480B",
+        "desc": "Кодерская модель через OpenRouter",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "qwen3-32b": {
+        "name": "qwen3-32b",
+        "display": "👨‍💻 Qwen3 32B",
+        "desc": "Быстрая модель через Groq",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "mistral-large-3": {
+        "name": "mistral-large-3",
+        "display": "🌬️ Mistral Large 3",
+        "desc": "Флагман Mistral",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "codestral": {
+        "name": "codestral",
+        "display": "💻 Codestral",
+        "desc": "Mistral, специализирована на коде",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "devstral": {
+        "name": "devstral",
+        "display": "💻 Devstral",
+        "desc": "Mistral, для разработки",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "gpt-oss-120b": {
+        "name": "gpt-oss-120b",
+        "display": "🔓 GPT-OSS 120B",
+        "desc": "Open-source GPT через Groq/Cloudflare",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "gpt-oss-20b": {
+        "name": "gpt-oss-20b",
+        "display": "🔓 GPT-OSS 20B",
+        "desc": "Лёгкая версия через Groq",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "nemotron-3-super-120b": {
+        "name": "nemotron-3-super-120b",
+        "display": "🎮 Nemotron 3 Super 120B",
+        "desc": "NVIDIA",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "nemotron-3-nano-30b": {
+        "name": "nemotron-3-nano-30b",
+        "display": "🎮 Nemotron 3 Nano 30B",
+        "desc": "NVIDIA / OpenRouter",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "glm-4.7-flash": {
+        "name": "glm-4.7-flash",
+        "display": "⚡ GLM-4.7 Flash",
+        "desc": "Zhipu (Z.ai) / Cloudflare",
+        "temp": 0.7,
+        "max_tokens": 8192
+    },
+    "glm-4.5-air": {
+        "name": "glm-4.5-air",
+        "display": "🎈 GLM-4.5 Air",
+        "desc": "Zhipu (Z.ai)",
         "temp": 0.7,
         "max_tokens": 8192
     },
     "deepseek-r1": {
-        "name": "deepseek/deepseek-r1",
+        "name": "deepseek-r1",
         "display": "🔬 DeepSeek R1",
-        "desc": "Рассуждающая модель, хороша в коде и логике",
-        "temp": 0.7,
-        "max_tokens": 16384
-    },
-    "deepseek-r1-free": {
-        "name": "deepseek/deepseek-r1:free",
-        "display": "🔬 DeepSeek R1 (free)",
-        "desc": "Бесплатная версия (свой лимит запросов в минуту/день)",
+        "desc": "Рассуждающая модель",
         "temp": 0.7,
         "max_tokens": 8192
     },
-    "llama-3.3-70b-free": {
-        "name": "meta-llama/llama-3.3-70b-instruct:free",
-        "display": "🦙 Llama 3.3 70B (free)",
-        "desc": "Бесплатная модель Meta",
-        "temp": 0.7,
-        "max_tokens": 8192
-    },
-    "qwen-coder-free": {
-        "name": "qwen/qwen3-coder:free",
-        "display": "👨‍💻 Qwen3 Coder (free)",
-        "desc": "Бесплатная модель, хороша в коде",
-        "temp": 0.7,
-        "max_tokens": 8192
-    },
-    "mistral-small-free": {
-        "name": "mistralai/mistral-small-3.1-24b-instruct:free",
-        "display": "🌬️ Mistral Small (free)",
-        "desc": "Бесплатная модель Mistral",
+    "claude-sonnet-4-5": {
+        "name": "claude-sonnet-4-5",
+        "display": "🧠 Claude Sonnet 4.5",
+        "desc": "Anthropic через FreeLLM proxy",
         "temp": 0.7,
         "max_tokens": 8192
     },
 }
 
-DEFAULT_AI_MODEL = "nvidia-nemotron-3-nano-omni-30b-a3b"
+DEFAULT_AI_MODEL = "auto"
 
 BASE_URL = SITE_BASE + "/?p=lora"
 DEFAULT_MIN_DAYS = int(MIN_DAYS_ENV) if MIN_DAYS_ENV and MIN_DAYS_ENV.isdigit() else 0
@@ -284,7 +315,7 @@ if allowed_ai_users_env:
                 allowed_ai_users.add(int(uid_str))
             except ValueError:
                 pass
-openrouter_session = None
+freellmapi_session = None
 current_ai_model = DEFAULT_AI_MODEL
 ai_memory = {}
 MEMORY_FILE = "ai_memory.json"
@@ -356,24 +387,22 @@ class TelegramLogHandler(logging.Handler):
         except Exception as e:
             print(f"Failed to send log to Telegram: {e}")
 
-# ================= OPENROUTER HTTP CLIENT =================
-def init_openrouter_http():
-    global openrouter_session
-    if not OPENROUTER_API_KEY:
-        logger.warning("⚠️ OPENROUTER_API_KEY не задан — AI-функции недоступны")
+# ================= FREELLM API HTTP CLIENT =================
+def init_freellmapi_http():
+    global freellmapi_session
+    if not FREELLMAPI_API_KEY:
+        logger.warning("⚠️ FREELLMAPI_API_KEY не задан — AI-функции недоступны")
         return False
     try:
-        openrouter_session = requests.Session()
-        openrouter_session.headers.update({
+        freellmapi_session = requests.Session()
+        freellmapi_session.headers.update({
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "HTTP-Referer": "https://github.com/",
-            "X-Title": "LoonieBot",
+            "Authorization": f"Bearer {FREELLMAPI_API_KEY}",
         })
-        logger.info(f"✅ OpenRouter HTTP client инициализирован")
+        logger.info(f"✅ FreeLLM API HTTP client инициализирован ({FREELLMAPI_BASE_URL})")
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации OpenRouter HTTP: {e}")
+        logger.error(f"❌ Ошибка инициализации FreeLLM API HTTP: {e}")
         return False
 
 # ================= ИНИЦИАЛИЗАЦИЯ ЛОГ-БОТА =================
@@ -746,8 +775,8 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
     model_key = model_key or current_ai_model
     model_info = AVAILABLE_AI_MODELS.get(model_key, AVAILABLE_AI_MODELS[DEFAULT_AI_MODEL])
     model_name = model_info["name"]
-    if not openrouter_session or not OPENROUTER_API_KEY:
-        return {"success": False, "error": "OpenRouter не инициализирован (нет OPENROUTER_API_KEY)"}
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
+        return {"success": False, "error": "FreeLLM API не инициализирован (нет FREELLMAPI_API_KEY)"}
     try:
         messages = []
         memory_text = ai_memory.get(model_key, "")
@@ -765,7 +794,7 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
             "max_tokens": model_info.get("max_tokens", 8192),
         }
         def make_request():
-            return openrouter_session.post(OPENROUTER_API_URL, json=payload, timeout=60)
+            return freellmapi_session.post(FREELLMAPI_CHAT_URL, json=payload, timeout=60)
         response = await asyncio.to_thread(make_request)
         if response.status_code == 200:
             data = response.json()
@@ -782,13 +811,13 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
         elif response.status_code == 400:
             return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать или смени модель."}
         elif response.status_code == 401:
-            return {"success": False, "error": "🔒 Неверный или отсутствующий OPENROUTER_API_KEY."}
+            return {"success": False, "error": "🔒 Неверный или отсутствующий FREELLMAPI_API_KEY."}
         elif response.status_code == 402:
-            return {"success": False, "error": "💳 Недостаточно кредитов на балансе OpenRouter."}
+            return {"success": False, "error": "💳 Недостаточно кредитов (если используется платный тир)."}
         elif response.status_code == 404:
-            return {"success": False, "error": f"❓ Модель не найдена: {model_name}. Проверь название на openrouter.ai/models."}
+            return {"success": False, "error": f"❓ Модель не найдена: {model_name}. Проверь название в дашборде FreeLLM API."}
         elif response.status_code == 429:
-            return {"success": False, "error": "🔄 Лимит запросов (особенно у бесплатных моделей). Подожди минуту или смени модель."}
+            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту или смени модель."}
         elif response.status_code >= 500:
             return {"success": False, "error": "⚠️ Серверная ошибка провайдера. Попробуй позже или смени модель."}
         else:
@@ -796,9 +825,9 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
     except requests.exceptions.Timeout:
         return {"success": False, "error": "⏱️ Таймаут ответа. Попробуй позже."}
     except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "🌐 Ошибка соединения. Проверь интернет."}
+        return {"success": False, "error": "🌐 Ошибка соединения. Проверь, что FreeLLM API запущен на " + FREELLMAPI_BASE_URL}
     except Exception as e:
-        logger.error(f"❌ OpenRouter HTTP error: {str(e)}")
+        logger.error(f"❌ FreeLLM API HTTP error: {str(e)}")
         return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
@@ -1163,22 +1192,22 @@ async def cmd_ai(m: Message):
         logger.warning(f"⚠️ AI ошибка: {result['error']}")
 
 async def fetch_available_models() -> set[str]:
-    if not openrouter_session or not OPENROUTER_API_KEY:
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
         return set()
     try:
         def _get():
-            r = openrouter_session.get("https://openrouter.ai/api/v1/models", timeout=15)
+            r = freellmapi_session.get(FREELLMAPI_MODELS_URL, timeout=15)
             if r.status_code == 200:
                 data = r.json()
                 return {m.get("id", "") for m in data.get("data", [])}
             return set()
         return await asyncio.to_thread(_get)
     except Exception as e:
-        logger.warning(f"⚠️ Не удалось получить список моделей OpenRouter: {e}")
+        logger.warning(f"⚠️ Не удалось получить список моделей FreeLLM API: {e}")
         return set()
 
 async def ping_model(model_name: str) -> tuple[bool, float]:
-    if not openrouter_session or not OPENROUTER_API_KEY:
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
         return False, 0.0
     payload = {
         "model": model_name,
@@ -1189,7 +1218,7 @@ async def ping_model(model_name: str) -> tuple[bool, float]:
     start = time.time()
     try:
         def _post():
-            return openrouter_session.post(OPENROUTER_API_URL, json=payload, timeout=10)
+            return freellmapi_session.post(FREELLMAPI_CHAT_URL, json=payload, timeout=10)
         r = await asyncio.wait_for(asyncio.to_thread(_post), timeout=12)
         elapsed = time.time() - start
         if r.status_code == 200:
@@ -1212,12 +1241,10 @@ async def cmd_model(m: Message):
     global current_ai_model
     parts = m.text.split()
     if len(parts) < 2:
-        txt = f"{EMOJI['settings']} <b>Доступные AI-модели (OpenRouter):</b>\n\n"
+        txt = f"{EMOJI['settings']} <b>Доступные AI-модели (FreeLLM API):</b>\n\n"
         for key, info in AVAILABLE_AI_MODELS.items():
             current = "✅ " if key == current_ai_model else "• "
-            is_free = ":free" in info["name"]
-            free_badge = " <code>[free]</code>" if is_free else ""
-            txt += f"{current}{info['display']}{free_badge}\n"
+            txt += f"{current}{info['display']}\n"
             txt += f"   <i>{info['desc']}</i>\n"
             txt += f"   <code>/model {key}</code>\n\n"
         txt += f"<b>Текущая:</b> <code>{current_ai_model}</code>\n"
@@ -1673,7 +1700,7 @@ async def on_noop_callback(callback: CallbackQuery):
 # ================= MAIN (POLLING) =================
 async def main():
     await init_log_bot()
-    init_openrouter_http()
+    init_freellmapi_http()
     load_forwarded()
     load_users()
     load_settings()
