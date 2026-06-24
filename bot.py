@@ -19,6 +19,29 @@ from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessag
 
 
 
+# === РУЧНАЯ ЗАГРУЗКА .env (без python-dotenv) ===
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+if os.path.exists(_env_path):
+    with open(_env_path, 'r', encoding='utf-8-sig') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                os.environ[key] = value
+    print(f"✅ .env загружен: {_env_path}")
+else:
+    print(f"❌ .env НЕ НАЙДЕН: {_env_path}")
+    print(f"   Текущая папка: {os.getcwd()}")
+    print(f"   Папка скрипта: {os.path.dirname(os.path.abspath(__file__))}")
+
+# Теперь проверяем
+print(f"🔍 BOT_TOKEN: {'ДА (' + str(len(os.getenv('BOT_TOKEN',''))) + ' символов)' if os.getenv('BOT_TOKEN') else 'НЕТ'}")
+print(f"🔍 OWNER_ID: {os.getenv('OWNER_ID') or 'НЕТ'}")
+
+
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
