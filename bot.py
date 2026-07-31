@@ -58,7 +58,7 @@ FREELLMAPI_MODELS_URL = FREELLMAPI_BASE_URL + "/models"
 # ================= AI МОДЕЛИ (КАТАЛОГ FREELLM API) =================
 # FreeLLM API поддерживает "auto" для авто-роутинга, а также конкретные модели.
 # Имена взяты из актуального каталога free-tier моделей.
-AVAILABLE_AI_MODELS = {
+STATIC_AI_MODELS = {
     "auto": {
         "name": "auto",
         "display": "🎲 Auto (FreeLLM Router)",
@@ -207,6 +207,10 @@ AVAILABLE_AI_MODELS = {
         "max_tokens": 8192
     },
 }
+
+# Динамический каталог (загружается из FreeLLM API)
+AVAILABLE_AI_MODELS = STATIC_AI_MODELS.copy()
+
 
 DEFAULT_AI_MODEL = "auto"
 
@@ -1191,6 +1195,58 @@ async def cmd_ai(m: Message):
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
         logger.warning(f"⚠️ AI ошибка: {result['error']}")
 
+
+# ================= ДИНАМИЧЕСКАЯ ЗАГРУЗКА МОДЕЛЕЙ =================
+async def refresh_available_models():
+    """Загружает список моделей из FreeLLM API /models и обновляет AVAILABLE_AI_MODELS."""
+    global AVAILABLE_AI_MODELS
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
+        logger.warning("⚠️ FreeLLM API не инициализирован — используем статический список моделей")
+        AVAILABLE_AI_MODELS = STATIC_AI_MODELS.copy()
+        return
+    try:
+        def _get():
+            r = freellmapi_session.get(FREELLMAPI_MODELS_URL, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            logger.warning(f"⚠️ /models вернул {r.status_code}: {r.text[:200]}")
+            return None
+        data = await asyncio.to_thread(_get)
+        if not data or "data" not in data:
+            logger.warning("⚠️ Неверный ответ от /models — используем статический список")
+            AVAILABLE_AI_MODELS = STATIC_AI_MODELS.copy()
+            return
+        raw_models = data.get("data", [])
+        new_models = {}
+        # Сначала добавляем auto (роутер), если API его не вернул
+        if "auto" in STATIC_AI_MODELS:
+            new_models["auto"] = STATIC_AI_MODELS["auto"]
+        for m in raw_models:
+            model_id = m.get("id", "")
+            if not model_id:
+                continue
+            key = model_id.lower()
+            if key in STATIC_AI_MODELS:
+                new_models[key] = STATIC_AI_MODELS[key]
+            else:
+                # Автоматическое описание для неизвестной модели
+                new_models[key] = {
+                    "name": model_id,
+                    "display": f"🤖 {model_id}",
+                    "desc": "Модель из FreeLLM API",
+                    "temp": 0.7,
+                    "max_tokens": 8192
+                }
+        if new_models:
+            AVAILABLE_AI_MODELS = new_models
+            logger.info(f"✅ Загружено {len(AVAILABLE_AI_MODELS)} моделей из FreeLLM API")
+        else:
+            logger.warning("⚠️ API вернул пустой список моделей — используем статический")
+            AVAILABLE_AI_MODELS = STATIC_AI_MODELS.copy()
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка загрузки моделей из API: {e} — используем статический список")
+        AVAILABLE_AI_MODELS = STATIC_AI_MODELS.copy()
+
 async def fetch_available_models() -> set[str]:
     if not freellmapi_session or not FREELLMAPI_API_KEY:
         return set()
@@ -1232,6 +1288,26 @@ async def ping_model(model_name: str) -> tuple[bool, float]:
     except Exception as e:
         logger.debug(f"Ping error {model_name}: {e}")
         return False, 0.0
+
+
+@dp.message(Command("refreshmodels"))
+async def cmd_refreshmodels(m: Message):
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    status = await m.answer(f"{EMOJI['settings']} Обновляю список моделей из FreeLLM API...", parse_mode="HTML")
+    await refresh_available_models()
+    model_keys = list(AVAILABLE_AI_MODELS.keys())
+    model_list = ", ".join([f"<code>{k}</code>" for k in model_keys[:15]])
+    if len(model_keys) > 15:
+        model_list += f" <i>и ещё {len(model_keys)-15}...</i>"
+    await status.edit_text(
+        f"{EMOJI['check']} <b>Список моделей обновлён!</b>\n\n"
+        f"📊 Доступно: <b>{len(model_keys)}</b> моделей\n"
+        f"📝 Первые 15: {model_list}\n\n"
+        f"<i>Используй /model чтобы выбрать модель</i>",
+        parse_mode="HTML"
+    )
+    logger.info(f"🔄 Список моделей обновлён вручную: {len(model_keys)} моделей")
 
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
@@ -1701,6 +1777,7 @@ async def on_noop_callback(callback: CallbackQuery):
 async def main():
     await init_log_bot()
     init_freellmapi_http()
+    await refresh_available_models()
     load_forwarded()
     load_users()
     load_settings()
