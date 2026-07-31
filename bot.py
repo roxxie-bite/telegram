@@ -1297,16 +1297,18 @@ async def cmd_refreshmodels(m: Message):
     status = await m.answer(f"{EMOJI['settings']} Обновляю список моделей из FreeLLM API...", parse_mode="HTML")
     await refresh_available_models()
     model_keys = list(AVAILABLE_AI_MODELS.keys())
-    model_list = ", ".join([f"<code>{k}</code>" for k in model_keys[:15]])
-    if len(model_keys) > 15:
-        model_list += f" <i>и ещё {len(model_keys)-15}...</i>"
-    await status.edit_text(
-        f"{EMOJI['check']} <b>Список моделей обновлён!</b>\n\n"
-        f"📊 Доступно: <b>{len(model_keys)}</b> моделей\n"
-        f"📝 Первые 15: {model_list}\n\n"
-        f"<i>Используй /model чтобы выбрать модель</i>",
-        parse_mode="HTML"
-    )
+    # Формируем список моделей, разбивая на строки чтобы не превысить лимит
+    model_lines = []
+    for k in model_keys:
+        info = AVAILABLE_AI_MODELS.get(k, {})
+        current = "✅" if k == current_ai_model else "•"
+        model_lines.append(f"{current} <code>{k}</code> — {info.get('display', k)}")
+
+    txt = f"{EMOJI['check']} <b>Список моделей обновлён!</b>\n\n"
+    txt += f"📊 Доступно: <b>{len(model_keys)}</b> моделей\n\n"
+    txt += "\n".join(model_lines)
+    txt += f"\n\n<i>Используй /model &lt;ключ&gt; чтобы выбрать модель</i>"
+    await send_long_message(m, txt, parse_mode="HTML")
     logger.info(f"🔄 Список моделей обновлён вручную: {len(model_keys)} моделей")
 
 @dp.message(Command("model"))
@@ -1325,7 +1327,7 @@ async def cmd_model(m: Message):
             txt += f"   <code>/model {key}</code>\n\n"
         txt += f"<b>Текущая:</b> <code>{current_ai_model}</code>\n"
         txt += f"<i>Используй /model &lt;ключ&gt; чтобы сменить. При смене модель будет проверена автоматически.</i>"
-        await m.answer(txt, parse_mode="HTML")
+        await send_long_message(m, txt, parse_mode="HTML")
         return
     new_model_key = parts[1].lower()
     if new_model_key not in AVAILABLE_AI_MODELS:
