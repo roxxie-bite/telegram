@@ -52,6 +52,9 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
 # ================= FREELLM API =================
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY")
 FREELLMAPI_BASE_URL = os.getenv("FREELLMAPI_BASE_URL", "http://localhost:3001/v1").rstrip("/")
+FREELLMAPI_IMAGE_URL = FREELLMAPI_BASE_URL + "/images/generations"
+FREELLMAPI_AUDIO_SPEECH_URL = FREELLMAPI_BASE_URL + "/audio/speech"
+FREELLMAPI_AUDIO_TRANSCRIPT_URL = FREELLMAPI_BASE_URL + "/audio/transcriptions"
 FREELLMAPI_CHAT_URL = FREELLMAPI_BASE_URL + "/chat/completions"
 FREELLMAPI_MODELS_URL = FREELLMAPI_BASE_URL + "/models"
 
@@ -777,6 +780,8 @@ def mark_user_forwarded(user_id):
         known_users[user_id]["forwarded"] = True
         save_users()
 
+# ================= FREELLM API HTTP CLIENT (расширенный) =================
+
 async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) -> dict:
     model_key = model_key or current_ai_model
     model_info = AVAILABLE_AI_MODELS.get(model_key, AVAILABLE_AI_MODELS[DEFAULT_AI_MODEL])
@@ -834,6 +839,97 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
         return {"success": False, "error": "🌐 Ошибка соединения. Проверь, что FreeLLM API запущен на " + FREELLMAPI_BASE_URL}
     except Exception as e:
         logger.error(f"❌ FreeLLM API HTTP error: {str(e)}")
+        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
+
+
+async def generate_image(prompt: str, model: str = "auto", size: str = "1024x1024") -> dict:
+    """Генерация изображения через /v1/images/generations"""
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
+        return {"success": False, "error": "FreeLLM API не инициализирован"}
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "size": size,
+    }
+    try:
+        def _post():
+            return freellmapi_session.post(FREELLMAPI_IMAGE_URL, json=payload, timeout=60)
+        r = await asyncio.to_thread(_post)
+        if r.status_code == 200:
+            data = r.json()
+            images = data.get("data", [])
+            if images and images[0].get("url"):
+                return {"success": True, "url": images[0]["url"], "revised_prompt": images[0].get("revised_prompt", "")}
+            return {"success": False, "error": "Пустой ответ от API изображений"}
+        elif r.status_code == 429:
+            return {"success": False, "error": "🔄 Лимит генерации изображений. Подожди."}
+        elif r.status_code >= 500:
+            return {"success": False, "error": "⚠️ Серверная ошибка при генерации изображения."}
+        else:
+            return {"success": False, "error": f"⚠️ HTTP {r.status_code}: {r.text[:150]}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Таймаут генерации изображения."}
+    except Exception as e:
+        logger.error(f"❌ Image generation error: {e}")
+        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
+
+
+async def generate_speech(text: str, model: str = "tts-1", voice: str = "alloy") -> dict:
+    """Генерация аудио через /v1/audio/speech"""
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
+        return {"success": False, "error": "FreeLLM API не инициализирован"}
+    payload = {
+        "model": model,
+        "input": text,
+        "voice": voice,
+    }
+    try:
+        def _post():
+            return freellmapi_session.post(FREELLMAPI_AUDIO_SPEECH_URL, json=payload, timeout=60)
+        r = await asyncio.to_thread(_post)
+        if r.status_code == 200:
+            return {"success": True, "audio_bytes": r.content}
+        elif r.status_code == 429:
+            return {"success": False, "error": "🔄 Лимит TTS. Подожди."}
+        elif r.status_code >= 500:
+            return {"success": False, "error": "⚠️ Серверная ошибка TTS."}
+        else:
+            return {"success": False, "error": f"⚠️ HTTP {r.status_code}: {r.text[:150]}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Таймаут генерации аудио."}
+    except Exception as e:
+        logger.error(f"❌ TTS error: {e}")
+        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
+
+
+async def transcribe_audio(file_path: str, model: str = "whisper-1") -> dict:
+    """Распознавание речи через /v1/audio/transcriptions"""
+    if not freellmapi_session or not FREELLMAPI_API_KEY:
+        return {"success": False, "error": "FreeLLM API не инициализирован"}
+    try:
+        def _post():
+            with open(file_path, "rb") as f:
+                files = {"file": f}
+                data = {"model": model}
+                return freellmapi_session.post(FREELLMAPI_AUDIO_TRANSCRIPT_URL, files=files, data=data, timeout=60)
+        r = await asyncio.to_thread(_post)
+        if r.status_code == 200:
+            data = r.json()
+            text = data.get("text", "").strip()
+            if text:
+                return {"success": True, "text": text}
+            return {"success": False, "error": "Пустой результат транскрипции"}
+        elif r.status_code == 429:
+            return {"success": False, "error": "🔄 Лимит распознавания речи. Подожди."}
+        elif r.status_code >= 500:
+            return {"success": False, "error": "⚠️ Серверная ошибка распознавания."}
+        else:
+            return {"success": False, "error": f"⚠️ HTTP {r.status_code}: {r.text[:150]}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Таймаут распознавания речи."}
+    except Exception as e:
+        logger.error(f"❌ Transcription error: {e}")
         return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
@@ -916,6 +1012,77 @@ async def handle_ai_conversation(m: Message):
     else:
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
         logger.warning(f"⚠️ AI диалог [{user_id}] ошибка: {result['error']}")
+
+@dp.message(lambda m: m.from_user.id in ai_conversations and m.voice)
+async def handle_ai_voice(m: Message):
+    """Распознавание голоса в режиме AI-диалога"""
+    user_id = m.from_user.id
+    voice = m.voice
+
+    # Скачиваем голосовое
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Слушаю...</i>", parse_mode="HTML")
+    try:
+        file = await bot.get_file(voice.file_id)
+        file_path = f"/tmp/ai_voice_{user_id}_{voice.file_unique_id}.ogg"
+        await bot.download_file(file.file_path, file_path)
+
+        # Конвертируем в mp3 если нужно (whisper принимает mp3, m4a, wav, ogg)
+        # OGG от Telegram обычно работает напрямую
+        result = await transcribe_audio(file_path)
+
+        # Удаляем временный файл
+        try:
+            os.remove(file_path)
+        except:
+            pass
+
+        if not result["success"]:
+            await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+            return
+
+        transcribed_text = result["text"]
+        await status_msg.edit_text(f"🎤 <i>{safe_html_text(transcribed_text[:200])}</i>", parse_mode="HTML")
+
+        # Отправляем распознанный текст в тот же AI-диалог
+        ai_conversations[user_id].append({"role": "user", "text": transcribed_text})
+        if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
+            ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
+
+        think_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
+        history = ai_conversations[user_id][:-1]
+        ai_result = await ask_ai_http(transcribed_text, history=history)
+
+        if ai_result["success"]:
+            answer_text = ai_result["text"]
+            ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
+            answer_html = markdown_to_html(answer_text)
+
+            if len(answer_html) <= MAX_MESSAGE_LENGTH:
+                try:
+                    await think_msg.edit_text(answer_html, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось отредактировать: {e}")
+                    await think_msg.delete()
+                    await send_long_message(m, answer_html, parse_mode="HTML")
+            else:
+                try:
+                    await think_msg.delete()
+                except Exception:
+                    pass
+                await send_long_message(m, answer_html, parse_mode="HTML")
+
+            logger.info(f"🤖 AI голос [{user_id}]: '{transcribed_text[:50]}...' → ответ ({len(answer_html)} символов)")
+        else:
+            await think_msg.edit_text(f"{EMOJI['error']} {ai_result['error']}", parse_mode="HTML")
+            logger.warning(f"⚠️ AI голос [{user_id}] ошибка: {ai_result['error']}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки голосового: {e}")
+        await status_msg.edit_text(f"{EMOJI['error']} Ошибка обработки голоса: {str(e)[:100]}", parse_mode="HTML")
+        try:
+            os.remove(file_path)
+        except:
+            pass
 
 
 # 3. И только потом пересылка обычных сообщений не-владельцев
@@ -1540,6 +1707,75 @@ async def handle_conversion_input(m: Message):
         await m.answer(f"{EMOJI['error']} Ошибка", parse_mode="HTML")
     finally: awaiting_conversion.discard(user_id)
 
+
+@dp.message(Command("image", "img"))
+async def cmd_image(m: Message):
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+    if not prompt:
+        await m.answer(
+            f"{EMOJI['info']} <b>Генерация изображения</b>\n\n"
+            f"<code>/image &lt;описание&gt;</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/image красный лис в осеннем лесу, цифровое искусство</code>",
+            parse_mode="HTML"
+        )
+        return
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Рисую...</i>", parse_mode="HTML")
+    result = await generate_image(prompt)
+    if result["success"]:
+        try:
+            # Скачиваем изображение
+            img_response = await asyncio.to_thread(requests.get, result["url"], timeout=30)
+            img_response.raise_for_status()
+            photo = BufferedInputFile(file=img_response.content, filename="generated.png")
+            caption = f"🎨 <b>Сгенерировано:</b>\n<i>{safe_html_text(prompt[:200])}</i>"
+            if result.get("revised_prompt"):
+                caption += f"\n\n<i>Уточнённый промпт:</i> <code>{safe_html_text(result['revised_prompt'][:150])}</code>"
+            await m.answer_photo(photo=photo, caption=caption, parse_mode="HTML")
+            await status_msg.delete()
+            logger.info(f"🎨 Изображение сгенерировано: '{prompt[:50]}...'")
+        except Exception as e:
+            logger.error(f"❌ Ошибка скачивания/отправки изображения: {e}")
+            await status_msg.edit_text(
+                f"{EMOJI['check']} <b>Готово!</b>\n\n"
+                f"<a href='{result['url']}'>🔗 Открыть изображение</a>\n\n"
+                f"<i>{safe_html_text(prompt[:200])}</i>",
+                parse_mode="HTML"
+            )
+    else:
+        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+        logger.warning(f"⚠️ Image generation error: {result['error']}")
+
+
+@dp.message(Command("say", "tts"))
+async def cmd_say(m: Message):
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await m.answer(
+            f"{EMOJI['info']} <b>Генерация голоса (TTS)</b>\n\n"
+            f"<code>/say &lt;текст&gt;</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/say Привет, мир! Как дела?</code>",
+            parse_mode="HTML"
+        )
+        return
+    text = parts[1].strip()
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Генерирую аудио...</i>", parse_mode="HTML")
+    result = await generate_speech(text)
+    if result["success"]:
+        voice = BufferedInputFile(file=result["audio_bytes"], filename="speech.mp3")
+        await m.answer_voice(voice=voice, caption=f"🗣️ <i>{safe_html_text(text[:100])}</i>", parse_mode="HTML")
+        await status_msg.delete()
+        logger.info(f"🗣️ TTS сгенерировано: '{text[:50]}...'")
+    else:
+        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+        logger.warning(f"⚠️ TTS error: {result['error']}")
+
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT: return
@@ -1688,6 +1924,10 @@ async def cmd_status(message: Message):
     txt += EMOJI["tag"] + f" Теги: <b>{(', '.join(settings['tags']) if settings['tags'] else 'нет (все лоры)')}</b>\n"
     can_use, remaining = check_cooldown(message.from_user.id)
     txt += f"⏱️ Кулдаун: <b>{'готов' if can_use else str(remaining) + ' сек'}</b>\n"
+    txt += f"\n🎨 <b>Медиа API:</b> {'✅' if freellmapi_session else '❌'}"
+    txt += f"\n   /image — генерация изображений"
+    txt += f"\n   /say — текст в голос"
+    txt += f"\n   🎤 — распознавание голоса в /ai"
     txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     if log_handler: 
@@ -1743,19 +1983,43 @@ def parse_ai_inline_query(user_input: str) -> tuple[str, str]:
 
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
-    logger.info(f"🔥 INLINE HANDLER CALLED! Query: '{query.query}'")
     user = query.from_user
     user_input = query.query.strip()
-    logger.info(f"🔍 Inline: user_id={user.id} query='{user_input}'")
+    logger.info(f"🔍 Inline: user_id={user.id} username=@{user.username or 'none'} query='{user_input}'")
+
+    # === РЕЗУЛЬТАТ С ИНФОЙ О ПОЛЬЗОВАТЕЛЕ ===
+    user_info_lines = [f"👤 <b>Пользователь:</b>"]
+    user_info_lines.append(f"🆔 ID: <code>{user.id}</code>")
+    if user.username:
+        user_info_lines.append(f"📛 @{user.username}")
+    user_info_lines.append(f"📝 {safe_html_text(user.full_name)}")
+    user_info_text = "\n".join(user_info_lines)
+
+    results = [
+        InlineQueryResultArticle(
+            id="user_info",
+            title=f"👤 Твой профиль  |  ID: {user.id}",
+            description=f"@{user.username or 'нет ника'}  |  {user.full_name[:30]}",
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/149/149071.png",
+            thumbnail_width=128,
+            thumbnail_height=128,
+            input_message_content=InputTextMessageContent(
+                message_text=user_info_text,
+                parse_mode="HTML"
+            ),
+        )
+    ]
+
+    # === AI-РЕЖИМЫ (если запрос короткий) ===
     if len(user_input) < 2:
-        results = [
+        results.extend([
             InlineQueryResultArticle(
                 id="mode_ask",
-                title="❓ Спросить",
+                title="❓ Спросить AI",
+                description="Задать вопрос нейросети",
                 thumbnail_url="https://img.magnific.com/free-photo/closeup-shot-cute-fox-lying-ground-with-fallen-autumn-leaves_181624-32660.jpg?semt=ais_hybrid&w=740&q=80",
                 thumbnail_width=300,
                 thumbnail_height=300,
-                description="Задать вопрос нейросети",
                 input_message_content=InputTextMessageContent(message_text="❓ Напиши вопрос после выбора..."),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="✍️ Задать вопрос", switch_inline_query_current_chat="ask: ")]
@@ -1763,36 +2027,39 @@ async def inline_search(query: InlineQuery):
             ),
             InlineQueryResultArticle(
                 id="mode_explain",
-                title="📚 Объяснить",
+                title="📚 Объяснить AI",
+                description="Объяснить текст просто",
                 thumbnail_url="https://99px.ru/sstorage/53/2022/10/mid_345671_479468.jpg",
                 thumbnail_width=300,
                 thumbnail_height=300,
-                description="Объяснить текст просто",
                 input_message_content=InputTextMessageContent(message_text="📚 Введи текст для объяснения..."),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="✍️ Ввести текст", switch_inline_query_current_chat="explain: ")]
                 ]),
             ),
-        ]
+        ])
         await query.answer(results=results, cache_time=30, is_personal=True)
         return
+
+    # === AI-ЗАПРОС С ТЕКСТОМ ===
     mode, text = parse_ai_inline_query(user_input)
     if not text:
-        results = [
+        results.append(
             InlineQueryResultArticle(
                 id=f"prompt_{mode}",
                 title="✍️ Введи текст",
+                description="Продолжи писать после режима...",
                 thumbnail_url="https://99px.ru/sstorage/53/2018/12/mid_245780_602075.jpg",
                 thumbnail_width=300,
                 thumbnail_height=300,
-                description="Продолжи писать после режима...",
-                input_message_content=InputTextMessageContent(message_text=f"✍️ Пиши: @looniesbot {mode}: твой текст"),
+                input_message_content=InputTextMessageContent(message_text=f"✍️ Пиши: @{query.bot._me.username if query.bot._me else 'bot'} {mode}: твой текст"),
             )
-        ]
+        )
         await query.answer(results=results, cache_time=0, is_personal=True)
         return
+
     result_id = f"ai_{query.id}"
-    results = [
+    results.append(
         InlineQueryResultArticle(
             id=result_id,
             title="✨ Спросить у AI",
@@ -1805,46 +2072,58 @@ async def inline_search(query: InlineQuery):
                 [InlineKeyboardButton(text="⏳ Обновляется...", callback_data="noop")]
             ]),
         )
-    ]
+    )
     await query.answer(results=results, cache_time=0, is_personal=True)
+
 
 @dp.chosen_inline_result()
 async def on_inline_result_chosen(chosen: ChosenInlineResult):
-    logger.info(f"🔥 CHOSEN_INLINE_RESULT CALLED! result_id={chosen.result_id} query='{chosen.query}'")
+    # Если выбран профиль — ничего не редактируем, он уже готов
+    if chosen.result_id == "user_info":
+        logger.info(f"👤 Пользователь {chosen.from_user.id} выбрал свой профиль")
+        return
+
     if not chosen.result_id.startswith("ai_"):
         return
+
     if not chosen.inline_message_id:
         logger.warning("⚠️ Нет inline_message_id — не могу отредактировать сообщение")
         return
+
+    user = chosen.from_user
     mode, text = parse_ai_inline_query(chosen.query)
     if not text:
         logger.warning(f"⚠️ Пустой текст после парсинга chosen.query='{chosen.query}'")
         return
+
     prompts = {
         "explain": "Объясни просто на русском:",
         "summarize": "Кратко перескажи на русском в 2-3 предложениях:",
         "ask": "Ответь на русском:",
     }
     full_prompt = f"{prompts.get(mode, prompts['ask'])}\n\n{text}"
-    logger.info(f"🤖 Запрос к AI (модель {current_ai_model}): mode={mode} text='{text[:60]}'")
+    logger.info(f"🤖 Запрос к AI (модель {current_ai_model}): mode={mode} text='{text[:60]}' user={user.id}")
     result = await ask_ai_http(full_prompt)
-    logger.info(f"🤖 Ответ от AI: success={result['success']}" + ("" if result["success"] else f" error='{result['error']}'"))
+
+    # Footer с ID/username отправителя
+    footer_lines = ["", "─" * 20, f"👤 <b>Запросил:</b> <code>{user.id}</code>"]
+    if user.username:
+        footer_lines.append(f"📛 @{user.username}")
+    footer = "\n".join(footer_lines)
+
     if result["success"]:
         answer = markdown_to_html(result["text"])
         display_query = text[:400] + "…" if len(text) > 400 else text
         safe_query = safe_html_text(display_query)
-        final_text = f"✨ <b>AI:</b>\n\n<b>Запрос:</b> <i>{safe_query}</i>\n\n{answer}"
+        final_text = f"✨ <b>AI:</b>\n\n<b>Запрос:</b> <i>{safe_query}</i>\n\n{answer}{footer}"
     else:
-        final_text = f"❌ {result['error']}"
+        final_text = f"❌ {result['error']}{footer}"
+
     try:
         await bot.edit_message_text(text=final_text, inline_message_id=chosen.inline_message_id, parse_mode="HTML")
-        logger.info("✅ Inline-сообщение отредактировано с финальным ответом")
+        logger.info(f"✅ Inline-сообщение отредактировано для user={user.id}")
     except Exception as e:
         logger.error(f"❌ Не удалось отредактировать inline-сообщение: {e}")
-
-@dp.callback_query(F.data == "noop")
-async def on_noop_callback(callback: CallbackQuery):
-    await callback.answer()
 
 # ================= MAIN (POLLING) =================
 async def main():
