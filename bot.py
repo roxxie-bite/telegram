@@ -882,16 +882,12 @@ async def handle_ai_conversation(m: Message):
     if not prompt:
         return
 
-    # Добавляем сообщение пользователя в историю
     ai_conversations[user_id].append({"role": "user", "text": prompt})
-
-    # Ограничиваем длину истории
     if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
         ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
 
     status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
 
-    # Передаём историю без последнего сообщения (оно добавится в ask_ai_http отдельно)
     history = ai_conversations[user_id][:-1]
     result = await ask_ai_http(prompt, history=history)
 
@@ -899,7 +895,23 @@ async def handle_ai_conversation(m: Message):
         answer_text = result["text"]
         ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
         answer_html = markdown_to_html(answer_text)
-        await send_long_message(status_msg, answer_html, parse_mode="HTML")
+
+        if len(answer_html) <= MAX_MESSAGE_LENGTH:
+            # Просто редактируем "Думаю..." в ответ
+            try:
+                await status_msg.edit_text(answer_html, parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отредактировать сообщение: {e}")
+                await status_msg.delete()
+                await send_long_message(m, answer_html, parse_mode="HTML")
+        else:
+            # Ответ длинный — удаляем "Думаю..." и шлём частями
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await send_long_message(m, answer_html, parse_mode="HTML")
+
         logger.info(f"🤖 AI диалог [{user_id}]: '{prompt[:50]}...' → ответ ({len(answer_html)} символов)")
     else:
         await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
@@ -1231,13 +1243,17 @@ async def cmd_ai(m: Message):
         result = await ask_ai_http(prompt)
         if result["success"]:
             answer = markdown_to_html(result["text"])
-            await send_long_message(status_msg, f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
+            if len(answer) <= MAX_MESSAGE_LENGTH:
+                await status_msg.edit_text(f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
+            else:
+                await status_msg.delete()
+                await send_long_message(m, f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
             logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
         else:
             await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
             logger.warning(f"⚠️ AI ошибка: {result['error']}")
         return
-
+    
     # Начинаем режим диалога
     ai_conversations[user_id] = []
     model_display = AVAILABLE_AI_MODELS.get(current_ai_model, {}).get("display", current_ai_model)
