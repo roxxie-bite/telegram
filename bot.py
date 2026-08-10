@@ -309,6 +309,8 @@ allowed_ai_users = set()
 if OWNER_ID:
     allowed_ai_users.add(int(OWNER_ID))
 allowed_ai_users |= EXTRA_ALLOWED_AI_USERS
+ai_conversations = {}      # user_id -> list of {"role": "user"|"assistant", "text": str}
+MAX_AI_HISTORY = 20        # храним последние 20 сообщений (10 пар)
 
 allowed_ai_users_env = os.getenv("ALLOWED_AI_USERS", "")
 if allowed_ai_users_env:
@@ -835,29 +837,8 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
         return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
 
 # ================= ОБРАТНАЯ СВЯЗЬ =================
-@dp.message(F.from_user.id != OWNER_ID_INT)
-async def handle_user_message(message: Message):
-    user_id = message.from_user.id
-    if user_id in known_users and known_users[user_id].get("blocked", False):
-        logger.info(f"🚫 Игнорировано сообщение от заблокированного пользователя {user_id}")
-        return
-    if message.text and message.text.strip() == "/start":
-        track_user(user_id, message.from_user.username, message.from_user.full_name)
-        return
-    username = message.from_user.username or None
-    full_name = message.from_user.full_name
-    track_user(user_id, username, full_name)
-    try:
-        forwarded = await message.forward(chat_id=OWNER_ID_INT)
-        forwarded_messages[forwarded.message_id] = user_id
-        save_forwarded()
-        mark_user_forwarded(user_id)
-        moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M')
-        user_info = f"<b>Сообщение от:</b>\n• Имя: {full_name}\n• Username: @{username or 'нет'}\n• ID: <code>{user_id}</code>\n• Время: 🕐 МСК {moscow_time}\n\n<i>Ответьте на пересланное сообщение чтобы ответить</i>"
-        await bot.send_message(chat_id=OWNER_ID_INT, text=user_info, parse_mode="HTML")
-    except Exception as e:
-        logger.error("Ошибка пересылки: " + str(e))
 
+# 1. Сначала ответы владельца на пересланные сообщения
 @dp.message(F.from_user.id == OWNER_ID_INT, F.reply_to_message)
 async def handle_owner_reply(message: Message):
     """Обрабатывает ТОЛЬКО ответы владельца на пересланные сообщения"""
@@ -884,13 +865,70 @@ async def handle_owner_reply(message: Message):
             await message.answer(f"{EMOJI['check']} Ответ отправлен пользователю {user_id}", parse_mode="HTML")
             del forwarded_messages[reply_msg_id]
             save_forwarded()
-            return  # Останавливаем propagation
+            return
         except Exception as e:
             logger.error("Ошибка отправки ответа: " + str(e))
             await message.answer(f"{EMOJI['error']} Не удалось отправить: {str(e)[:100]}", parse_mode="HTML")
-            return  # Останавливаем propagation
+            return
     else:
         logger.info(f"⚠️ message_id={reply_msg_id} не найден в forwarded_messages")
+
+
+# 2. Затем диалог с AI (чтобы перехватывать сообщения до пересылки владельцу)
+@dp.message(lambda m: m.from_user.id in ai_conversations and m.text and not m.text.startswith('/'))
+async def handle_ai_conversation(m: Message):
+    user_id = m.from_user.id
+    prompt = m.text.strip()
+    if not prompt:
+        return
+
+    # Добавляем сообщение пользователя в историю
+    ai_conversations[user_id].append({"role": "user", "text": prompt})
+
+    # Ограничиваем длину истории
+    if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
+        ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
+
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
+
+    # Передаём историю без последнего сообщения (оно добавится в ask_ai_http отдельно)
+    history = ai_conversations[user_id][:-1]
+    result = await ask_ai_http(prompt, history=history)
+
+    if result["success"]:
+        answer_text = result["text"]
+        ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
+        answer_html = markdown_to_html(answer_text)
+        await send_long_message(status_msg, answer_html, parse_mode="HTML")
+        logger.info(f"🤖 AI диалог [{user_id}]: '{prompt[:50]}...' → ответ ({len(answer_html)} символов)")
+    else:
+        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+        logger.warning(f"⚠️ AI диалог [{user_id}] ошибка: {result['error']}")
+
+
+# 3. И только потом пересылка обычных сообщений не-владельцев
+@dp.message(F.from_user.id != OWNER_ID_INT)
+async def handle_user_message(message: Message):
+    user_id = message.from_user.id
+    if user_id in known_users and known_users[user_id].get("blocked", False):
+        logger.info(f"🚫 Игнорировано сообщение от заблокированного пользователя {user_id}")
+        return
+    if message.text and message.text.strip() == "/start":
+        track_user(user_id, message.from_user.username, message.from_user.full_name)
+        return
+    username = message.from_user.username or None
+    full_name = message.from_user.full_name
+    track_user(user_id, username, full_name)
+    try:
+        forwarded = await message.forward(chat_id=OWNER_ID_INT)
+        forwarded_messages[forwarded.message_id] = user_id
+        save_forwarded()
+        mark_user_forwarded(user_id)
+        moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%H:%M')
+        user_info = f"<b>Сообщение от:</b>\n• Имя: {full_name}\n• Username: @{username or 'нет'}\n• ID: <code>{user_id}</code>\n• Время: 🕐 МСК {moscow_time}\n\n<i>Ответьте на пересланное сообщение чтобы ответить</i>"
+        await bot.send_message(chat_id=OWNER_ID_INT, text=user_info, parse_mode="HTML")
+    except Exception as e:
+        logger.error("Ошибка пересылки: " + str(e))
 
 # ================= КОМАНДЫ =================
 @dp.message(Command("users"))
@@ -1173,27 +1211,44 @@ async def cmd_ai(m: Message):
             parse_mode="HTML"
         )
         return
-    prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
-    if not prompt:
-        model_display = AVAILABLE_AI_MODELS.get(current_ai_model, {}).get("display", current_ai_model)
-        await send_long_message(m,
-            f"{EMOJI['info']} <b>Нейросеть ({model_display}):</b>\n\n"
-            f"<code>/ai &lt;твой вопрос или запрос&gt;</code>\n\n"
-            f"<b>Примеры:</b>\n"
-            f"• /ai Объясни квантовую физику простыми словами\n"
-            f"• /ai Напиши код для сортировки списка на Python",
+
+    # Если уже в режиме диалога — завершаем
+    if user_id in ai_conversations:
+        del ai_conversations[user_id]
+        await m.answer(
+            f"{EMOJI['check']} <b>Диалог с AI завершён</b>\n\n"
+            f"<i>История очищена. Используй /ai чтобы начать новый разговор</i>",
             parse_mode="HTML"
         )
+        logger.info(f"🛑 AI-диалог завершён для пользователя {user_id}")
         return
-    status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
-    result = await ask_ai_http(prompt)
-    if result["success"]:
-        answer = markdown_to_html(result["text"])
-        await send_long_message(status_msg, f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
-        logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
-    else:
-        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
-        logger.warning(f"⚠️ AI ошибка: {result['error']}")
+
+    prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+
+    # Если есть текст — одноразовый запрос (старая логика)
+    if prompt:
+        status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
+        result = await ask_ai_http(prompt)
+        if result["success"]:
+            answer = markdown_to_html(result["text"])
+            await send_long_message(status_msg, f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
+            logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
+        else:
+            await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+            logger.warning(f"⚠️ AI ошибка: {result['error']}")
+        return
+
+    # Начинаем режим диалога
+    ai_conversations[user_id] = []
+    model_display = AVAILABLE_AI_MODELS.get(current_ai_model, {}).get("display", current_ai_model)
+    await m.answer(
+        f"{EMOJI['brain']} <b>Режим диалога с AI включён</b>\n\n"
+        f"🤖 Модель: <b>{model_display}</b>\n"
+        f"💬 Просто пиши сообщения — я буду отвечать с учётом контекста.\n\n"
+        f"<i>Напиши /ai ещё раз чтобы завершить разговор</i>",
+        parse_mode="HTML"
+    )
+    logger.info(f"🟢 AI-диалог начат для пользователя {user_id}")
 
 
 # ================= ДИНАМИЧЕСКАЯ ЗАГРУЗКА МОДЕЛЕЙ =================
