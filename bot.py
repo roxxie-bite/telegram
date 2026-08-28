@@ -29,6 +29,19 @@ if os.path.exists(_env_path):
                 value = value.strip().strip('"').strip("'")
                 os.environ[key] = value
 
+
+
+# ================= YANDEX MUSIC NOW PLAYING =================
+YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN")
+YM_TARGET_CHAT_ID = os.getenv("YM_TARGET_CHAT_ID")
+
+ym_client = None          # ClientAsync
+ym_last_track_id = None   # чтобы не спамить одним треком
+ym_task = None            # ссылка на фоновую задачу
+ym_enabled = False
+
+
+
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
@@ -1928,6 +1941,7 @@ async def cmd_status(message: Message):
     txt += f"\n   /image — генерация изображений"
     txt += f"\n   /say — текст в голос"
     txt += f"\n   🎤 — распознавание голоса в /ai"
+    txt += f"\n🎵 <b>Yandex Music:</b> {'✅' if YANDEX_MUSIC_TOKEN else '❌'} | Группа: {YM_TARGET_CHAT_ID or '—'}"
     txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     if log_handler: 
@@ -2125,6 +2139,190 @@ async def on_inline_result_chosen(chosen: ChosenInlineResult):
     except Exception as e:
         logger.error(f"❌ Не удалось отредактировать inline-сообщение: {e}")
 
+# ================= YANDEX MUSIC: ИНИЦИАЛИЗАЦИЯ =================
+async def init_yandex_music():
+    global ym_client
+    if not YANDEX_MUSIC_TOKEN:
+        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан — Now Playing недоступен")
+        return False
+    try:
+        from yandex_music import ClientAsync
+        ym_client = await ClientAsync(YANDEX_MUSIC_TOKEN).init()
+        me = ym_client.me
+        logger.info(f"✅ Yandex Music: авторизован как {me.account.display_name or me.account.login}")
+        return True
+    except ImportError:
+        logger.warning("⚠️ yandex-music не установлен. Установи: pip install 'yandex-music[async,ynison]'")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Yandex Music init error: {e}")
+        return False
+
+
+# ================= YANDEX MUSIC: ФОНОВЫЙ МОНИТОРИНГ =================
+async def ym_now_playing_loop():
+    """Периодически опрашивает Ynison и шлёт 'Сейчас слушает' в группу"""
+    global ym_last_track_id, ym_enabled
+    if not YANDEX_MUSIC_TOKEN or not YM_TARGET_CHAT_ID:
+        return
+
+    try:
+        from yandex_music.ynison import simple_async
+    except ImportError:
+        logger.warning("⚠️ Ynison недоступен. Установи: pip install 'yandex-music[async,ynison]'")
+        return
+
+    ym_enabled = True
+    logger.info("🎵 Now Playing: цикл запущен")
+
+    while bot_running and ym_enabled:
+        try:
+            track = await simple_async.get_current_track(YANDEX_MUSIC_TOKEN, timeout=10.0)
+            if track and track.playable_id:
+                if track.playable_id != ym_last_track_id:
+                    ym_last_track_id = track.playable_id
+                    await send_now_playing(track)
+            else:
+                ym_last_track_id = None
+        except Exception as e:
+            logger.warning(f"⚠️ YM polling error: {e}")
+
+        await asyncio.sleep(10)  # проверяем каждые 10 сек
+
+    logger.info("🎵 Now Playing: цикл остановлен")
+
+
+async def send_now_playing(playable):
+    """Формирует и отправляет сообщение 'Сейчас слушает' с обложкой"""
+    global ym_client
+    if not ym_client:
+        return
+
+    try:
+        # Получаем полную инфу о треке
+        full_tracks = await ym_client.tracks([playable.playable_id])
+        if not full_tracks:
+            return
+        track = full_tracks[0]
+
+        title = track.title or "Unknown"
+        artists = ", ".join([a.name for a in track.artists]) if track.artists else "Unknown Artist"
+
+        # Ищем обложку: сначала у трека, потом у альбома
+        cover_uri = None
+        if track.cover_uri:
+            cover_uri = track.cover_uri
+        elif track.albums and track.albums[0].cover_uri:
+            cover_uri = track.albums[0].cover_uri
+
+        cover_url = None
+        if cover_uri:
+            cover_url = cover_uri.replace("%%", "400x400")
+            if not cover_url.startswith("http"):
+                cover_url = f"https://{cover_url}"
+
+        # Формируем текст
+        text = (
+            f"🎵 <b>Сейчас слушает</b>\n\n"
+            f"🎤 <b>{safe_html_text(title)}</b>\n"
+            f"👤 {safe_html_text(artists)}\n\n"
+            f"<a href='https://music.yandex.ru/track/{track.id}'>🔗 Открыть в Яндекс.Музыке</a>"
+        )
+
+        # Отправляем
+        if cover_url:
+            try:
+                img_resp = await asyncio.to_thread(requests.get, cover_url, timeout=15)
+                img_resp.raise_for_status()
+                photo = BufferedInputFile(file=img_resp.content, filename="cover.jpg")
+                await bot.send_photo(
+                    chat_id=YM_TARGET_CHAT_ID,
+                    photo=photo,
+                    caption=text,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                # Если обложка не загрузилась — шлём текстом
+                await bot.send_message(chat_id=YM_TARGET_CHAT_ID, text=text, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=YM_TARGET_CHAT_ID, text=text, parse_mode="HTML")
+
+        logger.info(f"🎵 Now playing sent: {artists} — {title}")
+
+    except Exception as e:
+        logger.error(f"❌ send_now_playing error: {e}")
+
+
+# ================= КОМАНДЫ YANDEX MUSIC =================
+@dp.message(Command("ymnow"))
+async def cmd_ymnow(m: Message):
+    """Вручную запросить текущий трек"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    if not YANDEX_MUSIC_TOKEN:
+        await m.answer(f"{EMOJI['error']} YANDEX_MUSIC_TOKEN не задан", parse_mode="HTML")
+        return
+
+    status = await m.answer(f"{EMOJI['brain']} <i>Проверяю, что сейчас играет...</i>", parse_mode="HTML")
+
+    try:
+        from yandex_music.ynison import simple_async
+        track = await simple_async.get_current_track(YANDEX_MUSIC_TOKEN, timeout=10.0)
+        if track:
+            await send_now_playing(track)
+            await status.edit_text(f"{EMOJI['check']} Отправлено в группу!", parse_mode="HTML")
+        else:
+            await status.edit_text(f"{EMOJI['warning']} Сейчас ничего не играет", parse_mode="HTML")
+    except Exception as e:
+        await status.edit_text(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
+
+
+@dp.message(Command("ymstart"))
+async def cmd_ymstart(m: Message):
+    """Запустить фоновый мониторинг треков"""
+    global ym_task, ym_enabled
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    if not YANDEX_MUSIC_TOKEN or not YM_TARGET_CHAT_ID:
+        await m.answer(f"{EMOJI['error']} Не задан YANDEX_MUSIC_TOKEN или YM_TARGET_CHAT_ID", parse_mode="HTML")
+        return
+    if ym_task and not ym_task.done():
+        await m.answer(f"{EMOJI['info']} Мониторинг уже запущен", parse_mode="HTML")
+        return
+
+    ym_enabled = True
+    ym_task = asyncio.create_task(ym_now_playing_loop())
+    await m.answer(f"{EMOJI['check']} <b>Now Playing запущен!</b>\n\nЦелевая группа: <code>{YM_TARGET_CHAT_ID}</code>", parse_mode="HTML")
+    logger.info("🎵 Now Playing запущен вручную")
+
+
+@dp.message(Command("ymstop"))
+async def cmd_ymstop(m: Message):
+    """Остановить фоновый мониторинг"""
+    global ym_task, ym_enabled
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    ym_enabled = False
+    if ym_task:
+        ym_task.cancel()
+        ym_task = None
+    await m.answer(f"{EMOJI['check']} <b>Now Playing остановлен</b>", parse_mode="HTML")
+    logger.info("🎵 Now Playing остановлен вручную")
+
+
+@dp.message(Command("ymstatus"))
+async def cmd_ymstatus(m: Message):
+    """Показать статус Yandex Music интеграции"""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    txt = f"{EMOJI['settings']} <b>Yandex Music:</b>\n\n"
+    txt += f"🔑 Токен: {'✅' if YANDEX_MUSIC_TOKEN else '❌'}\n"
+    txt += f"💬 Группа: <code>{YM_TARGET_CHAT_ID or 'не задана'}</code>\n"
+    txt += f"🎵 Мониторинг: <b>{'▶️ Активен' if ym_task and not ym_task.done() else '⏹️ Остановлен'}</b>\n"
+    if ym_last_track_id:
+        txt += f"📝 Последний трек ID: <code>{ym_last_track_id}</code>\n"
+    await m.answer(txt, parse_mode="HTML")
+
 # ================= MAIN (POLLING) =================
 async def main():
     await init_log_bot()
@@ -2137,6 +2335,11 @@ async def main():
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time}")
     await dp.start_polling(bot)
+        # Инициализация Yandex Music (опционально)
+    await init_yandex_music()
+    if YANDEX_MUSIC_TOKEN and YM_TARGET_CHAT_ID:
+        ym_task = asyncio.create_task(ym_now_playing_loop())
+        logger.info("🎵 Yandex Music Now Playing loop запущен")
 
 if __name__ == "__main__":
     try:
