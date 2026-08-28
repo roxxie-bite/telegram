@@ -2337,12 +2337,13 @@ async def main():
     load_memory()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time}")
-    await dp.start_polling(bot)
-        # Инициализация Yandex Music (опционально)
+            # Инициализация Yandex Music (опционально)
     await init_yandex_music()
     if YANDEX_MUSIC_TOKEN and YM_TARGET_CHAT_ID:
         ym_task = asyncio.create_task(ym_now_playing_loop())
         logger.info("🎵 Yandex Music Now Playing loop запущен")
+    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     try:
