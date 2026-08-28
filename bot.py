@@ -37,6 +37,7 @@ YM_TARGET_CHAT_ID = os.getenv("YM_TARGET_CHAT_ID")
 
 ym_client = None          # ClientAsync
 ym_last_track_id = None   # чтобы не спамить одним треком
+ym_last_message_id = None # ID последнего отправленного сообщения "Now Playing"
 ym_task = None            # ссылка на фоновую задачу
 ym_enabled = False
 
@@ -1618,34 +1619,34 @@ async def ym_now_playing_loop():
 
 
 async def send_now_playing(playable):
-    """Формирует и отправляет сообщение 'Сейчас слушает' с обложкой"""
-    global ym_client
+   async def send_now_playing(playable):
+    """Формирует и отправляет сообщение 'Сейчас слушает' с обложкой, удаляя предыдущее"""
+    global ym_client, ym_last_message_id
     if not ym_client:
         return
-
+    
     try:
         # Получаем полную инфу о треке
         full_tracks = await ym_client.tracks([playable.playable_id])
         if not full_tracks:
             return
         track = full_tracks[0]
-
         title = track.title or "Unknown"
         artists = ", ".join([a.name for a in track.artists]) if track.artists else "Unknown Artist"
-
+        
         # Ищем обложку: сначала у трека, потом у альбома
         cover_uri = None
         if track.cover_uri:
             cover_uri = track.cover_uri
         elif track.albums and track.albums[0].cover_uri:
             cover_uri = track.albums[0].cover_uri
-
+        
         cover_url = None
         if cover_uri:
             cover_url = cover_uri.replace("%%", "400x400")
             if not cover_url.startswith("http"):
                 cover_url = f"https://{cover_url}"
-
+        
         # Формируем текст
         text = (
             f"🎵 <b>Сейчас слушает</b>\n\n"
@@ -1653,27 +1654,51 @@ async def send_now_playing(playable):
             f"👤 {safe_html_text(artists)}\n\n"
             f"<a href='https://music.yandex.ru/track/{track.id}'>🔗 Открыть в Яндекс.Музыке</a>"
         )
-
-        # Отправляем
+        
+        # === УДАЛЯЕМ СТАРОЕ СООБЩЕНИЕ ===
+        if ym_last_message_id:
+            try:
+                await bot.delete_message(
+                    chat_id=YM_TARGET_CHAT_ID,
+                    message_id=ym_last_message_id
+                )
+                logger.debug(f"🗑️ Удалено старое Now Playing сообщение: {ym_last_message_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось удалить старое сообщение: {e}")
+            ym_last_message_id = None
+        
+        # === ОТПРАВЛЯЕМ НОВОЕ СООБЩЕНИЕ ===
+        new_message = None
         if cover_url:
             try:
                 img_resp = await asyncio.to_thread(requests.get, cover_url, timeout=15)
                 img_resp.raise_for_status()
                 photo = BufferedInputFile(file=img_resp.content, filename="cover.jpg")
-                await bot.send_photo(
+                new_message = await bot.send_photo(
                     chat_id=YM_TARGET_CHAT_ID,
                     photo=photo,
                     caption=text,
                     parse_mode="HTML"
                 )
-            except Exception:
-                # Если обложка не загрузилась — шлём текстом
-                await bot.send_message(chat_id=YM_TARGET_CHAT_ID, text=text, parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отправить с обложкой: {e}, отправляю текстом")
+                new_message = await bot.send_message(
+                    chat_id=YM_TARGET_CHAT_ID, 
+                    text=text, 
+                    parse_mode="HTML"
+                )
         else:
-            await bot.send_message(chat_id=YM_TARGET_CHAT_ID, text=text, parse_mode="HTML")
-
-        logger.info(f"🎵 Now playing sent: {artists} — {title}")
-
+            new_message = await bot.send_message(
+                chat_id=YM_TARGET_CHAT_ID, 
+                text=text, 
+                parse_mode="HTML"
+            )
+        
+        # === СОХРАНЯЕМ ID НОВОГО СООБЩЕНИЯ ===
+        if new_message:
+            ym_last_message_id = new_message.message_id
+        
+        logger.info(f"🎵 Now playing sent: {artists} — {title} (msg_id: {ym_last_message_id})")
     except Exception as e:
         logger.error(f"❌ send_now_playing error: {e}")
 
@@ -1682,14 +1707,13 @@ async def send_now_playing(playable):
 @dp.message(Command("ymnow"))
 async def cmd_ymnow(m: Message):
     """Вручную запросить текущий трек"""
+    global ym_last_message_id
     if m.from_user.id != OWNER_ID_INT:
         return
     if not YANDEX_MUSIC_TOKEN:
         await m.answer(f"{EMOJI['error']} YANDEX_MUSIC_TOKEN не задан", parse_mode="HTML")
         return
-
     status = await m.answer(f"{EMOJI['brain']} <i>Проверяю, что сейчас играет...</i>", parse_mode="HTML")
-
     try:
         from yandex_music.ynison import simple_async
         track = await simple_async.get_current_track(YANDEX_MUSIC_TOKEN, timeout=10.0)
@@ -1697,10 +1721,20 @@ async def cmd_ymnow(m: Message):
             await send_now_playing(track)
             await status.edit_text(f"{EMOJI['check']} Отправлено в группу!", parse_mode="HTML")
         else:
+            # Если ничего не играет - удаляем старое сообщение
+            if ym_last_message_id:
+                try:
+                    await bot.delete_message(
+                        chat_id=YM_TARGET_CHAT_ID,
+                        message_id=ym_last_message_id
+                    )
+                    ym_last_message_id = None
+                    logger.debug(f"🗑️ Удалено старое сообщение (ничего не играет)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось удалить сообщение: {e}")
             await status.edit_text(f"{EMOJI['warning']} Сейчас ничего не играет", parse_mode="HTML")
     except Exception as e:
         await status.edit_text(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
-
 
 @dp.message(Command("ymstart"))
 async def cmd_ymstart(m: Message):
