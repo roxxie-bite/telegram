@@ -71,7 +71,7 @@ allowed_e621_users = set()
 if OWNER_ID:
     allowed_e621_users.add(int(OWNER_ID))
 
-allowed_e621_users_env = os.getenv("ALLOWED_E621_USERS", 8371541704, 5802195555)
+allowed_e621_users_env = os.getenv("ALLOWED_E621_USERS", "")
 if allowed_e621_users_env:
     for uid_str in allowed_e621_users_env.split(","):
         uid_str = uid_str.strip()
