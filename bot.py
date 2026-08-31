@@ -252,108 +252,6 @@ def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
     return "\n".join(lines)
 
 
-# ================= КОМАНДЫ E621 WIKI =================
-
-@dp.message(Command("taginfo", "wiki"))
-async def cmd_taginfo(m: Message):
-    """Показывает wiki-информацию о теге e621."""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    parts = m.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await m.answer(
-            f"{{EMOJI['info']}} <b>Поиск по вики e621</b>\n\n"
-            f"<code>/taginfo &lt;тег&gt;</code>\n"
-            f"<code>/wiki &lt;тег&gt;</code>\n\n"
-            f"<b>Примеры:</b>\n"
-            f"<code>/taginfo canine</code>\n"
-            f"<code>/wiki anthro</code>\n"
-            f"<code>/wiki looking_at_viewer</code>\n\n"
-            f"<i>Поддерживаются пробелы (автоматически заменятся на _)</i>",
-            parse_mode="HTML"
-        )
-        return
-
-    tag_name = parts[1].strip()
-    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code> на e621...</i>", parse_mode="HTML")
-
-    # Параллельно запрашиваем тег и wiki
-    tag_task = asyncio.create_task(get_e621_tag_info(tag_name))
-    wiki_task = asyncio.create_task(get_e621_wiki_page(tag_name))
-
-    tag_result = await tag_task
-    wiki_result = await wiki_task
-
-    if not tag_result["success"]:
-        # Если тег не найден, но wiki может быть — покажем wiki
-        if wiki_result.get("success"):
-            wiki = wiki_result["wiki"]
-            body = clean_dtext(wiki.get("body", ""))
-            if len(body) > 1500:
-                body = body[:1500].rsplit(" ", 1)[0] + "..."
-            body_html = markdown_to_html(body)
-            wiki_url = f"https://e621.net/wiki_pages/show_or_new?title={wiki['title']}"
-            text = (
-                f"📖 <b>{safe_html_text(wiki['title'])}</b>\n\n"
-                f"{body_html}\n\n"
-                f"<a href='{wiki_url}'>🔗 Открыть на e621</a>"
-            )
-            await status_msg.edit_text(text, parse_mode="HTML")
-            logger.info(f"📖 Wiki e621: {wiki['title']} (тег не найден, wiki есть)")
-            return
-        await status_msg.edit_text(f"{{EMOJI['error']}} {tag_result['error']}", parse_mode="HTML")
-        return
-
-    tag_data = tag_result["tag"]
-    wiki_data = wiki_result.get("wiki") if wiki_result.get("success") else None
-
-    text = format_tag_info(tag_data, wiki_data)
-
-    # Если текст слишком длинный — разбиваем
-    if len(text) > MAX_MESSAGE_LENGTH:
-        parts_msg = split_long_message(text, MAX_MESSAGE_LENGTH)
-        await status_msg.delete()
-        for i, part in enumerate(parts_msg, 1):
-            if len(parts_msg) > 1:
-                part = f"<i>({i}/{len(parts_msg)})</i>\n" + part
-            await m.answer(part, parse_mode="HTML")
-            if i < len(parts_msg):
-                await asyncio.sleep(0.3)
-    else:
-        await status_msg.edit_text(text, parse_mode="HTML")
-
-    logger.info(f"📖 Tag info e621: {tag_data['name']} (posts: {tag_data['post_count']})")
-
-
-@dp.message(Command("tag"))
-async def cmd_tag(m: Message):
-    """Краткая информация о теге e621 (только тег, без wiki)."""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    parts = m.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await m.answer(
-            f"{{EMOJI['info']}} <b>Инфо о теге e621</b>\n\n"
-            f"<code>/tag &lt;тег&gt;</code>\n\n"
-            f"<b>Пример:</b> <code>/tag fox</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    tag_name = parts[1].strip()
-    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code>...</i>", parse_mode="HTML")
-
-    result = await get_e621_tag_info(tag_name)
-    if not result["success"]:
-        await status_msg.edit_text(f"{{EMOJI['error']}} {result['error']}", parse_mode="HTML")
-        return
-
-    tag_data = result["tag"]
-    text = format_tag_info(tag_data, wiki_data=None)
-    await status_msg.edit_text(text, parse_mode="HTML")
-    logger.info(f"🏷️ Tag quick info e621: {tag_data['name']}")
-
-
 
 # ================= FREELLM API =================
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY")
@@ -1832,6 +1730,108 @@ async def ping_model(model_name: str) -> tuple[bool, float]:
     except Exception as e:
         logger.debug(f"Ping error {model_name}: {e}")
         return False, 0.0
+
+
+# ================= КОМАНДЫ E621 WIKI =================
+
+@dp.message(Command("taginfo", "wiki"))
+async def cmd_taginfo(m: Message):
+    """Показывает wiki-информацию о теге e621."""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await m.answer(
+            f"{{EMOJI['info']}} <b>Поиск по вики e621</b>\n\n"
+            f"<code>/taginfo &lt;тег&gt;</code>\n"
+            f"<code>/wiki &lt;тег&gt;</code>\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>/taginfo canine</code>\n"
+            f"<code>/wiki anthro</code>\n"
+            f"<code>/wiki looking_at_viewer</code>\n\n"
+            f"<i>Поддерживаются пробелы (автоматически заменятся на _)</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    tag_name = parts[1].strip()
+    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code> на e621...</i>", parse_mode="HTML")
+
+    # Параллельно запрашиваем тег и wiki
+    tag_task = asyncio.create_task(get_e621_tag_info(tag_name))
+    wiki_task = asyncio.create_task(get_e621_wiki_page(tag_name))
+
+    tag_result = await tag_task
+    wiki_result = await wiki_task
+
+    if not tag_result["success"]:
+        # Если тег не найден, но wiki может быть — покажем wiki
+        if wiki_result.get("success"):
+            wiki = wiki_result["wiki"]
+            body = clean_dtext(wiki.get("body", ""))
+            if len(body) > 1500:
+                body = body[:1500].rsplit(" ", 1)[0] + "..."
+            body_html = markdown_to_html(body)
+            wiki_url = f"https://e621.net/wiki_pages/show_or_new?title={wiki['title']}"
+            text = (
+                f"📖 <b>{safe_html_text(wiki['title'])}</b>\n\n"
+                f"{body_html}\n\n"
+                f"<a href='{wiki_url}'>🔗 Открыть на e621</a>"
+            )
+            await status_msg.edit_text(text, parse_mode="HTML")
+            logger.info(f"📖 Wiki e621: {wiki['title']} (тег не найден, wiki есть)")
+            return
+        await status_msg.edit_text(f"{{EMOJI['error']}} {tag_result['error']}", parse_mode="HTML")
+        return
+
+    tag_data = tag_result["tag"]
+    wiki_data = wiki_result.get("wiki") if wiki_result.get("success") else None
+
+    text = format_tag_info(tag_data, wiki_data)
+
+    # Если текст слишком длинный — разбиваем
+    if len(text) > MAX_MESSAGE_LENGTH:
+        parts_msg = split_long_message(text, MAX_MESSAGE_LENGTH)
+        await status_msg.delete()
+        for i, part in enumerate(parts_msg, 1):
+            if len(parts_msg) > 1:
+                part = f"<i>({i}/{len(parts_msg)})</i>\n" + part
+            await m.answer(part, parse_mode="HTML")
+            if i < len(parts_msg):
+                await asyncio.sleep(0.3)
+    else:
+        await status_msg.edit_text(text, parse_mode="HTML")
+
+    logger.info(f"📖 Tag info e621: {tag_data['name']} (posts: {tag_data['post_count']})")
+
+
+@dp.message(Command("tag"))
+async def cmd_tag(m: Message):
+    """Краткая информация о теге e621 (только тег, без wiki)."""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await m.answer(
+            f"{{EMOJI['info']}} <b>Инфо о теге e621</b>\n\n"
+            f"<code>/tag &lt;тег&gt;</code>\n\n"
+            f"<b>Пример:</b> <code>/tag fox</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    tag_name = parts[1].strip()
+    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code>...</i>", parse_mode="HTML")
+
+    result = await get_e621_tag_info(tag_name)
+    if not result["success"]:
+        await status_msg.edit_text(f"{{EMOJI['error']}} {result['error']}", parse_mode="HTML")
+        return
+
+    tag_data = result["tag"]
+    text = format_tag_info(tag_data, wiki_data=None)
+    await status_msg.edit_text(text, parse_mode="HTML")
+    logger.info(f"🏷️ Tag quick info e621: {tag_data['name']}")
 
 
 @dp.message(Command("refreshmodels"))
