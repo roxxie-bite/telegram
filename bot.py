@@ -53,6 +53,8 @@ LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 SITE_BASE = "https://lynther.sytes.net"
 
+
+
 EXTRA_ALLOWED_AI_USERS = {
     8371541704,
     5802195555  # gvno
@@ -63,6 +65,21 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
     """Проверяет, есть ли пользователь в списке разрешённых"""
     return user_id in allowed_set
 
+
+# === Разрешённые пользователи для E621 Wiki ===
+allowed_e621_users = set()
+if OWNER_ID:
+    allowed_e621_users.add(int(OWNER_ID))
+
+allowed_e621_users_env = os.getenv("ALLOWED_E621_USERS", 8371541704, 5802195555)
+if allowed_e621_users_env:
+    for uid_str in allowed_e621_users_env.split(","):
+        uid_str = uid_str.strip()
+        if uid_str:
+            try:
+                allowed_e621_users.add(int(uid_str))
+            except ValueError:
+                pass
 
 
 
