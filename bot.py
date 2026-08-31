@@ -66,7 +66,7 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
 
 
 
-# ================= E621 WIKI / TAG INFO (v2) =================
+# ================= E621 WIKI / TAG INFO (v3) =================
 # ВСТАВЬ ЭТОТ БЛОК В bot.py (замени старый блок E621 WIKI)
 
 E621_BASE_URL = "https://e621.net"
@@ -97,20 +97,16 @@ def clean_dtext(text: str) -> str:
     if not text:
         return ""
 
-    # 1. Убираем thumb #id  (превью изображений в wiki)
+    # Убираем thumb #id
     text = re.sub(r'thumb\s+#\d+(?:\s+#\d+)*', '', text)
-
-    # 2. Убираем [nodtext]...[/nodtext] — сырые блоки
+    # [nodtext]
     text = re.sub(r'\[nodtext\](.+?)\[/nodtext\]', r'\1', text, flags=re.DOTALL)
-
-    # 3. Убираем section/subsection полностью (оставляем только содержимое)
+    # section/subsection
     text = re.sub(r'\[section[^\]]*\](.+?)\[/section\]', r'\1', text, flags=re.DOTALL)
     text = re.sub(r'\[subsection[^\]]*\](.+?)\[/subsection\]', r'\1', text, flags=re.DOTALL)
-
-    # 4. Убираем заголовки h1.-h6. в начале строки
+    # Заголовки h1.-h6.
     text = re.sub(r'^h\d+\.\s*', '', text, flags=re.MULTILINE)
-
-    # 5. Форматирование → markdown
+    # Форматирование → markdown
     text = re.sub(r'\[b\](.+?)\[/b\]', r'**\1**', text, flags=re.DOTALL)
     text = re.sub(r'\[i\](.+?)\[/i\]', r'*\1*', text, flags=re.DOTALL)
     text = re.sub(r'\[u\](.+?)\[/u\]', r'__\1__', text, flags=re.DOTALL)
@@ -118,31 +114,42 @@ def clean_dtext(text: str) -> str:
     text = re.sub(r'\[spoiler\](.+?)\[/spoiler\]', r'||\1||', text, flags=re.DOTALL)
     text = re.sub(r'\[code\](.+?)\[/code\]', r'`\1`', text, flags=re.DOTALL)
     text = re.sub(r'\[quote\](.+?)\[/quote\]', r'> \1', text, flags=re.DOTALL)
-
-    # 6. Таблицы → просто текст
+    # Таблицы
     text = re.sub(r'\[table\](.+?)\[/table\]', r'\1', text, flags=re.DOTALL)
     text = re.sub(r'\[tr\](.+?)\[/tr\]', r'\1\n', text, flags=re.DOTALL)
     text = re.sub(r'\[td\](.+?)\[/td\]', r'| \1 ', text, flags=re.DOTALL)
-
-    # 7. Теги и wiki-ссылки
+    # Теги и wiki-ссылки
     text = re.sub(r'\[tag:([^\]]+)\]', r'\1', text)
     text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', r'\2', text)
     text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text)
     text = re.sub(r'\[url=([^\]]+)\](.+?)\[/url\]', r'[\2](\1)', text, flags=re.DOTALL)
-
-    # 8. Убираем цвета [color=...]...[/color]
+    # Цвета
     text = re.sub(r'\[color=[^\]]*\](.+?)\[/color\]', r'\1', text, flags=re.DOTALL)
-
-    # 9. Убираем пустые списки: строки, состоящие только из • * - + и пробелов
+    # Пустые списки
     text = re.sub(r'^[\s•\*\-\+]+$', '', text, flags=re.MULTILINE)
-
-    # 10. Убираем строки, состоящие только из пробелов/пунктуации
     text = re.sub(r'^[\s|_\-\*\+•]+$', '', text, flags=re.MULTILINE)
-
-    # 11. Убираем множественные пустые строки
+    # Пустые строки
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     return text.strip()
+
+
+def make_e621_callback_data(tag_name: str) -> str:
+    """Создаёт callback_data для inline-кнопки e621 тега.
+    Ограничение Telegram: 64 байта."""
+    prefix = "e621|"
+    max_len = 64 - len(prefix)
+    tag = tag_name.strip().lower()
+    if len(tag) > max_len:
+        tag = tag[:max_len]
+    return prefix + tag
+
+
+def parse_e621_callback_data(data: str) -> str | None:
+    """Парсит callback_data обратно в имя тега."""
+    if data.startswith("e621|"):
+        return data[5:]
+    return None
 
 
 async def e621_api_get(endpoint: str, params: dict = None) -> dict:
@@ -240,6 +247,51 @@ async def get_e621_posts(tag_name: str, limit: int = 2) -> list[str]:
     return urls
 
 
+async def get_e621_tag_suggestions(query: str, limit: int = 6) -> list[dict]:
+    """Ищет похожие теги через wildcard. Возвращает список {name, post_count, category}."""
+    search_name = query.strip().lower().replace(" ", "_")
+    # Сначала exact, потом wildcard
+    results = []
+    for pattern in [search_name, f"*{search_name}*"]:
+        if len(pattern) > 40:
+            pattern = search_name
+        result = await e621_api_get("/tags.json", {
+            "search[name_matches]": pattern,
+            "limit": limit,
+        })
+        if result["success"]:
+            for tag in result["data"]:
+                t = {
+                    "name": tag.get("name"),
+                    "post_count": tag.get("post_count", 0),
+                    "category": tag.get("category", 0),
+                }
+                if t["name"] and t not in results:
+                    results.append(t)
+            if len(results) >= limit:
+                break
+    return results[:limit]
+
+
+def build_related_tags_keyboard(related_tags: str, max_buttons: int = 10) -> InlineKeyboardMarkup:
+    """Строит inline-клавиатуру из related tags."""
+    if not related_tags:
+        return None
+    tags = related_tags.split()[:max_buttons]
+    buttons = []
+    row = []
+    for tag in tags:
+        display = tag.replace("_", " ")[:20]
+        cb = make_e621_callback_data(tag)
+        row.append(InlineKeyboardButton(text=display, callback_data=cb))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+
+
 def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
     """Форматирует информацию о теге для Telegram."""
     name = tag_data.get("name", "unknown")
@@ -262,18 +314,12 @@ def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
     if is_locked:
         lines.append(f"🔒 Тег заблокирован")
 
-    if related:
-        related_list = related.split()[:10]
-        related_str = ", ".join(f"<code>{safe_html_text(t)}</code>" for t in related_list)
-        lines.append(f"🔗 Связанные: {related_str}")
-
     lines.append(f"")
     lines.append(f"<a href='{wiki_url}'>📖 Wiki</a> | <a href='{search_url}'>🖼️ Посты</a>")
 
     if wiki_data and wiki_data.get("body"):
         body = clean_dtext(wiki_data["body"])
         if body:
-            # Ограничиваем длину
             if len(body) > 1200:
                 body = body[:1200].rsplit(" ", 1)[0] + "..."
             body_html = markdown_to_html(body)
@@ -285,8 +331,6 @@ def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
         lines.append(f"<i>Wiki-страница не найдена</i>")
 
     return "\n".join(lines)
-
-
 
 
 # ================= FREELLM API =================
@@ -1772,7 +1816,7 @@ async def ping_model(model_name: str) -> tuple[bool, float]:
 
 @dp.message(Command("taginfo", "wiki"))
 async def cmd_taginfo(m: Message):
-    """Показывает wiki-информацию о теге e621 + 1-2 примера изображений."""
+    """Показывает wiki-информацию о теге e621 + 1-2 примера изображений + кнопки related tags."""
     if m.from_user.id != OWNER_ID_INT:
         return
     parts = m.text.split(maxsplit=1)
@@ -1785,7 +1829,8 @@ async def cmd_taginfo(m: Message):
             f"<code>/taginfo canine</code>\n"
             f"<code>/wiki anthro</code>\n"
             f"<code>/wiki looking_at_viewer</code>\n\n"
-            f"<i>Поддерживаются пробелы (автоматически заменятся на _)</i>",
+            f"<i>• Теги в Related tags можно нажимать — откроется инфо о теге</i>\n"
+            f"<i>• Если тег не найден — бот предложит похожие варианты</i>",
             parse_mode="HTML"
         )
         return
@@ -1806,37 +1851,35 @@ async def cmd_taginfo(m: Message):
     image_urls = await posts_task
 
     if not tag_result["success"]:
-        # Если тег не найден, но wiki может быть — покажем wiki
-        if wiki_result.get("success"):
-            wiki = wiki_result["wiki"]
-            body = clean_dtext(wiki.get("body", ""))
-            if body and len(body) > 1500:
-                body = body[:1500].rsplit(" ", 1)[0] + "..."
-            body_html = markdown_to_html(body) if body else ""
-            wiki_url = f"https://e621.net/wiki_pages/show_or_new?title={wiki['title']}"
-            text = (
-                f"📖 <b>{safe_html_text(wiki['title'])}</b>\n\n"
-                f"{body_html}\n\n"
-                f"<a href='{wiki_url}'>🔗 Открыть на e621</a>"
+        # Тег не найден — предлагаем похожие
+        suggestions = await get_e621_tag_suggestions(tag_name, limit=6)
+        if suggestions:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=f"{s['name'].replace('_', ' ')} ({s['post_count']:,})".replace(",", " "),
+                    callback_data=make_e621_callback_data(s["name"])
+                )]
+                for s in suggestions
+            ])
+            await status_msg.edit_text(
+                f"{EMOJI['warning']} Тег <code>{safe_html_text(tag_name)}</code> не найден на e621.\n\n"
+                f"<b>Возможно, вы имели в виду:</b>",
+                parse_mode="HTML",
+                reply_markup=kb
             )
-            await status_msg.edit_text(text, parse_mode="HTML")
-            # Отправляем примеры изображений если есть
-            if image_urls:
-                for url in image_urls:
-                    try:
-                        await m.answer_photo(photo=url)
-                        await asyncio.sleep(0.3)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Не удалось отправить пример: {e}")
-            logger.info(f"📖 Wiki e621: {wiki['title']} (тег не найден, wiki есть)")
-            return
-        await status_msg.edit_text(f"{EMOJI['error']} {tag_result['error']}", parse_mode="HTML")
+        else:
+            await status_msg.edit_text(
+                f"{EMOJI['error']} Тег <code>{safe_html_text(tag_name)}</code> не найден на e621, "
+                f"и похожих тегов тоже не нашлось.",
+                parse_mode="HTML"
+            )
         return
 
     tag_data = tag_result["tag"]
     wiki_data = wiki_result.get("wiki") if wiki_result.get("success") else None
 
     text = format_tag_info(tag_data, wiki_data)
+    kb = build_related_tags_keyboard(tag_data.get("related_tags", ""))
 
     # Отправляем текст
     if len(text) > MAX_MESSAGE_LENGTH:
@@ -1845,11 +1888,14 @@ async def cmd_taginfo(m: Message):
         for i, part in enumerate(parts_msg, 1):
             if len(parts_msg) > 1:
                 part = f"<i>({i}/{len(parts_msg)})</i>\n" + part
-            await m.answer(part, parse_mode="HTML")
+            if i == len(parts_msg) and kb:
+                await m.answer(part, parse_mode="HTML", reply_markup=kb)
+            else:
+                await m.answer(part, parse_mode="HTML")
             if i < len(parts_msg):
                 await asyncio.sleep(0.3)
     else:
-        await status_msg.edit_text(text, parse_mode="HTML")
+        await status_msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
     # Отправляем 1-2 примера изображений
     if image_urls:
@@ -1867,7 +1913,7 @@ async def cmd_taginfo(m: Message):
 
 @dp.message(Command("tag"))
 async def cmd_tag(m: Message):
-    """Краткая информация о теге e621 (только тег, без wiki)."""
+    """Краткая информация о теге e621 (только тег, без wiki и картинок)."""
     if m.from_user.id != OWNER_ID_INT:
         return
     parts = m.text.split(maxsplit=1)
@@ -1888,12 +1934,33 @@ async def cmd_tag(m: Message):
 
     result = await get_e621_tag_info(tag_name)
     if not result["success"]:
-        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
+        # Предлагаем похожие
+        suggestions = await get_e621_tag_suggestions(tag_name, limit=6)
+        if suggestions:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=f"{s['name'].replace('_', ' ')} ({s['post_count']:,})".replace(",", " "),
+                    callback_data=make_e621_callback_data(s["name"])
+                )]
+                for s in suggestions
+            ])
+            await status_msg.edit_text(
+                f"{EMOJI['warning']} Тег <code>{safe_html_text(tag_name)}</code> не найден.\n\n"
+                f"<b>Возможно, вы имели в виду:</b>",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+        else:
+            await status_msg.edit_text(
+                f"{EMOJI['error']} {result['error']}",
+                parse_mode="HTML"
+            )
         return
 
     tag_data = result["tag"]
     text = format_tag_info(tag_data, wiki_data=None)
-    await status_msg.edit_text(text, parse_mode="HTML")
+    kb = build_related_tags_keyboard(tag_data.get("related_tags", ""))
+    await status_msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
     logger.info(f"🏷️ Tag quick info e621: {tag_data['name']}")
 
 
@@ -2584,6 +2651,85 @@ async def silent_ignore(message: Message):
         await message.answer(ru + "\n\n" + en, parse_mode="HTML")
         return
     await message.answer(EMOJI["info"] + " Неизвестная команда. /help — справка", parse_mode="HTML")
+
+
+# ================= ОБРАБОТЧИК INLINE-КНОПОК E621 =================
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("e621|"))
+async def on_e621_tag_callback(callback: CallbackQuery):
+    """Обрабатывает нажатия на inline-кнопки с тегами e621."""
+    tag_name = parse_e621_callback_data(callback.data)
+    if not tag_name:
+        await callback.answer("❌ Ошибка", show_alert=False)
+        return
+
+    await callback.answer(f"🔍 {tag_name}...")
+
+    # Параллельно запрашиваем всё
+    tag_task = asyncio.create_task(get_e621_tag_info(tag_name))
+    wiki_task = asyncio.create_task(get_e621_wiki_page(tag_name))
+    posts_task = asyncio.create_task(get_e621_posts(tag_name, limit=2))
+
+    tag_result = await tag_task
+    wiki_result = await wiki_task
+    image_urls = await posts_task
+
+    if not tag_result["success"]:
+        # Пробуем предложить варианты
+        suggestions = await get_e621_tag_suggestions(tag_name, limit=6)
+        if suggestions:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=f"{s['name'].replace('_', ' ')} ({s['post_count']:,})".replace(",", " "),
+                    callback_data=make_e621_callback_data(s["name"])
+                )]
+                for s in suggestions
+            ])
+            await callback.message.answer(
+                f"{EMOJI['warning']} Тег <code>{safe_html_text(tag_name)}</code> не найден.\n\n"
+                f"<b>Возможно, вы имели в виду:</b>",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+        else:
+            await callback.message.answer(
+                f"{EMOJI['error']} Тег <code>{safe_html_text(tag_name)}</code> не найден и похожих тоже нет.",
+                parse_mode="HTML"
+            )
+        return
+
+    tag_data = tag_result["tag"]
+    wiki_data = wiki_result.get("wiki") if wiki_result.get("success") else None
+
+    text = format_tag_info(tag_data, wiki_data)
+    kb = build_related_tags_keyboard(tag_data.get("related_tags", ""))
+
+    # Отправляем текст
+    if len(text) > MAX_MESSAGE_LENGTH:
+        parts_msg = split_long_message(text, MAX_MESSAGE_LENGTH)
+        for i, part in enumerate(parts_msg, 1):
+            if len(parts_msg) > 1:
+                part = f"<i>({i}/{len(parts_msg)})</i>\n" + part
+            if i == len(parts_msg) and kb:
+                await callback.message.answer(part, parse_mode="HTML", reply_markup=kb)
+            else:
+                await callback.message.answer(part, parse_mode="HTML")
+            if i < len(parts_msg):
+                await asyncio.sleep(0.3)
+    else:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+    # Отправляем примеры изображений
+    if image_urls:
+        for url in image_urls:
+            try:
+                await callback.message.answer_photo(photo=url)
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отправить пример: {e}")
+
+    logger.info(f"📖 Tag info e621 (callback): {tag_data['name']}")
+
 
 # ================= INLINE AI MODE =================
 def parse_ai_inline_query(user_input: str) -> tuple[str, str]:
