@@ -70,7 +70,7 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
 # ВСТАВЬ ЭТОТ БЛОК В bot.py (замени старый блок E621 WIKI)
 
 E621_BASE_URL = "https://e621.net"
-E621_USER_AGENT = "LoonieBot/1.0 (by @lynther on Telegram)"
+E621_USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 
 E621_TAG_CATEGORIES = {
     0: ("general", "🔹 Общий"),
