@@ -65,11 +65,12 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
 
 
 
-# ================= E621 WIKI / TAG INFO =================
-# ВСТАВЬ ЭТОТ БЛОК В bot.py (например, после блока с FREELLM API)
+
+# ================= E621 WIKI / TAG INFO (v2) =================
+# ВСТАВЬ ЭТОТ БЛОК В bot.py (замени старый блок E621 WIKI)
 
 E621_BASE_URL = "https://e621.net"
-E621_USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+E621_USER_AGENT = "LoonieBot/1.0 (by @lynther on Telegram)"
 
 E621_TAG_CATEGORIES = {
     0: ("general", "🔹 Общий"),
@@ -92,38 +93,55 @@ def e621_category_emoji(cat_id: int) -> str:
 
 
 def clean_dtext(text: str) -> str:
-    """Упрощённая очистка DText разметки e621 для Telegram HTML."""
+    """Улучшенная очистка DText разметки e621 для Telegram HTML."""
     if not text:
         return ""
-    # Убираем заголовки
+
+    # 1. Убираем thumb #id  (превью изображений в wiki)
+    text = re.sub(r'thumb\s+#\d+(?:\s+#\d+)*', '', text)
+
+    # 2. Убираем [nodtext]...[/nodtext] — сырые блоки
+    text = re.sub(r'\[nodtext\](.+?)\[/nodtext\]', r'\1', text, flags=re.DOTALL)
+
+    # 3. Убираем section/subsection полностью (оставляем только содержимое)
+    text = re.sub(r'\[section[^\]]*\](.+?)\[/section\]', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\[subsection[^\]]*\](.+?)\[/subsection\]', r'\1', text, flags=re.DOTALL)
+
+    # 4. Убираем заголовки h1.-h6. в начале строки
     text = re.sub(r'^h\d+\.\s*', '', text, flags=re.MULTILINE)
-    # Убираем [b]...[/b] → уже есть markdown_to_html, но DText использует другой синтаксис
-    text = re.sub(r'\[b\](.+?)\[/b\]', r'****', text, flags=re.DOTALL)
-    text = re.sub(r'\[i\](.+?)\[/i\]', r'**', text, flags=re.DOTALL)
-    text = re.sub(r'\[u\](.+?)\[/u\]', r'____', text, flags=re.DOTALL)
-    text = re.sub(r'\[s\](.+?)\[/s\]', r'~~~~', text, flags=re.DOTALL)
-    # Убираем spoilers
-    text = re.sub(r'\[spoiler\](.+?)\[/spoiler\]', r'||||', text, flags=re.DOTALL)
-    # Убираем code blocks
-    text = re.sub(r'\[code\](.+?)\[/code\]', r'``', text, flags=re.DOTALL)
-    # Убираем quote
-    text = re.sub(r'\[quote\](.+?)\[/quote\]', r'> ', text, flags=re.DOTALL)
-    # Убираем section / subsection
-    text = re.sub(r'\[section[^\]]*\](.+?)\[/section\]', r'', text, flags=re.DOTALL)
-    text = re.sub(r'\[subsection[^\]]*\](.+?)\[/subsection\]', r'', text, flags=re.DOTALL)
-    # Убираем таблицы (упрощённо)
-    text = re.sub(r'\[table\](.+?)\[/table\]', r'', text, flags=re.DOTALL)
-    text = re.sub(r'\[tr\](.+?)\[/tr\]', r'\n', text, flags=re.DOTALL)
-    text = re.sub(r'\[td\](.+?)\[/td\]', r'|  ', text, flags=re.DOTALL)
-    # Убираем теги [tag:...] — заменяем на просто текст
-    text = re.sub(r'\[tag:([^\]]+)\]', r'', text)
-    # Убираем wiki-ссылки [[...]]
-    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', r'', text)
-    text = re.sub(r'\[\[([^\]]+)\]\]', r'', text)
-    # Убираем ссылки [url=...]...[/url]
-    text = re.sub(r'\[url=([^\]]+)\](.+?)\[/url\]', r'[]()', text, flags=re.DOTALL)
-    # Убираем пустые строки подряд (больше 2)
+
+    # 5. Форматирование → markdown
+    text = re.sub(r'\[b\](.+?)\[/b\]', r'**\1**', text, flags=re.DOTALL)
+    text = re.sub(r'\[i\](.+?)\[/i\]', r'*\1*', text, flags=re.DOTALL)
+    text = re.sub(r'\[u\](.+?)\[/u\]', r'__\1__', text, flags=re.DOTALL)
+    text = re.sub(r'\[s\](.+?)\[/s\]', r'~~\1~~', text, flags=re.DOTALL)
+    text = re.sub(r'\[spoiler\](.+?)\[/spoiler\]', r'||\1||', text, flags=re.DOTALL)
+    text = re.sub(r'\[code\](.+?)\[/code\]', r'`\1`', text, flags=re.DOTALL)
+    text = re.sub(r'\[quote\](.+?)\[/quote\]', r'> \1', text, flags=re.DOTALL)
+
+    # 6. Таблицы → просто текст
+    text = re.sub(r'\[table\](.+?)\[/table\]', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\[tr\](.+?)\[/tr\]', r'\1\n', text, flags=re.DOTALL)
+    text = re.sub(r'\[td\](.+?)\[/td\]', r'| \1 ', text, flags=re.DOTALL)
+
+    # 7. Теги и wiki-ссылки
+    text = re.sub(r'\[tag:([^\]]+)\]', r'\1', text)
+    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', r'\2', text)
+    text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text)
+    text = re.sub(r'\[url=([^\]]+)\](.+?)\[/url\]', r'[\2](\1)', text, flags=re.DOTALL)
+
+    # 8. Убираем цвета [color=...]...[/color]
+    text = re.sub(r'\[color=[^\]]*\](.+?)\[/color\]', r'\1', text, flags=re.DOTALL)
+
+    # 9. Убираем пустые списки: строки, состоящие только из • * - + и пробелов
+    text = re.sub(r'^[\s•\*\-\+]+$', '', text, flags=re.MULTILINE)
+
+    # 10. Убираем строки, состоящие только из пробелов/пунктуации
+    text = re.sub(r'^[\s|_\-\*\+•]+$', '', text, flags=re.MULTILINE)
+
+    # 11. Убираем множественные пустые строки
     text = re.sub(r'\n{3,}', '\n\n', text)
+
     return text.strip()
 
 
@@ -155,7 +173,6 @@ async def e621_api_get(endpoint: str, params: dict = None) -> dict:
 
 async def get_e621_tag_info(tag_name: str) -> dict:
     """Получает информацию о теге из e621 tags.json."""
-    # Нормализуем имя тега (e621 использует underscores)
     search_name = tag_name.strip().lower().replace(" ", "_")
     result = await e621_api_get("/tags.json", {
         "search[name_matches]": search_name,
@@ -205,6 +222,24 @@ async def get_e621_wiki_page(tag_name: str) -> dict:
     }
 
 
+async def get_e621_posts(tag_name: str, limit: int = 2) -> list[str]:
+    """Возвращает список URL изображений (file_url) по тегу."""
+    search_name = tag_name.strip().lower().replace(" ", "_")
+    result = await e621_api_get("/posts.json", {
+        "tags": search_name,
+        "limit": limit,
+    })
+    if not result["success"]:
+        return []
+    posts = result["data"].get("posts", [])
+    urls = []
+    for post in posts:
+        file_url = post.get("file", {}).get("url")
+        if file_url:
+            urls.append(file_url)
+    return urls
+
+
 def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
     """Форматирует информацию о теге для Telegram."""
     name = tag_data.get("name", "unknown")
@@ -228,7 +263,6 @@ def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
         lines.append(f"🔒 Тег заблокирован")
 
     if related:
-        # related_tags — строка с тегами через пробел, берём первые 10
         related_list = related.split()[:10]
         related_str = ", ".join(f"<code>{safe_html_text(t)}</code>" for t in related_list)
         lines.append(f"🔗 Связанные: {related_str}")
@@ -238,18 +272,20 @@ def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
 
     if wiki_data and wiki_data.get("body"):
         body = clean_dtext(wiki_data["body"])
-        # Ограничиваем длину
-        if len(body) > 1200:
-            body = body[:1200].rsplit(" ", 1)[0] + "..."
-        body_html = markdown_to_html(body)
-        lines.append(f"")
-        lines.append(f"📝 <b>Описание:</b>")
-        lines.append(body_html)
+        if body:
+            # Ограничиваем длину
+            if len(body) > 1200:
+                body = body[:1200].rsplit(" ", 1)[0] + "..."
+            body_html = markdown_to_html(body)
+            lines.append(f"")
+            lines.append(f"📝 <b>Описание:</b>")
+            lines.append(body_html)
     elif wiki_data is None:
         lines.append(f"")
         lines.append(f"<i>Wiki-страница не найдена</i>")
 
     return "\n".join(lines)
+
 
 
 
@@ -1736,13 +1772,13 @@ async def ping_model(model_name: str) -> tuple[bool, float]:
 
 @dp.message(Command("taginfo", "wiki"))
 async def cmd_taginfo(m: Message):
-    """Показывает wiki-информацию о теге e621."""
+    """Показывает wiki-информацию о теге e621 + 1-2 примера изображений."""
     if m.from_user.id != OWNER_ID_INT:
         return
     parts = m.text.split(maxsplit=1)
     if len(parts) < 2:
         await m.answer(
-            f"{{EMOJI['info']}} <b>Поиск по вики e621</b>\n\n"
+            f"{EMOJI['info']} <b>Поиск по вики e621</b>\n\n"
             f"<code>/taginfo &lt;тег&gt;</code>\n"
             f"<code>/wiki &lt;тег&gt;</code>\n\n"
             f"<b>Примеры:</b>\n"
@@ -1755,23 +1791,28 @@ async def cmd_taginfo(m: Message):
         return
 
     tag_name = parts[1].strip()
-    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code> на e621...</i>", parse_mode="HTML")
+    status_msg = await m.answer(
+        f"{EMOJI['search']} <i>Ищу <code>{safe_html_text(tag_name)}</code> на e621...</i>",
+        parse_mode="HTML"
+    )
 
-    # Параллельно запрашиваем тег и wiki
+    # Параллельно запрашиваем тег, wiki и посты
     tag_task = asyncio.create_task(get_e621_tag_info(tag_name))
     wiki_task = asyncio.create_task(get_e621_wiki_page(tag_name))
+    posts_task = asyncio.create_task(get_e621_posts(tag_name, limit=2))
 
     tag_result = await tag_task
     wiki_result = await wiki_task
+    image_urls = await posts_task
 
     if not tag_result["success"]:
         # Если тег не найден, но wiki может быть — покажем wiki
         if wiki_result.get("success"):
             wiki = wiki_result["wiki"]
             body = clean_dtext(wiki.get("body", ""))
-            if len(body) > 1500:
+            if body and len(body) > 1500:
                 body = body[:1500].rsplit(" ", 1)[0] + "..."
-            body_html = markdown_to_html(body)
+            body_html = markdown_to_html(body) if body else ""
             wiki_url = f"https://e621.net/wiki_pages/show_or_new?title={wiki['title']}"
             text = (
                 f"📖 <b>{safe_html_text(wiki['title'])}</b>\n\n"
@@ -1779,9 +1820,17 @@ async def cmd_taginfo(m: Message):
                 f"<a href='{wiki_url}'>🔗 Открыть на e621</a>"
             )
             await status_msg.edit_text(text, parse_mode="HTML")
+            # Отправляем примеры изображений если есть
+            if image_urls:
+                for url in image_urls:
+                    try:
+                        await m.answer_photo(photo=url)
+                        await asyncio.sleep(0.3)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось отправить пример: {e}")
             logger.info(f"📖 Wiki e621: {wiki['title']} (тег не найден, wiki есть)")
             return
-        await status_msg.edit_text(f"{{EMOJI['error']}} {tag_result['error']}", parse_mode="HTML")
+        await status_msg.edit_text(f"{EMOJI['error']} {tag_result['error']}", parse_mode="HTML")
         return
 
     tag_data = tag_result["tag"]
@@ -1789,7 +1838,7 @@ async def cmd_taginfo(m: Message):
 
     text = format_tag_info(tag_data, wiki_data)
 
-    # Если текст слишком длинный — разбиваем
+    # Отправляем текст
     if len(text) > MAX_MESSAGE_LENGTH:
         parts_msg = split_long_message(text, MAX_MESSAGE_LENGTH)
         await status_msg.delete()
@@ -1802,7 +1851,18 @@ async def cmd_taginfo(m: Message):
     else:
         await status_msg.edit_text(text, parse_mode="HTML")
 
-    logger.info(f"📖 Tag info e621: {tag_data['name']} (posts: {tag_data['post_count']})")
+    # Отправляем 1-2 примера изображений
+    if image_urls:
+        for url in image_urls:
+            try:
+                await m.answer_photo(photo=url)
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отправить пример: {e}")
+    else:
+        await m.answer("<i>Примеров изображений не найдено</i>", parse_mode="HTML")
+
+    logger.info(f"📖 Tag info e621: {tag_data['name']} (posts: {tag_data['post_count']}, images: {len(image_urls)})")
 
 
 @dp.message(Command("tag"))
@@ -1813,7 +1873,7 @@ async def cmd_tag(m: Message):
     parts = m.text.split(maxsplit=1)
     if len(parts) < 2:
         await m.answer(
-            f"{{EMOJI['info']}} <b>Инфо о теге e621</b>\n\n"
+            f"{EMOJI['info']} <b>Инфо о теге e621</b>\n\n"
             f"<code>/tag &lt;тег&gt;</code>\n\n"
             f"<b>Пример:</b> <code>/tag fox</code>",
             parse_mode="HTML"
@@ -1821,11 +1881,14 @@ async def cmd_tag(m: Message):
         return
 
     tag_name = parts[1].strip()
-    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code>...</i>", parse_mode="HTML")
+    status_msg = await m.answer(
+        f"{EMOJI['search']} <i>Ищу <code>{safe_html_text(tag_name)}</code>...</i>",
+        parse_mode="HTML"
+    )
 
     result = await get_e621_tag_info(tag_name)
     if not result["success"]:
-        await status_msg.edit_text(f"{{EMOJI['error']}} {result['error']}", parse_mode="HTML")
+        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
         return
 
     tag_data = result["tag"]
