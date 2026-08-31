@@ -63,6 +63,298 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
     """Проверяет, есть ли пользователь в списке разрешённых"""
     return user_id in allowed_set
 
+
+
+# ================= E621 WIKI / TAG INFO =================
+# ВСТАВЬ ЭТОТ БЛОК В bot.py (например, после блока с FREELLM API)
+
+E621_BASE_URL = "https://e621.net"
+E621_USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+
+E621_TAG_CATEGORIES = {
+    0: ("general", "🔹 Общий"),
+    1: ("artist", "🎨 Художник"),
+    3: ("copyright", "©️ Копирайт"),
+    4: ("character", "👤 Персонаж"),
+    5: ("species", "🐾 Вид"),
+    6: ("invalid", "❌ Невалидный"),
+    7: ("meta", "📋 Мета"),
+    8: ("lore", "📖 Лор"),
+}
+
+
+def e621_category_name(cat_id: int) -> str:
+    return E621_TAG_CATEGORIES.get(cat_id, ("unknown", "❓ Неизвестно"))[1]
+
+
+def e621_category_emoji(cat_id: int) -> str:
+    return E621_TAG_CATEGORIES.get(cat_id, ("unknown", "❓"))[1].split()[0]
+
+
+def clean_dtext(text: str) -> str:
+    """Упрощённая очистка DText разметки e621 для Telegram HTML."""
+    if not text:
+        return ""
+    # Убираем заголовки
+    text = re.sub(r'^h\d+\.\s*', '', text, flags=re.MULTILINE)
+    # Убираем [b]...[/b] → уже есть markdown_to_html, но DText использует другой синтаксис
+    text = re.sub(r'\[b\](.+?)\[/b\]', r'****', text, flags=re.DOTALL)
+    text = re.sub(r'\[i\](.+?)\[/i\]', r'**', text, flags=re.DOTALL)
+    text = re.sub(r'\[u\](.+?)\[/u\]', r'____', text, flags=re.DOTALL)
+    text = re.sub(r'\[s\](.+?)\[/s\]', r'~~~~', text, flags=re.DOTALL)
+    # Убираем spoilers
+    text = re.sub(r'\[spoiler\](.+?)\[/spoiler\]', r'||||', text, flags=re.DOTALL)
+    # Убираем code blocks
+    text = re.sub(r'\[code\](.+?)\[/code\]', r'``', text, flags=re.DOTALL)
+    # Убираем quote
+    text = re.sub(r'\[quote\](.+?)\[/quote\]', r'> ', text, flags=re.DOTALL)
+    # Убираем section / subsection
+    text = re.sub(r'\[section[^\]]*\](.+?)\[/section\]', r'', text, flags=re.DOTALL)
+    text = re.sub(r'\[subsection[^\]]*\](.+?)\[/subsection\]', r'', text, flags=re.DOTALL)
+    # Убираем таблицы (упрощённо)
+    text = re.sub(r'\[table\](.+?)\[/table\]', r'', text, flags=re.DOTALL)
+    text = re.sub(r'\[tr\](.+?)\[/tr\]', r'\n', text, flags=re.DOTALL)
+    text = re.sub(r'\[td\](.+?)\[/td\]', r'|  ', text, flags=re.DOTALL)
+    # Убираем теги [tag:...] — заменяем на просто текст
+    text = re.sub(r'\[tag:([^\]]+)\]', r'', text)
+    # Убираем wiki-ссылки [[...]]
+    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', r'', text)
+    text = re.sub(r'\[\[([^\]]+)\]\]', r'', text)
+    # Убираем ссылки [url=...]...[/url]
+    text = re.sub(r'\[url=([^\]]+)\](.+?)\[/url\]', r'[]()', text, flags=re.DOTALL)
+    # Убираем пустые строки подряд (больше 2)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+async def e621_api_get(endpoint: str, params: dict = None) -> dict:
+    """Делает GET-запрос к e621 API с правильным User-Agent."""
+    url = f"{E621_BASE_URL}{endpoint}"
+    headers = {
+        "User-Agent": E621_USER_AGENT,
+        "Accept": "application/json",
+    }
+    try:
+        def _get():
+            return requests.get(url, headers=headers, params=params, timeout=15)
+        response = await asyncio.to_thread(_get)
+        if response.status_code == 200:
+            return {"success": True, "data": response.json()}
+        elif response.status_code == 404:
+            return {"success": False, "error": "Не найдено"}
+        elif response.status_code == 429:
+            return {"success": False, "error": "🔄 Лимит запросов к e621. Подожди немного."}
+        else:
+            return {"success": False, "error": f"HTTP {response.status_code}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Таймаут запроса к e621"}
+    except Exception as e:
+        logger.error(f"❌ e621 API error: {e}")
+        return {"success": False, "error": f"Ошибка: {str(e)[:100]}"}
+
+
+async def get_e621_tag_info(tag_name: str) -> dict:
+    """Получает информацию о теге из e621 tags.json."""
+    # Нормализуем имя тега (e621 использует underscores)
+    search_name = tag_name.strip().lower().replace(" ", "_")
+    result = await e621_api_get("/tags.json", {
+        "search[name_matches]": search_name,
+        "limit": 1,
+    })
+    if not result["success"]:
+        return result
+    tags = result["data"]
+    if not tags:
+        return {"success": False, "error": f"Тег <code>{safe_html_text(tag_name)}</code> не найден на e621"}
+    tag = tags[0]
+    return {
+        "success": True,
+        "tag": {
+            "id": tag.get("id"),
+            "name": tag.get("name", search_name),
+            "category": tag.get("category", 0),
+            "post_count": tag.get("post_count", 0),
+            "related_tags": tag.get("related_tags", ""),
+            "is_locked": tag.get("is_locked", False),
+        }
+    }
+
+
+async def get_e621_wiki_page(tag_name: str) -> dict:
+    """Получает wiki-страницу тега из e621 wiki_pages.json."""
+    search_name = tag_name.strip().lower().replace(" ", "_")
+    result = await e621_api_get("/wiki_pages.json", {
+        "search[title]": search_name,
+        "limit": 1,
+    })
+    if not result["success"]:
+        return result
+    pages = result["data"]
+    if not pages:
+        return {"success": False, "error": "wiki_not_found"}
+    page = pages[0]
+    return {
+        "success": True,
+        "wiki": {
+            "id": page.get("id"),
+            "title": page.get("title", search_name),
+            "body": page.get("body", ""),
+            "is_locked": page.get("is_locked", False),
+            "is_deleted": page.get("is_deleted", False),
+        }
+    }
+
+
+def format_tag_info(tag_data: dict, wiki_data: dict = None) -> str:
+    """Форматирует информацию о теге для Telegram."""
+    name = tag_data.get("name", "unknown")
+    cat_id = tag_data.get("category", 0)
+    cat_name = e621_category_name(cat_id)
+    post_count = tag_data.get("post_count", 0)
+    related = tag_data.get("related_tags", "")
+    is_locked = tag_data.get("is_locked", False)
+
+    wiki_url = f"https://e621.net/wiki_pages/show_or_new?title={name}"
+    search_url = f"https://e621.net/posts?tags={name}"
+
+    lines = [
+        f"{e621_category_emoji(cat_id)} <b>{safe_html_text(name)}</b>",
+        f"",
+        f"📂 Категория: <b>{cat_name}</b>",
+        f"🖼️ Постов: <b>{post_count:,}</b>".replace(",", " "),
+    ]
+
+    if is_locked:
+        lines.append(f"🔒 Тег заблокирован")
+
+    if related:
+        # related_tags — строка с тегами через пробел, берём первые 10
+        related_list = related.split()[:10]
+        related_str = ", ".join(f"<code>{safe_html_text(t)}</code>" for t in related_list)
+        lines.append(f"🔗 Связанные: {related_str}")
+
+    lines.append(f"")
+    lines.append(f"<a href='{wiki_url}'>📖 Wiki</a> | <a href='{search_url}'>🖼️ Посты</a>")
+
+    if wiki_data and wiki_data.get("body"):
+        body = clean_dtext(wiki_data["body"])
+        # Ограничиваем длину
+        if len(body) > 1200:
+            body = body[:1200].rsplit(" ", 1)[0] + "..."
+        body_html = markdown_to_html(body)
+        lines.append(f"")
+        lines.append(f"📝 <b>Описание:</b>")
+        lines.append(body_html)
+    elif wiki_data is None:
+        lines.append(f"")
+        lines.append(f"<i>Wiki-страница не найдена</i>")
+
+    return "\n".join(lines)
+
+
+# ================= КОМАНДЫ E621 WIKI =================
+
+@dp.message(Command("taginfo", "wiki"))
+async def cmd_taginfo(m: Message):
+    """Показывает wiki-информацию о теге e621."""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await m.answer(
+            f"{{EMOJI['info']}} <b>Поиск по вики e621</b>\n\n"
+            f"<code>/taginfo &lt;тег&gt;</code>\n"
+            f"<code>/wiki &lt;тег&gt;</code>\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>/taginfo canine</code>\n"
+            f"<code>/wiki anthro</code>\n"
+            f"<code>/wiki looking_at_viewer</code>\n\n"
+            f"<i>Поддерживаются пробелы (автоматически заменятся на _)</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    tag_name = parts[1].strip()
+    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code> на e621...</i>", parse_mode="HTML")
+
+    # Параллельно запрашиваем тег и wiki
+    tag_task = asyncio.create_task(get_e621_tag_info(tag_name))
+    wiki_task = asyncio.create_task(get_e621_wiki_page(tag_name))
+
+    tag_result = await tag_task
+    wiki_result = await wiki_task
+
+    if not tag_result["success"]:
+        # Если тег не найден, но wiki может быть — покажем wiki
+        if wiki_result.get("success"):
+            wiki = wiki_result["wiki"]
+            body = clean_dtext(wiki.get("body", ""))
+            if len(body) > 1500:
+                body = body[:1500].rsplit(" ", 1)[0] + "..."
+            body_html = markdown_to_html(body)
+            wiki_url = f"https://e621.net/wiki_pages/show_or_new?title={wiki['title']}"
+            text = (
+                f"📖 <b>{safe_html_text(wiki['title'])}</b>\n\n"
+                f"{body_html}\n\n"
+                f"<a href='{wiki_url}'>🔗 Открыть на e621</a>"
+            )
+            await status_msg.edit_text(text, parse_mode="HTML")
+            logger.info(f"📖 Wiki e621: {wiki['title']} (тег не найден, wiki есть)")
+            return
+        await status_msg.edit_text(f"{{EMOJI['error']}} {tag_result['error']}", parse_mode="HTML")
+        return
+
+    tag_data = tag_result["tag"]
+    wiki_data = wiki_result.get("wiki") if wiki_result.get("success") else None
+
+    text = format_tag_info(tag_data, wiki_data)
+
+    # Если текст слишком длинный — разбиваем
+    if len(text) > MAX_MESSAGE_LENGTH:
+        parts_msg = split_long_message(text, MAX_MESSAGE_LENGTH)
+        await status_msg.delete()
+        for i, part in enumerate(parts_msg, 1):
+            if len(parts_msg) > 1:
+                part = f"<i>({i}/{len(parts_msg)})</i>\n" + part
+            await m.answer(part, parse_mode="HTML")
+            if i < len(parts_msg):
+                await asyncio.sleep(0.3)
+    else:
+        await status_msg.edit_text(text, parse_mode="HTML")
+
+    logger.info(f"📖 Tag info e621: {tag_data['name']} (posts: {tag_data['post_count']})")
+
+
+@dp.message(Command("tag"))
+async def cmd_tag(m: Message):
+    """Краткая информация о теге e621 (только тег, без wiki)."""
+    if m.from_user.id != OWNER_ID_INT:
+        return
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await m.answer(
+            f"{{EMOJI['info']}} <b>Инфо о теге e621</b>\n\n"
+            f"<code>/tag &lt;тег&gt;</code>\n\n"
+            f"<b>Пример:</b> <code>/tag fox</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    tag_name = parts[1].strip()
+    status_msg = await m.answer(f"{{EMOJI['search']}} <i>Ищу <code>{safe_html_text(tag_name)}</code>...</i>", parse_mode="HTML")
+
+    result = await get_e621_tag_info(tag_name)
+    if not result["success"]:
+        await status_msg.edit_text(f"{{EMOJI['error']}} {result['error']}", parse_mode="HTML")
+        return
+
+    tag_data = result["tag"]
+    text = format_tag_info(tag_data, wiki_data=None)
+    await status_msg.edit_text(text, parse_mode="HTML")
+    logger.info(f"🏷️ Tag quick info e621: {tag_data['name']}")
+
+
+
 # ================= FREELLM API =================
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY")
 FREELLMAPI_BASE_URL = os.getenv("FREELLMAPI_BASE_URL", "http://localhost:3001/v1").rstrip("/")
