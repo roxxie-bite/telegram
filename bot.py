@@ -618,12 +618,17 @@ def _parse_lora_head(head, min_days):
     wm = re.search(r"WORDS:\s*(.*?)(?=\s+Requests:|$)", text, re.IGNORECASE)
     words = wm.group(1).strip() if wm else ""
     source_url = next((href for label, href in hrefs if label.upper() == "SOURCE" and href), None)
-    raw_tags = [x for x in links[1:] if x.upper() not in {"DESCRIPTION", "SOURCE", "VIEW ALL"}]
+    # Теги Lynther находятся именно в <a class="tag"><span class="tag_gray">USERNAME</span></a>.
+    # Ищем username ТОЛЬКО среди этих тегов, а не во всём тексте LoRA.
+    tag_elements = head.select("a.tag span.tag_gray")
+    raw_tags = [tag.get_text(" ", strip=True) for tag in tag_elements if tag.get_text(" ", strip=True)]
 
-    # Username добавившего LoRA на Lynther отображается как отдельный тег.
-    # Берём только username из разрешённого списка, чтобы обычный тег не
-    # ошибочно считался автором.
-    added_by = next((LORA_ADDER_USERS_LOWER[x.lower()] for x in raw_tags if x.lower() in LORA_ADDER_USERS_LOWER), None)
+    # Если username из разрешённого списка присутствует отдельным тегом,
+    # считаем его пользователем, добавившим LoRA.
+    added_by = next(
+        (LORA_ADDER_USERS_LOWER[tag.lower()] for tag in raw_tags if tag.lower() in LORA_ADDER_USERS_LOWER),
+        None,
+    )
 
     return {"id": lora_id, "days": lora_days, "name": lora_name, "url": SITE_BASE + "/?p=lora_d&lora_id=" + lora_id,
             "base_model": links[0] if links else None, "words": words,
