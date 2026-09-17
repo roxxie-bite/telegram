@@ -1846,7 +1846,7 @@ async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT: return
     txt = f"{EMOJI['info']} <b>Справка:</b>\n\n"
     txt += f"<b>{EMOJI['search']} Основные:</b>\n/check — Найти лоры\n/export — Повторно выгрузить последний поиск\n/status — Настройки\n/help — Справка\n\n"
-    txt += f"<b>{EMOJI['settings']} Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег&gt; — Добавить тег\n/rmtag &lt;тег&gt; — Удалить тег\n/tags — Теги\n\n"
+    txt += f"<b>{EMOJI['settings']} Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег1, тег2&gt; — Добавить несколько тегов\n/rmtag &lt;тег1, тег2&gt; — Удалить теги\n/rmtag all — Удалить все теги\n/tags — Теги\n\n"
     txt += f"<b>{EMOJI['log']} Логи:</b>\n/loglevel &lt;уровень&gt; — info/warning/error/debug\n\n"
     txt += f"<b>{EMOJI['users']} Пользователи:</b>\n/users — Показать всех, кто писал боту\n\n"
     txt += f"<b>{EMOJI['stop']} Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить"
@@ -1917,29 +1917,111 @@ async def cmd_setdays(message: Message):
 
 @dp.message(Command("addtag"))
 async def cmd_addtag(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    parts = message.text.split()
-    if len(parts) != 2 or not parts[1].strip().lower().isalnum():
-        await message.answer(EMOJI["warning"] + " Используй: <code>/addtag &lt;название&gt;</code>", parse_mode="HTML"); return
-    new_tag = parts[1].strip().lower()
+    if message.from_user.id != OWNER_ID_INT:
+        return
+
+    # Поддерживает несколько тегов через запятую:
+    # /addtag loonie, anime, yorn
+    raw = message.text.partition(" ")[2].strip()
+    if not raw:
+        await message.answer(
+            EMOJI["warning"] + " Используй: <code>/addtag loonie, anime, yorn</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    tags_to_add = [tag.strip().lower() for tag in raw.split(",") if tag.strip()]
+    if not tags_to_add or any(not tag.isalnum() for tag in tags_to_add):
+        await message.answer(
+            EMOJI["warning"] + " Теги должны быть разделены запятыми: <code>/addtag loonie, anime, yorn</code>",
+            parse_mode="HTML",
+        )
+        return
+
     settings = get_settings(message.from_user.id)
-    if new_tag in [t.lower() for t in settings["tags"]]: await message.answer(EMOJI["warning"] + " Тег уже в списке", parse_mode="HTML"); return
-    settings["tags"].append(new_tag)
+    existing = {tag.lower() for tag in settings["tags"]}
+    added = []
+    skipped = []
+
+    for tag in tags_to_add:
+        if tag in existing:
+            skipped.append(tag)
+            continue
+        settings["tags"].append(tag)
+        existing.add(tag)
+        added.append(tag)
+
     update_settings(message.from_user.id, tags=settings["tags"])
-    await message.answer(EMOJI["check"] + f" Тег <b>{new_tag}</b> добавлен. Текущие: {', '.join(settings['tags'])}", parse_mode="HTML")
+
+    parts = []
+    if added:
+        parts.append("Добавлены: <b>" + ", ".join(added) + "</b>")
+    if skipped:
+        parts.append("Уже были: <b>" + ", ".join(skipped) + "</b>")
+    parts.append("Текущие: " + (", ".join(settings["tags"]) if settings["tags"] else "нет"))
+
+    await message.answer(EMOJI["check"] + " " + "\n".join(parts), parse_mode="HTML")
 
 @dp.message(Command("rmtag"))
 async def cmd_rmtag(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    parts = message.text.split()
-    if len(parts) != 2: await message.answer(EMOJI["warning"] + " Используй: <code>/rmtag &lt;название&gt;</code>", parse_mode="HTML"); return
-    tag_to_remove = parts[1].strip().lower()
+    if message.from_user.id != OWNER_ID_INT:
+        return
+
+    # Поддерживает несколько тегов через запятую и /rmtag all для удаления всех.
+    # Например: /rmtag loonie, anime, yorn
+    raw = message.text.partition(" ")[2].strip()
+    if not raw:
+        await message.answer(
+            EMOJI["warning"] + " Используй: <code>/rmtag loonie, anime</code> или <code>/rmtag all</code>",
+            parse_mode="HTML",
+        )
+        return
+
     settings = get_settings(message.from_user.id)
-    tag = next((t for t in settings["tags"] if t.lower() == tag_to_remove), None)
-    if not tag: await message.answer(EMOJI["warning"] + " Тег не найден", parse_mode="HTML"); return
-    settings["tags"].remove(tag)
+
+    if raw.lower() == "all":
+        removed_count = len(settings["tags"])
+        settings["tags"] = []
+        update_settings(message.from_user.id, tags=[])
+        await message.answer(
+            EMOJI["check"] + f" Удалены все теги: <b>{removed_count}</b>. Текущие: <b>нет</b>",
+            parse_mode="HTML",
+        )
+        return
+
+    tags_to_remove = [tag.strip().lower() for tag in raw.split(",") if tag.strip()]
+    if not tags_to_remove or any(not tag.isalnum() for tag in tags_to_remove):
+        await message.answer(
+            EMOJI["warning"] + " Теги должны быть разделены запятыми: <code>/rmtag loonie, anime, yorn</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    remove_set = set(tags_to_remove)
+    removed = []
+    not_found = []
+    remaining = []
+
+    for tag in settings["tags"]:
+        if tag.lower() in remove_set:
+            removed.append(tag)
+        else:
+            remaining.append(tag)
+
+    found_lower = {tag.lower() for tag in removed}
+    not_found = [tag for tag in tags_to_remove if tag not in found_lower]
+
+    settings["tags"] = remaining
     update_settings(message.from_user.id, tags=settings["tags"])
-    await message.answer(EMOJI["check"] + f" Тег <b>{tag}</b> удалён. Текущие: {', '.join(settings['tags']) if settings['tags'] else 'нет'}", parse_mode="HTML")
+
+    parts = []
+    if removed:
+        parts.append("Удалены: <b>" + ", ".join(removed) + "</b>")
+    if not_found:
+        parts.append("Не найдены: <b>" + ", ".join(not_found) + "</b>")
+    parts.append("Текущие: " + (", ".join(settings["tags"]) if settings["tags"] else "нет"))
+
+    await message.answer(EMOJI["check"] + " " + "\n".join(parts), parse_mode="HTML")
 
 @dp.message(Command("tags"))
 async def cmd_tags(message: Message):
