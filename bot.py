@@ -8,6 +8,7 @@ import requests
 import time
 import json
 import html
+from urllib.parse import quote_plus
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
@@ -29,18 +30,6 @@ if os.path.exists(_env_path):
                 value = value.strip().strip('"').strip("'")
                 os.environ[key] = value
 
-
-
-# ================= YANDEX MUSIC NOW PLAYING =================
-YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN")
-YM_TARGET_CHAT_ID = os.getenv("YM_TARGET_CHAT_ID")
-YM_STATE_FILE = "ym_state.json"
-
-ym_client = None
-ym_last_track_id = None
-ym_last_message_id = None
-ym_task = None
-ym_enabled = False
 
 
 # ================= НАСТРОЙКИ =================
@@ -237,6 +226,20 @@ DEFAULT_TAGS = []
 MAX_PAGES = 50
 EXPORT_THRESHOLD = 50
 COOLDOWN_SECONDS = 20
+LORA_MAX_CONCURRENCY = 5
+LORA_REQUEST_DELAY = 0.15
+
+# Пользователи, которые могут добавлять LoRA.
+# На сайте их username также отображается отдельным тегом, поэтому
+# мы используем его для определения поля "Кто добавил".
+LORA_ADDER_USERS = {
+    "MarsTheFox", "FantDragon", "DumbFox", "Nighmare", "Loonie", "Diego",
+    "LareysCors", "MrFox1828s", "LoonyTheRabbit", "Fenritty", "Fanfurryk",
+    "Hanamory", "Tender", "PurpleCrystalFox", "Cristofer", "Massolar",
+    "hag2hag", "Adrian", "Senpai_old", "TwoyPisos", "Vyke", "Xeus017",
+    "KotoPero", "BoxyLeFoxy", "Elek", "yorn",
+}
+LORA_ADDER_USERS_LOWER = {name.lower(): name for name in LORA_ADDER_USERS}
 FORWARDED_FILE = "forwarded.json"
 USERS_FILE = "users.json"
 LAST_REQUEST_TIME = 0
@@ -558,108 +561,121 @@ def check_cooldown(user_id):
     return False, int(COOLDOWN_SECONDS - elapsed)
 
 # ================= ЗАПРОСЫ И ПАРСИНГ =================
+_http_session = requests.Session()
+_http_session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; LoonieBot/1.0)", "Accept": "text/html,application/xhtml+xml", "Accept-Language": "ru,en;q=0.8"})
+_http_session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
+_http_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
+_lora_request_sem = asyncio.Semaphore(LORA_MAX_CONCURRENCY)
+
 async def fetch_with_retry(url, max_retries=3):
-    global LAST_REQUEST_TIME
-    headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(1, max_retries + 1):
         try:
-            now = time.time()
-            time_since_last = now - LAST_REQUEST_TIME
-            if time_since_last < REQUEST_DELAY:
-                await asyncio.sleep(REQUEST_DELAY - time_since_last)
-            response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=20)
+            async with _lora_request_sem:
+                if LORA_REQUEST_DELAY:
+                    await asyncio.sleep(LORA_REQUEST_DELAY)
+                response = await asyncio.to_thread(_http_session.get, url, timeout=(5, 20))
             response.raise_for_status()
-            LAST_REQUEST_TIME = time.time()
             return response.text
         except requests.RequestException as e:
-            logger.warning(f"Попытка {attempt} упала: {e}")
+            logger.warning(f"Попытка {attempt} упала для {url}: {e}")
             if attempt == max_retries:
                 return None
-            await asyncio.sleep(min(2 ** attempt, 10))
+            await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 4))
+    return None
 
-def parse_loras_from_html(html, min_days):
-    if html is None:
-        return []
+def _parse_lora_head(head, min_days):
+    text = head.get_text(" ", strip=True)
+    id_match = re.search(r"#️⃣\s*(\d+)", text)
+    days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
+    if not id_match or not days_match:
+        return None
+    lora_id, lora_days = id_match.group(1), int(days_match.group(1))
+    if lora_days < min_days:
+        return None
+    name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text)
+    lora_name = name_match.group(1).strip() if name_match else "Unknown"
+    links = [a.get_text(" ", strip=True) for a in head.find_all("a") if a.get_text(" ", strip=True)]
+    hrefs = [(a.get_text(" ", strip=True), a.get("href")) for a in head.find_all("a")]
+    rm = re.search(r"Requests:\s*([\d\s,]+)", text, re.IGNORECASE)
+    requests_count = int(re.sub(r"\D", "", rm.group(1)) or 0) if rm else None
+    wm = re.search(r"WORDS:\s*(.*?)(?=\s+Requests:|$)", text, re.IGNORECASE)
+    words = wm.group(1).strip() if wm else ""
+    source_url = next((href for label, href in hrefs if label.upper() == "SOURCE" and href), None)
+    raw_tags = [x for x in links[1:] if x.upper() not in {"DESCRIPTION", "SOURCE", "VIEW ALL"}]
+
+    # Username добавившего LoRA на Lynther отображается как отдельный тег.
+    # Берём только username из разрешённого списка, чтобы обычный тег не
+    # ошибочно считался автором.
+    added_by = next((LORA_ADDER_USERS_LOWER[x.lower()] for x in raw_tags if x.lower() in LORA_ADDER_USERS_LOWER), None)
+
+    # На публичной странице дата добавления не отображается. Если сервер
+    # когда-нибудь начнёт отдавать её текстом, попробуем автоматически забрать.
+    date_added = None
+    date_match = re.search(r"(?:Added|Added on|Date added|Добавлено|Дата добавления)\s*[:\-]?\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}(?:\s+\d{1,2}:\d{2})?)", text, re.IGNORECASE)
+    if date_match:
+        date_added = date_match.group(1)
+
+    return {"id": lora_id, "days": lora_days, "name": lora_name, "url": SITE_BASE + "/?p=lora_d&lora_id=" + lora_id,
+            "base_model": links[0] if links else None, "words": words,
+            "tags": raw_tags, "added_by": added_by, "date_added": date_added,
+            "requests": requests_count, "source_url": source_url}
+
+def parse_loras_from_html(html_text, min_days):
+    if not html_text: return []
     try:
-        soup = BeautifulSoup(html, "html.parser")
-        results = []
-        for head in soup.find_all("p", class_="lora_head"):
-            try:
-                text = head.get_text()
-                id_match = re.search(r"#️⃣\s*(\d+)", text)
-                if not id_match: continue
-                lora_id = id_match.group(1)
-                days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
-                if not days_match: continue
-                lora_days = int(days_match.group(1))
-                name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text.strip())
-                lora_name = name_match.group(1).strip() if name_match else "Unknown"
-                lora_url = SITE_BASE + "/?p=lora_d&lora_id=" + lora_id
-                if lora_days >= min_days:
-                    results.append({"id": lora_id, "days": lora_days, "name": lora_name, "url": lora_url})
-            except Exception as e:
-                logger.warning("Ошибка парсинга: " + str(e))
-                continue
-        return results
+        soup = BeautifulSoup(html_text, "html.parser")
+        return [item for head in soup.select("p.lora_head") for item in [_parse_lora_head(head, min_days)] if item]
     except Exception as e:
-        logger.error("Ошибка парсинга: " + str(e))
+        logger.error("Ошибка парсинга страницы: " + str(e))
         return []
+
+def _page_url(page, tag=None):
+    url = BASE_URL + (("&t=" + quote_plus(tag)) if tag else "")
+    return url + (("&c=" + str(page)) if page > 1 else "")
+
+async def _fetch_lora_page(page, min_days, tag=None):
+    html_text = await fetch_with_retry(_page_url(page, tag))
+    if not html_text: return page, [], False
+    soup = BeautifulSoup(html_text, "html.parser")
+    has_cards = bool(soup.select("p.lora_head"))
+    return page, parse_loras_from_html(html_text, min_days), has_cards
+
+async def _find_loras(max_pages, min_days, tag=None):
+    all_results, seen_ids, pages_scanned = [], set(), 0
+    for batch_start in range(1, max_pages + 1, LORA_MAX_CONCURRENCY):
+        if not bot_running: break
+        pages = range(batch_start, min(batch_start + LORA_MAX_CONCURRENCY, max_pages + 1))
+        batch = sorted(await asyncio.gather(*(_fetch_lora_page(p, min_days, tag) for p in pages)), key=lambda x: x[0])
+        stop = False
+        for page, loras, has_cards in batch:
+            pages_scanned += 1
+            if not has_cards:
+                stop = True
+                continue
+            for lora in loras:
+                if lora["id"] not in seen_ids:
+                    seen_ids.add(lora["id"]); all_results.append(lora)
+        if stop: break
+    logger.info(f"=== {'Тег: ' + tag if tag else 'Все лоры'} готов === Лор: {len(all_results)} | Стр: {pages_scanned}")
+    return all_results, pages_scanned
 
 async def find_loras_by_tag(tag, min_days):
-    all_results, pages_scanned = [], 0
-    for page in range(1, MAX_PAGES + 1):
-        if not bot_running: break
-        url = BASE_URL + "&t=" + tag + ("&c="+str(page) if page>1 else "")
-        logger.info("=== Тег: " + tag + " | Страница: " + str(page) + " ===")
-        html = await fetch_with_retry(url)
-        if not html: break
-        loras = parse_loras_from_html(html, min_days)
-        pages_scanned += 1
-        if loras:
-            all_results.extend(loras)
-            logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор")
-        else:
-            logger.info("Стр. " + str(page) + ": лор не найдено")
-            if page > 3: break
-        if page < MAX_PAGES: 
-            await asyncio.sleep(1.0)
-    logger.info("=== Тег " + tag + " готов === Лор: " + str(len(all_results)) + " | Стр: " + str(pages_scanned))
-    return all_results, pages_scanned
+    return await _find_loras(MAX_PAGES, min_days, tag)
 
 async def find_all_loras(min_days):
-    all_results, pages_scanned = [], 0
-    for page in range(1, MAX_PAGES + 1):
-        if not bot_running: break
-        url = BASE_URL if page == 1 else BASE_URL + "&c=" + str(page)
-        logger.info("=== Все лоры | Страница: " + str(page) + " ===")
-        html = await fetch_with_retry(url)
-        if not html: break
-        soup = BeautifulSoup(html, "html.parser")
-        raw_loras = soup.find_all("p", class_="lora_head")
-        if not raw_loras:
-            logger.info("Стр. " + str(page) + ": нет лор на странице → завершаю")
-            break
-        loras = parse_loras_from_html(html, min_days)
-        pages_scanned += 1
-        if loras:
-            all_results.extend(loras)
-            logger.info("Стр. " + str(page) + ": найдено " + str(len(loras)) + " лор (после фильтра)")
-        else:
-            logger.info("Стр. " + str(page) + ": лор есть, но ни один не прошёл фильтр (мин. дней: " + str(min_days) + ")")
-        if page < MAX_PAGES: 
-            await asyncio.sleep(1.0)
-    logger.info("=== ВСЕГО === Стр: " + str(pages_scanned) + " | Лор: " + str(len(all_results)))
-    return all_results, pages_scanned
+    return await _find_loras(MAX_PAGES, min_days)
 
 # ================= ФОРМАТИРОВАНИЕ И ОТПРАВКА =================
 def format_message(lora):
-    return "\n".join([
-        EMOJI["brain"] + " <a href=\"" + lora["url"] + "\">" + lora["name"] + "</a>",
-        EMOJI["id"] + " <code>ID: " + str(lora["id"]) + "</code>",
-        EMOJI["days"] + " <b>" + str(lora["days"]) + " дней</b> без использования",
-        EMOJI["delete"] + " <code>/dellora " + str(lora["id"]) + "</code>",
-        "─" * 30
-    ])
+    lines = [EMOJI["brain"] + f'<a href="{lora["url"]}">{safe_html_text(lora["name"])}</a>',
+             EMOJI["id"] + f' <code>ID: {lora["id"]}</code>',
+             EMOJI["days"] + f' <b>{lora["days"]} дней</b> без использования']
+    if lora.get("base_model"): lines.append("🧩 <b>Base:</b> " + safe_html_text(lora["base_model"]))
+    if lora.get("words"): lines.append("🔤 <b>Words:</b> " + safe_html_text(lora["words"][:300]))
+    if lora.get("requests") is not None: lines.append("📈 <b>Requests:</b> " + f'{lora["requests"]:,}'.replace(",", " "))
+    lines += [EMOJI["delete"] + f' <code>/dellora {lora["id"]}</code>', "─" * 30]
+    return "\n".join(lines)
+
 
 MAX_MESSAGE_LENGTH = 4000
 
@@ -713,13 +729,30 @@ async def send_long_message(message: Message, text: str, parse_mode: str = "HTML
             if parse_mode:
                 await message.answer(part, parse_mode=None)
 
-def make_export_file(loras, min_days, tags):
-    lines = ["# Loonie Bot Export", "# Дата: " + datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M"),
-             "# Порог: >= " + str(min_days) + " дней", "# Теги: " + (", ".join(tags) if tags else "все"),
-             "# Лор: " + str(len(loras)), ""]
+def make_export_file(loras, min_days, tags, requested_by=None, search_timestamp=None):
+    timestamp = search_timestamp or datetime.now(timezone(timedelta(hours=3)))
+    lines = ["# Loonie Bot Lora Export", f"# Дата: {timestamp.strftime('%Y-%m-%d %H:%M:%S МСК')}",
+             f"# Запросил: {requested_by if requested_by is not None else 'неизвестно'}",
+             f"# Порог: >= {min_days} дней", f"# Теги поиска: {', '.join(tags) if tags else 'все'}",
+             f"# Лор: {len(loras)}", ""]
     for l in loras:
-        lines.append("/dellora " + l["id"] + "  # " + l["name"] + " (" + str(l["days"]) + " дней)")
+        lines += [
+            f"[LORA #{l['id']}] {l['name']}",
+            f"Кто добавил: {l.get('added_by') or 'неизвестно'}",
+            f"Дата добавления: {l.get('date_added') or 'не указана сайтом'}",
+            f"ID: {l['id']}",
+            f"Название: {l['name']}",
+            f"Base Model: {l.get('base_model') or '-'}",
+            f"Words: {l.get('words') or '-'}",
+            f"Теги: {', '.join(l.get('tags') or []) or '-'}",
+            f"Requests: {l.get('requests') if l.get('requests') is not None else '-'}",
+            f"Source: {l.get('source_url') or '-'}",
+            f"Lora URL: {l['url']}",
+            f"Delete command: /dellora {l['id']}",
+            "",
+        ]
     return "\n".join(lines).encode("utf-8")
+
 
 async def send_loras_to_chat(message, loras, total_pages):
     await message.answer(EMOJI["stats"] + " Найдено: <b>" + str(len(loras)) + "</b> лор", parse_mode="HTML")
@@ -732,7 +765,7 @@ async def send_loras_to_chat(message, loras, total_pages):
         await message.answer(f"\n{EMOJI['stats']} Страниц: {total_pages} | Лор: {len(loras)} | Среднее: {avg}д | Макс: {mx['days']}д", parse_mode="HTML")
 
 async def send_loras_as_file(message, loras, total_pages, min_days, tags):
-    content = make_export_file(loras, min_days, tags)
+    content = make_export_file(loras, min_days, tags, requested_by=message.from_user.id)
     file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now(timezone(timedelta(hours=3))).strftime("%Y%m%d_%H%M") + ".txt")
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\nЛор: " + str(len(loras)) + "\nПорог: >= " + str(min_days) + " дней"
     if tags: caption += "\nТеги: " + ", ".join(tags)
@@ -1567,246 +1600,6 @@ async def cmd_refreshmodels(m: Message):
 
 
 
-# ================= YANDEX MUSIC: ИНИЦИАЛИЗАЦИЯ =================
-async def init_yandex_music():
-    global ym_client
-    load_ym_state()
-    if not YANDEX_MUSIC_TOKEN:
-        logger.warning("⚠️ YANDEX_MUSIC_TOKEN не задан — Now Playing недоступен")
-        return False
-    try:
-        from yandex_music import ClientAsync
-        ym_client = await ClientAsync(YANDEX_MUSIC_TOKEN).init()
-        me = ym_client.me
-        logger.info(f"✅ Yandex Music: авторизован как {me.account.display_name or me.account.login}")
-        return True
-    except ImportError:
-        logger.warning("⚠️ yandex-music не установлен. Установи: pip install -U --pre 'yandex-music[ynison]'")
-        return False
-    except Exception as e:
-        logger.error(f"❌ Yandex Music init error: {e}")
-        return False
-
-def load_ym_state():
-    global ym_last_track_id, ym_last_message_id
-    try:
-        if os.path.exists(YM_STATE_FILE):
-            with open(YM_STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            ym_last_track_id = data.get("last_track_id")
-            ym_last_message_id = data.get("last_message_id")
-            logger.info(f"🎵 YM state loaded: track={ym_last_track_id}, msg={ym_last_message_id}")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка загрузки ym_state: {e}")
-        ym_last_track_id = None
-        ym_last_message_id = None
-
-def save_ym_state():
-    try:
-        data = {
-            "last_track_id": ym_last_track_id,
-            "last_message_id": ym_last_message_id,
-        }
-        with open(YM_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения ym_state: {e}")
-
-
-# ================= YANDEX MUSIC: ФОНОВЫЙ МОНИТОРИНГ =================
-async def ym_now_playing_loop():
-    """Периодически опрашивает Ynison и шлёт 'Сейчас слушает' в группу"""
-    global ym_last_track_id, ym_enabled
-    if not YANDEX_MUSIC_TOKEN or not YM_TARGET_CHAT_ID:
-        return
-
-    try:
-        from yandex_music.ynison import simple_async
-    except ImportError:
-        logger.warning("⚠️ Ynison недоступен. Установи: pip install -U --pre 'yandex-music[ynison]'")
-        return
-
-    ym_enabled = True
-    logger.info("🎵 Now Playing: цикл запущен")
-
-    while bot_running and ym_enabled:
-        try:
-            track = await simple_async.get_current_track(YANDEX_MUSIC_TOKEN, timeout=10.0)
-            if track and track.playable_id:
-                if track.playable_id != ym_last_track_id:
-                    ym_last_track_id = track.playable_id
-                    await send_now_playing(track)
-            else:
-                ym_last_track_id = None
-                save_ym_state()
-        except Exception as e:
-            logger.warning(f"⚠️ YM polling error: {e}")
-
-        await asyncio.sleep(10)
-
-    logger.info("🎵 Now Playing: цикл остановлен")
-
-
-async def send_now_playing(playable):
-    """Удаляет старый пост и отправляет новый 'Сейчас слушает'"""
-    global ym_client, ym_last_message_id
-
-    if not ym_client:
-        return
-
-    # Сначала удаляем старый пост
-    if ym_last_message_id and YM_TARGET_CHAT_ID:
-        try:
-            await bot.delete_message(chat_id=YM_TARGET_CHAT_ID, message_id=ym_last_message_id)
-            logger.info(f"🗑️ Старый пост удалён: msg_id={ym_last_message_id}")
-        except Exception as e:
-            # Сообщение уже удалено или недоступно — игнорируем
-            logger.debug(f"⚠️ Не удалось удалить старый пост: {e}")
-        ym_last_message_id = None
-        save_ym_state()
-
-    try:
-        # Получаем полную инфу о треке
-        full_tracks = await ym_client.tracks([playable.playable_id])
-        if not full_tracks:
-            return
-        track = full_tracks[0]
-
-        title = track.title or "Unknown"
-        artists = ", ".join([a.name for a in track.artists]) if track.artists else "Unknown Artist"
-
-        # Ищем обложку
-        cover_uri = None
-        if track.cover_uri:
-            cover_uri = track.cover_uri
-        elif track.albums and track.albums[0].cover_uri:
-            cover_uri = track.albums[0].cover_uri
-
-        cover_url = None
-        if cover_uri:
-            cover_url = cover_uri.replace("%%", "400x400")
-            if not cover_url.startswith("http"):
-                cover_url = f"https://{cover_url}"
-
-        # Формируем текст
-        text = (
-            f"🎵 <b>Сейчас слушает</b>\n\n"
-            f"🎤 <b>{safe_html_text(title)}</b>\n"
-            f"👤 {safe_html_text(artists)}\n\n"
-            f"<a href='https://music.yandex.ru/track/{track.id}'>🔗 Открыть в Яндекс.Музыке</a>"
-        )
-
-        # Отправляем новый пост
-        sent_msg = None
-        if cover_url:
-            try:
-                img_resp = await asyncio.to_thread(requests.get, cover_url, timeout=15)
-                img_resp.raise_for_status()
-                photo = BufferedInputFile(file=img_resp.content, filename="cover.jpg")
-                sent_msg = await bot.send_photo(
-                    chat_id=YM_TARGET_CHAT_ID,
-                    photo=photo,
-                    caption=text,
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ Обложка не загрузилась, шлём текстом: {e}")
-                sent_msg = await bot.send_message(
-                    chat_id=YM_TARGET_CHAT_ID,
-                    text=text,
-                    parse_mode="HTML"
-                )
-        else:
-            sent_msg = await bot.send_message(
-                chat_id=YM_TARGET_CHAT_ID,
-                text=text,
-                parse_mode="HTML"
-            )
-
-        if sent_msg:
-            ym_last_message_id = sent_msg.message_id
-            save_ym_state()
-
-        logger.info(f"🎵 Now playing sent: {artists} — {title} (msg_id={ym_last_message_id})")
-
-    except Exception as e:
-        logger.error(f"❌ send_now_playing error: {e}")
-
-
-# ================= КОМАНДЫ YANDEX MUSIC =================
-@dp.message(Command("ymnow"))
-async def cmd_ymnow(m: Message):
-    """Вручную запросить текущий трек"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    if not YANDEX_MUSIC_TOKEN:
-        await m.answer(f"{EMOJI['error']} YANDEX_MUSIC_TOKEN не задан", parse_mode="HTML")
-        return
-
-    status = await m.answer(f"{EMOJI['brain']} <i>Проверяю, что сейчас играет...</i>", parse_mode="HTML")
-
-    try:
-        from yandex_music.ynison import simple_async
-        track = await simple_async.get_current_track(YANDEX_MUSIC_TOKEN, timeout=10.0)
-        if track:
-            await send_now_playing(track)
-            await status.edit_text(f"{EMOJI['check']} Отправлено в группу!", parse_mode="HTML")
-        else:
-            await status.edit_text(f"{EMOJI['warning']} Сейчас ничего не играет", parse_mode="HTML")
-    except Exception as e:
-        await status.edit_text(f"{EMOJI['error']} Ошибка: {str(e)[:100]}", parse_mode="HTML")
-
-
-@dp.message(Command("ymstart"))
-async def cmd_ymstart(m: Message):
-    """Запустить фоновый мониторинг треков"""
-    global ym_task, ym_enabled
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    if not YANDEX_MUSIC_TOKEN or not YM_TARGET_CHAT_ID:
-        await m.answer(f"{EMOJI['error']} Не задан YANDEX_MUSIC_TOKEN или YM_TARGET_CHAT_ID", parse_mode="HTML")
-        return
-    if ym_task and not ym_task.done():
-        await m.answer(f"{EMOJI['info']} Мониторинг уже запущен", parse_mode="HTML")
-        return
-
-    ym_enabled = True
-    ym_task = asyncio.create_task(ym_now_playing_loop())
-    await m.answer(f"{EMOJI['check']} <b>Now Playing запущен!</b>\n\nЦелевая группа: <code>{YM_TARGET_CHAT_ID}</code>", parse_mode="HTML")
-    logger.info("🎵 Now Playing запущен вручную")
-
-
-@dp.message(Command("ymstop"))
-async def cmd_ymstop(m: Message):
-    """Остановить фоновый мониторинг"""
-    global ym_task, ym_enabled, ym_last_track_id, ym_last_message_id
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    ym_enabled = False
-    if ym_task:
-        ym_task.cancel()
-        ym_task = None
-    ym_last_track_id = None
-    ym_last_message_id = None
-    save_ym_state()
-    await m.answer(f"{EMOJI['check']} <b>Now Playing остановлен</b>\n\nСостояние сброшено.", parse_mode="HTML")
-    logger.info("🎵 Now Playing остановлен вручную, состояние сброшено")
-
-
-@dp.message(Command("ymstatus"))
-async def cmd_ymstatus(m: Message):
-    """Показать статус Yandex Music интеграции"""
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    txt = f"{EMOJI['settings']} <b>Yandex Music:</b>\n\n"
-    txt += f"🔑 Токен: {'✅' if YANDEX_MUSIC_TOKEN else '❌'}\n"
-    txt += f"💬 Группа: <code>{YM_TARGET_CHAT_ID or 'не задана'}</code>\n"
-    txt += f"🎵 Мониторинг: <b>{'▶️ Активен' if ym_task and not ym_task.done() else '⏹️ Остановлен'}</b>\n"
-    if ym_last_track_id:
-        txt += f"📝 Последний трек ID: <code>{ym_last_track_id}</code>\n"
-    await m.answer(txt, parse_mode="HTML")
-
-
 @dp.message(Command("model"))
 async def cmd_model(m: Message):
     if m.from_user.id != OWNER_ID_INT:
@@ -2038,7 +1831,7 @@ async def cmd_say(m: Message):
 async def cmd_help(message: Message):
     if message.from_user.id != OWNER_ID_INT: return
     txt = f"{EMOJI['info']} <b>Справка:</b>\n\n"
-    txt += f"<b>{EMOJI['search']} Основные:</b>\n/check — Найти лоры\n/status — Настройки\n/help — Справка\n\n"
+    txt += f"<b>{EMOJI['search']} Основные:</b>\n/check — Найти лоры\n/export — Повторно выгрузить последний поиск\n/status — Настройки\n/help — Справка\n\n"
     txt += f"<b>{EMOJI['settings']} Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег&gt; — Добавить тег\n/rmtag &lt;тег&gt; — Удалить тег\n/tags — Теги\n\n"
     txt += f"<b>{EMOJI['log']} Логи:</b>\n/loglevel &lt;уровень&gt; — info/warning/error/debug\n\n"
     txt += f"<b>{EMOJI['users']} Пользователи:</b>\n/users — Показать всех, кто писал боту\n\n"
@@ -2083,16 +1876,13 @@ async def cmd_check(message: Message):
             await send_loras_as_file(message, all_loras, total_pages, min_days, tags)
         else:
             await send_loras_to_chat(message, all_loras, total_pages)
-        if len(all_loras) < 50:
-            global last_search_results, last_search_meta
-            last_search_results = all_loras.copy()
-            last_search_meta = {
-                "min_days": min_days,
-                "tags": tags.copy(),
-                "pages": total_pages,
-                "timestamp": datetime.now(timezone(timedelta(hours=3)))
-            }
-            logger.info(f"💾 Сохранено {len(all_loras)} лор в кэш для /export")
+        global last_search_results, last_search_meta
+        search_timestamp = datetime.now(timezone(timedelta(hours=3)))
+        last_search_results = all_loras.copy()
+        last_search_meta = {"min_days": min_days, "tags": tags.copy(), "pages": total_pages,
+                            "timestamp": search_timestamp, "requested_by": message.from_user.id,
+                            "requested_by_username": message.from_user.username, "requested_by_name": message.from_user.full_name}
+        logger.info(f"💾 Сохранено {len(all_loras)} лор в кэш для /export")
         update_settings(user_id, last_check=time.time())
         logger.info("✅ Поиск завершён: " + str(len(all_loras)) + " лор")
     except Exception as e:
@@ -2157,7 +1947,7 @@ async def cmd_export(m: Message):
             parse_mode="HTML"
         )
         return
-    content = make_export_file(last_search_results, last_search_meta["min_days"], last_search_meta["tags"])
+    content = make_export_file(last_search_results, last_search_meta["min_days"], last_search_meta["tags"], requested_by=last_search_meta.get("requested_by"), search_timestamp=last_search_meta.get("timestamp"))
     timestamp = last_search_meta["timestamp"].strftime("%Y%m%d_%H%M")
     filename = f"loonie_export_{timestamp}.txt"
     file = BufferedInputFile(file=content, filename=filename)
@@ -2395,11 +2185,6 @@ async def main():
     load_memory()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time}")
-            # Инициализация Yandex Music (опционально)
-    await init_yandex_music()
-    if YANDEX_MUSIC_TOKEN and YM_TARGET_CHAT_ID:
-        ym_task = asyncio.create_task(ym_now_playing_loop())
-        logger.info("🎵 Yandex Music Now Playing loop запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
