@@ -747,17 +747,22 @@ async def send_long_message(message: Message, text: str, parse_mode: str = "HTML
             if parse_mode:
                 await message.answer(part, parse_mode=None)
 
-def make_export_file(loras, min_days, tags, requested_by=None, search_timestamp=None):
-    lines = ["# Loonie Bot Lora Export", f"# Лор: {len(loras)}", ""]
+def make_export_file(loras, language="ru"):
+    if language == "en":
+        lines = ["# Loonie Bot LoRA Export", f"# LoRAs: {len(loras)}", ""]
+        labels = {"name": "Name", "base": "Base Model", "url": "LoRA URL", "delete": "Delete command"}
+    else:
+        lines = ["# Loonie Bot LoRA Export", f"# Лор: {len(loras)}", ""]
+        labels = {"name": "Название", "base": "Base Model", "url": "Lora URL", "delete": "Команда удаления"}
+
     for l in loras:
         lines += [
             f"[LORA #{l['id']}] {l['name']}",
-            f"Кто добавил: {l.get('added_by') or 'неизвестно'}",
             f"ID: {l['id']}",
-            f"Название: {l['name']}",
-            f"Base Model: {l.get('base_model') or '-'}",
-            f"Lora URL: {l['url']}",
-            f"Delete command: /dellora {l['id']}",
+            f"{labels['name']}: {l['name']}",
+            f"{labels['base']}: {l.get('base_model') or '-'}",
+            f"{labels['url']}: {l['url']}",
+            f"{labels['delete']}: /dellora {l['id']}",
             "",
         ]
     return "\n".join(lines).encode("utf-8")
@@ -774,7 +779,7 @@ async def send_loras_to_chat(message, loras, total_pages):
         await message.answer(f"\n{EMOJI['stats']} Страниц: {total_pages} | Лор: {len(loras)} | Среднее: {avg}д | Макс: {mx['days']}д", parse_mode="HTML")
 
 async def send_loras_as_file(message, loras, total_pages, min_days, tags):
-    content = make_export_file(loras, min_days, tags, requested_by=message.from_user.id)
+    content = make_export_file(loras, language="ru")
     file = BufferedInputFile(file=content, filename="loonie_export_" + datetime.now(timezone(timedelta(hours=3))).strftime("%Y%m%d_%H%M") + ".txt")
     caption = EMOJI["file"] + " <b>Экспорт лор</b>\nЛор: " + str(len(loras)) + "\nПорог: >= " + str(min_days) + " дней"
     if tags: caption += "\nТеги: " + ", ".join(tags)
@@ -1956,7 +1961,8 @@ async def cmd_export(m: Message):
             parse_mode="HTML"
         )
         return
-    content = make_export_file(last_search_results, last_search_meta["min_days"], last_search_meta["tags"], requested_by=last_search_meta.get("requested_by"), search_timestamp=last_search_meta.get("timestamp"))
+    export_language = "en" if (m.text or "").strip().lower().endswith(" en") else "ru"
+    content = make_export_file(last_search_results, language=export_language)
     timestamp = last_search_meta["timestamp"].strftime("%Y%m%d_%H%M")
     filename = f"loonie_export_{timestamp}.txt"
     file = BufferedInputFile(file=content, filename=filename)
