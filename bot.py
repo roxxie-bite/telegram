@@ -545,10 +545,35 @@ def get_settings(user_id):
             "min_days": DEFAULT_MIN_DAYS, "tags": DEFAULT_TAGS.copy(),
             "schedule": [], "last_check": 0, "is_checking": False
         }
-    return user_settings[user_id]
+    settings = user_settings[user_id]
+    # Нормализуем также старые теги, загруженные из settings.json.
+    if isinstance(settings.get("tags"), list):
+        normalized_tags = []
+        seen = set()
+        for tag in settings["tags"]:
+            tag = str(tag).strip().lower()
+            if tag and tag not in seen:
+                normalized_tags.append(tag)
+                seen.add(tag)
+        settings["tags"] = normalized_tags
+    else:
+        settings["tags"] = []
+    return settings
 
 def update_settings(user_id, **kwargs):
     settings = get_settings(user_id)
+    if "tags" in kwargs:
+        # Нормализуем теги в одном месте: любой регистр на входе,
+        # внутри бота и в settings.json всегда только lowercase.
+        raw_tags = kwargs["tags"] or []
+        normalized_tags = []
+        seen = set()
+        for tag in raw_tags:
+            tag = str(tag).strip().lower()
+            if tag and tag not in seen:
+                normalized_tags.append(tag)
+                seen.add(tag)
+        kwargs["tags"] = normalized_tags
     settings.update(kwargs)
     user_settings[user_id] = settings
     if user_id == OWNER_ID_INT:
@@ -1931,7 +1956,7 @@ async def cmd_addtag(message: Message):
         return
 
     tags_to_add = [tag.strip().lower() for tag in raw.split(",") if tag.strip()]
-    if not tags_to_add or any(not tag.isalnum() for tag in tags_to_add):
+    if not tags_to_add:
         await message.answer(
             EMOJI["warning"] + " Теги должны быть разделены запятыми: <code>/addtag loonie, anime, yorn</code>",
             parse_mode="HTML",
@@ -1990,7 +2015,7 @@ async def cmd_rmtag(message: Message):
         return
 
     tags_to_remove = [tag.strip().lower() for tag in raw.split(",") if tag.strip()]
-    if not tags_to_remove or any(not tag.isalnum() for tag in tags_to_remove):
+    if not tags_to_remove:
         await message.answer(
             EMOJI["warning"] + " Теги должны быть разделены запятыми: <code>/rmtag loonie, anime, yorn</code>",
             parse_mode="HTML",
