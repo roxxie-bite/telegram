@@ -1,3 +1,4 @@
+import random
 import os
 import sys
 import re
@@ -226,8 +227,8 @@ DEFAULT_TAGS = []
 MAX_PAGES = 50
 EXPORT_THRESHOLD = 50
 COOLDOWN_SECONDS = 20
-LORA_MAX_CONCURRENCY = 5
-LORA_REQUEST_DELAY = 0.15
+LORA_MAX_CONCURRENCY = 3
+LORA_REQUEST_DELAY = 0.35
 
 # Пользователи, которые могут добавлять LoRA.
 # На сайте их username также отображается отдельным тегом, поэтому
@@ -567,20 +568,36 @@ _http_session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=10
 _http_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
 _lora_request_sem = asyncio.Semaphore(LORA_MAX_CONCURRENCY)
 
-async def fetch_with_retry(url, max_retries=3):
+async def fetch_with_retry(url, max_retries=5):
+    # Ошибка 111 (Connection refused) означает, что удалённый сервер
+    # временно не принимает новые TCP-соединения. Это не исправляется
+    # повтором "в ту же секунду", поэтому используем экспоненциальную
+    # паузу и уменьшаем параллельность запросов к Lynther.
     for attempt in range(1, max_retries + 1):
         try:
             async with _lora_request_sem:
                 if LORA_REQUEST_DELAY:
                     await asyncio.sleep(LORA_REQUEST_DELAY)
-                response = await asyncio.to_thread(_http_session.get, url, timeout=(5, 20))
+                response = await asyncio.to_thread(
+                    _http_session.get,
+                    url,
+                    timeout=(8, 25),
+                )
             response.raise_for_status()
             return response.text
         except requests.RequestException as e:
-            logger.warning(f"Попытка {attempt} упала для {url}: {e}")
-            if attempt == max_retries:
+            if attempt >= max_retries:
+                logger.error(f"Не удалось получить {url} после {max_retries} попыток: {e}")
                 return None
-            await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 4))
+
+            # 1.5, 3, 6, 10 сек + небольшой jitter — сервер получает
+            # время восстановить доступ, а несколько задач не синхронизируются.
+            delay = min(1.5 * (2 ** (attempt - 1)), 10.0) + random.uniform(0, 0.5)
+            logger.warning(
+                f"Попытка {attempt}/{max_retries} не удалась для {url}: {e}. "
+                f"Повтор через {delay:.1f} сек."
+            )
+            await asyncio.sleep(delay)
     return None
 
 def _parse_lora_head(head, min_days):
@@ -608,16 +625,9 @@ def _parse_lora_head(head, min_days):
     # ошибочно считался автором.
     added_by = next((LORA_ADDER_USERS_LOWER[x.lower()] for x in raw_tags if x.lower() in LORA_ADDER_USERS_LOWER), None)
 
-    # На публичной странице дата добавления не отображается. Если сервер
-    # когда-нибудь начнёт отдавать её текстом, попробуем автоматически забрать.
-    date_added = None
-    date_match = re.search(r"(?:Added|Added on|Date added|Добавлено|Дата добавления)\s*[:\-]?\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}(?:\s+\d{1,2}:\d{2})?)", text, re.IGNORECASE)
-    if date_match:
-        date_added = date_match.group(1)
-
     return {"id": lora_id, "days": lora_days, "name": lora_name, "url": SITE_BASE + "/?p=lora_d&lora_id=" + lora_id,
             "base_model": links[0] if links else None, "words": words,
-            "tags": raw_tags, "added_by": added_by, "date_added": date_added,
+            "tags": raw_tags, "added_by": added_by,
             "requests": requests_count, "source_url": source_url}
 
 def parse_loras_from_html(html_text, min_days):
@@ -635,10 +645,11 @@ def _page_url(page, tag=None):
 
 async def _fetch_lora_page(page, min_days, tag=None):
     html_text = await fetch_with_retry(_page_url(page, tag))
-    if not html_text: return page, [], False
+    if not html_text:
+        return page, [], False, False  # failed, do not treat as end of pagination
     soup = BeautifulSoup(html_text, "html.parser")
     has_cards = bool(soup.select("p.lora_head"))
-    return page, parse_loras_from_html(html_text, min_days), has_cards
+    return page, parse_loras_from_html(html_text, min_days), has_cards, True
 
 async def _find_loras(max_pages, min_days, tag=None):
     all_results, seen_ids, pages_scanned = [], set(), 0
@@ -647,8 +658,10 @@ async def _find_loras(max_pages, min_days, tag=None):
         pages = range(batch_start, min(batch_start + LORA_MAX_CONCURRENCY, max_pages + 1))
         batch = sorted(await asyncio.gather(*(_fetch_lora_page(p, min_days, tag) for p in pages)), key=lambda x: x[0])
         stop = False
-        for page, loras, has_cards in batch:
+        for page, loras, has_cards, success in batch:
             pages_scanned += 1
+            if not success:
+                continue
             if not has_cards:
                 stop = True
                 continue
@@ -730,23 +743,14 @@ async def send_long_message(message: Message, text: str, parse_mode: str = "HTML
                 await message.answer(part, parse_mode=None)
 
 def make_export_file(loras, min_days, tags, requested_by=None, search_timestamp=None):
-    timestamp = search_timestamp or datetime.now(timezone(timedelta(hours=3)))
-    lines = ["# Loonie Bot Lora Export", f"# Дата: {timestamp.strftime('%Y-%m-%d %H:%M:%S МСК')}",
-             f"# Запросил: {requested_by if requested_by is not None else 'неизвестно'}",
-             f"# Порог: >= {min_days} дней", f"# Теги поиска: {', '.join(tags) if tags else 'все'}",
-             f"# Лор: {len(loras)}", ""]
+    lines = ["# Loonie Bot Lora Export", f"# Лор: {len(loras)}", ""]
     for l in loras:
         lines += [
             f"[LORA #{l['id']}] {l['name']}",
             f"Кто добавил: {l.get('added_by') or 'неизвестно'}",
-            f"Дата добавления: {l.get('date_added') or 'не указана сайтом'}",
             f"ID: {l['id']}",
             f"Название: {l['name']}",
             f"Base Model: {l.get('base_model') or '-'}",
-            f"Words: {l.get('words') or '-'}",
-            f"Теги: {', '.join(l.get('tags') or []) or '-'}",
-            f"Requests: {l.get('requests') if l.get('requests') is not None else '-'}",
-            f"Source: {l.get('source_url') or '-'}",
             f"Lora URL: {l['url']}",
             f"Delete command: /dellora {l['id']}",
             "",
