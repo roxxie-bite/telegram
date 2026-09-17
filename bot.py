@@ -774,18 +774,18 @@ async def send_long_message(message: Message, text: str, parse_mode: str = "HTML
 
 def make_export_file(loras, language="ru"):
     if language == "en":
-        lines = ["# Loonie Bot LoRA Export", f"# LoRAs: {len(loras)}", ""]
-        labels = {"name": "Name", "base": "Base Model", "url": "LoRA URL", "delete": "Delete command"}
+        lines = ["# Super gay sexxx", f"# LoRAs: {len(loras)}", ""]
+        labels = {"base": "Base Model", "unused": "Unused for", "url": "LoRA URL", "delete": "Delete command"}
     else:
-        lines = ["# Loonie Bot LoRA Export", f"# Лор: {len(loras)}", ""]
-        labels = {"name": "Название", "base": "Base Model", "url": "Lora URL", "delete": "Команда удаления"}
+        lines = ["# Super gay sexxx", f"# Лор: {len(loras)}", ""]
+        labels = {"base": "Base Model", "unused": "Не использовалась", "url": "Lora URL", "delete": "Команда удаления"}
 
     for l in loras:
         lines += [
             f"[LORA #{l['id']}] {l['name']}",
             f"ID: {l['id']}",
-            f"{labels['name']}: {l['name']}",
             f"{labels['base']}: {l.get('base_model') or '-'}",
+            f"{labels['unused']}: {l.get('days', '-')} days" if language == "en" else f"{labels['unused']}: {l.get('days', '-')} дней",
             f"{labels['url']}: {l['url']}",
             f"{labels['delete']}: /dellora {l['id']}",
             "",
