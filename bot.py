@@ -904,7 +904,7 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
                 return freellmapi_session.post(
                     FREELLMAPI_CHAT_URL,
                     json=payload,
-                    timeout=60
+                    timeout=(15, 180)
                 )
 
             response = await asyncio.to_thread(make_request)
@@ -946,7 +946,7 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
                 last_error = f"AI вернул HTTP {response.status_code}"
 
         except requests.exceptions.Timeout:
-            last_error = "AI не ответил вовремя"
+            last_error = "AI не ответил в течение 180 секунд"
         except requests.exceptions.ConnectionError:
             last_error = "Нет соединения с AI"
         except Exception as e:
