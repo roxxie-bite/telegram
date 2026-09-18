@@ -56,11 +56,14 @@ def is_user_allowed(user_id: int, allowed_set: set) -> bool:
 # ================= FREELLM API =================
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY")
 FREELLMAPI_BASE_URL = os.getenv("FREELLMAPI_BASE_URL", "http://localhost:3001/v1").rstrip("/")
-FREELLMAPI_IMAGE_URL = FREELLMAPI_BASE_URL + "/images/generations"
 FREELLMAPI_AUDIO_SPEECH_URL = FREELLMAPI_BASE_URL + "/audio/speech"
 FREELLMAPI_AUDIO_TRANSCRIPT_URL = FREELLMAPI_BASE_URL + "/audio/transcriptions"
 FREELLMAPI_CHAT_URL = FREELLMAPI_BASE_URL + "/chat/completions"
 FREELLMAPI_MODELS_URL = FREELLMAPI_BASE_URL + "/models"
+
+# Повторные попытки AI при временной ошибке API
+AI_MAX_RETRIES = 3
+AI_RETRY_DELAYS = (1.5, 3.0, 5.0)
 
 # ================= AI МОДЕЛИ (КАТАЛОГ FREELLM API) =================
 # FreeLLM API поддерживает "auto" для авто-роутинга, а также конкретные модели.
@@ -872,93 +875,92 @@ async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) 
     model_key = model_key or current_ai_model
     model_info = AVAILABLE_AI_MODELS.get(model_key, AVAILABLE_AI_MODELS[DEFAULT_AI_MODEL])
     model_name = model_info["name"]
-    if not freellmapi_session or not FREELLMAPI_API_KEY:
-        return {"success": False, "error": "FreeLLM API не инициализирован (нет FREELLMAPI_API_KEY)"}
-    try:
-        messages = []
-        memory_text = ai_memory.get(model_key, "")
-        if memory_text:
-            messages.append({"role": "system", "content": memory_text})
-        if history:
-            for msg in history:
-                role = "user" if msg.get("role") == "user" else "assistant"
-                messages.append({"role": role, "content": msg.get("text", "")})
-        messages.append({"role": "user", "content": prompt})
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": model_info.get("temp", 0.7),
-            "max_tokens": model_info.get("max_tokens", 8192),
-        }
-        def make_request():
-            return freellmapi_session.post(FREELLMAPI_CHAT_URL, json=payload, timeout=60)
-        response = await asyncio.to_thread(make_request)
-        if response.status_code == 200:
-            data = response.json()
-            choices = data.get("choices", [])
-            if choices:
-                message = choices[0].get("message", {})
-                text = (message.get("content") or "").strip()
-                if text:
-                    return {"success": True, "text": text}
-                reasoning = message.get("reasoning")
-                if reasoning:
-                    return {"success": True, "text": reasoning.strip()}
-            return {"success": False, "error": "Пустой или неверный ответ от API"}
-        elif response.status_code == 400:
-            return {"success": False, "error": "❌ Неверный запрос. Попробуй перефразировать или смени модель."}
-        elif response.status_code == 401:
-            return {"success": False, "error": "🔒 Неверный или отсутствующий FREELLMAPI_API_KEY."}
-        elif response.status_code == 402:
-            return {"success": False, "error": "💳 Недостаточно кредитов (если используется платный тир)."}
-        elif response.status_code == 404:
-            return {"success": False, "error": f"❓ Модель не найдена: {model_name}. Проверь название в дашборде FreeLLM API."}
-        elif response.status_code == 429:
-            return {"success": False, "error": "🔄 Лимит запросов. Подожди минуту или смени модель."}
-        elif response.status_code >= 500:
-            return {"success": False, "error": "⚠️ Серверная ошибка провайдера. Попробуй позже или смени модель."}
-        else:
-            return {"success": False, "error": f"⚠️ HTTP {response.status_code}: {response.text[:150]}"}
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": "⏱️ Таймаут ответа. Попробуй позже."}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "🌐 Ошибка соединения. Проверь, что FreeLLM API запущен на " + FREELLMAPI_BASE_URL}
-    except Exception as e:
-        logger.error(f"❌ FreeLLM API HTTP error: {str(e)}")
-        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
 
-
-async def generate_image(prompt: str, model: str = "auto", size: str = "1024x1024") -> dict:
-    """Генерация изображения через /v1/images/generations"""
     if not freellmapi_session or not FREELLMAPI_API_KEY:
         return {"success": False, "error": "FreeLLM API не инициализирован"}
+
+    messages = []
+    memory_text = ai_memory.get(model_key, "")
+    if memory_text:
+        messages.append({"role": "system", "content": memory_text})
+    if history:
+        for msg in history:
+            role = "user" if msg.get("role") == "user" else "assistant"
+            messages.append({"role": role, "content": msg.get("text", "")})
+    messages.append({"role": "user", "content": prompt})
+
     payload = {
-        "model": model,
-        "prompt": prompt,
-        "n": 1,
-        "size": size,
+        "model": model_name,
+        "messages": messages,
+        "temperature": model_info.get("temp", 0.7),
+        "max_tokens": model_info.get("max_tokens", 8192),
     }
-    try:
-        def _post():
-            return freellmapi_session.post(FREELLMAPI_IMAGE_URL, json=payload, timeout=60)
-        r = await asyncio.to_thread(_post)
-        if r.status_code == 200:
-            data = r.json()
-            images = data.get("data", [])
-            if images and images[0].get("url"):
-                return {"success": True, "url": images[0]["url"], "revised_prompt": images[0].get("revised_prompt", "")}
-            return {"success": False, "error": "Пустой ответ от API изображений"}
-        elif r.status_code == 429:
-            return {"success": False, "error": "🔄 Лимит генерации изображений. Подожди."}
-        elif r.status_code >= 500:
-            return {"success": False, "error": "⚠️ Серверная ошибка при генерации изображения."}
-        else:
-            return {"success": False, "error": f"⚠️ HTTP {r.status_code}: {r.text[:150]}"}
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": "⏱️ Таймаут генерации изображения."}
-    except Exception as e:
-        logger.error(f"❌ Image generation error: {e}")
-        return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
+
+    last_error = "Не удалось получить ответ от AI"
+
+    for attempt in range(AI_MAX_RETRIES):
+        try:
+            def make_request():
+                return freellmapi_session.post(
+                    FREELLMAPI_CHAT_URL,
+                    json=payload,
+                    timeout=60
+                )
+
+            response = await asyncio.to_thread(make_request)
+
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except ValueError:
+                    last_error = "Некорректный ответ от AI"
+                else:
+                    choices = data.get("choices", [])
+                    if choices:
+                        message = choices[0].get("message", {})
+                        answer_text = (message.get("content") or "").strip()
+                        if answer_text:
+                            return {"success": True, "text": answer_text}
+                        reasoning = message.get("reasoning")
+                        if reasoning:
+                            return {"success": True, "text": reasoning.strip()}
+                    last_error = "Пустой ответ от AI"
+
+            elif response.status_code in (401, 402, 400, 404):
+                # Эти ошибки повторный запрос обычно не исправит.
+                if response.status_code == 401:
+                    last_error = "Ошибка авторизации AI"
+                elif response.status_code == 402:
+                    last_error = "Недостаточно кредитов AI"
+                elif response.status_code == 404:
+                    last_error = "Выбранная AI-модель недоступна"
+                else:
+                    last_error = "AI отклонил запрос"
+                return {"success": False, "error": last_error}
+
+            elif response.status_code == 429:
+                last_error = "AI временно ограничил количество запросов"
+            elif response.status_code >= 500:
+                last_error = "Сервер AI временно недоступен"
+            else:
+                last_error = f"AI вернул HTTP {response.status_code}"
+
+        except requests.exceptions.Timeout:
+            last_error = "AI не ответил вовремя"
+        except requests.exceptions.ConnectionError:
+            last_error = "Нет соединения с AI"
+        except Exception as e:
+            logger.error(f"❌ FreeLLM API HTTP error (попытка {attempt + 1}): {e}")
+            last_error = "Внутренняя ошибка AI"
+
+        if attempt < AI_MAX_RETRIES - 1:
+            logger.warning(
+                f"⚠️ AI-запрос не удался, повтор {attempt + 2}/{AI_MAX_RETRIES} "
+                f"через {AI_RETRY_DELAYS[attempt]} сек."
+            )
+            await asyncio.sleep(AI_RETRY_DELAYS[attempt])
+
+    return {"success": False, "error": last_error}
 
 
 async def generate_speech(text: str, model: str = "tts-1", voice: str = "alloy") -> dict:
@@ -1096,8 +1098,8 @@ async def handle_ai_conversation(m: Message):
 
         logger.info(f"🤖 AI диалог [{user_id}]: '{prompt[:50]}...' → ответ ({len(answer_html)} символов)")
     else:
-        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
-        logger.warning(f"⚠️ AI диалог [{user_id}] ошибка: {result['error']}")
+        await status_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
+        logger.warning(f"⚠️ AI диалог [{user_id}] ошибка после {AI_MAX_RETRIES} попыток: {result['error']}")
 
 @dp.message(lambda m: m.from_user.id in ai_conversations and m.voice)
 async def handle_ai_voice(m: Message):
@@ -1159,8 +1161,8 @@ async def handle_ai_voice(m: Message):
 
             logger.info(f"🤖 AI голос [{user_id}]: '{transcribed_text[:50]}...' → ответ ({len(answer_html)} символов)")
         else:
-            await think_msg.edit_text(f"{EMOJI['error']} {ai_result['error']}", parse_mode="HTML")
-            logger.warning(f"⚠️ AI голос [{user_id}] ошибка: {ai_result['error']}")
+            await think_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
+            logger.warning(f"⚠️ AI голос [{user_id}] ошибка после {AI_MAX_RETRIES} попыток: {ai_result['error']}")
 
     except Exception as e:
         logger.error(f"❌ Ошибка обработки голосового: {e}")
@@ -1503,8 +1505,8 @@ async def cmd_ai(m: Message):
                 await send_long_message(m, f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
             logger.info(f"🤖 AI: '{prompt[:50]}...' → ответ ({len(answer)} символов)")
         else:
-            await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
-            logger.warning(f"⚠️ AI ошибка: {result['error']}")
+            await status_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
+            logger.warning(f"⚠️ AI ошибка после {AI_MAX_RETRIES} попыток: {result['error']}")
         return
     
     # Начинаем режим диалога
@@ -1798,47 +1800,6 @@ async def handle_conversion_input(m: Message):
     finally: awaiting_conversion.discard(user_id)
 
 
-@dp.message(Command("image", "img"))
-async def cmd_image(m: Message):
-    if m.from_user.id != OWNER_ID_INT:
-        return
-    prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
-    if not prompt:
-        await m.answer(
-            f"{EMOJI['info']} <b>Генерация изображения</b>\n\n"
-            f"<code>/image &lt;описание&gt;</code>\n\n"
-            f"<b>Пример:</b>\n"
-            f"<code>/image красный лис в осеннем лесу, цифровое искусство</code>",
-            parse_mode="HTML"
-        )
-        return
-    status_msg = await m.answer(f"{EMOJI['brain']} <i>Рисую...</i>", parse_mode="HTML")
-    result = await generate_image(prompt)
-    if result["success"]:
-        try:
-            # Скачиваем изображение
-            img_response = await asyncio.to_thread(requests.get, result["url"], timeout=30)
-            img_response.raise_for_status()
-            photo = BufferedInputFile(file=img_response.content, filename="generated.png")
-            caption = f"🎨 <b>Сгенерировано:</b>\n<i>{safe_html_text(prompt[:200])}</i>"
-            if result.get("revised_prompt"):
-                caption += f"\n\n<i>Уточнённый промпт:</i> <code>{safe_html_text(result['revised_prompt'][:150])}</code>"
-            await m.answer_photo(photo=photo, caption=caption, parse_mode="HTML")
-            await status_msg.delete()
-            logger.info(f"🎨 Изображение сгенерировано: '{prompt[:50]}...'")
-        except Exception as e:
-            logger.error(f"❌ Ошибка скачивания/отправки изображения: {e}")
-            await status_msg.edit_text(
-                f"{EMOJI['check']} <b>Готово!</b>\n\n"
-                f"<a href='{result['url']}'>🔗 Открыть изображение</a>\n\n"
-                f"<i>{safe_html_text(prompt[:200])}</i>",
-                parse_mode="HTML"
-            )
-    else:
-        await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
-        logger.warning(f"⚠️ Image generation error: {result['error']}")
-
-
 @dp.message(Command("say", "tts"))
 async def cmd_say(m: Message):
     if m.from_user.id != OWNER_ID_INT:
@@ -2095,7 +2056,6 @@ async def cmd_status(message: Message):
     can_use, remaining = check_cooldown(message.from_user.id)
     txt += f"⏱️ Кулдаун: <b>{'готов' if can_use else str(remaining) + ' сек'}</b>\n"
     txt += f"\n🎨 <b>Медиа API:</b> {'✅' if freellmapi_session else '❌'}"
-    txt += f"\n   /image — генерация изображений"
     txt += f"\n   /say — текст в голос"
     txt += f"\n   🎤 — распознавание голоса в /ai"
     txt += f"\n🎵 <b>Yandex Music:</b> {'✅' if YANDEX_MUSIC_TOKEN else '❌'} | Группа: {YM_TARGET_CHAT_ID or '—'}"
