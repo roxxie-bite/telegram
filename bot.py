@@ -630,39 +630,79 @@ async def fetch_with_retry(url, max_retries=5):
 
 def _parse_lora_head(head, min_days):
     text = head.get_text(" ", strip=True)
+
+    # 🔒 Заблокированные LoRA нельзя удалять — полностью игнорируем их.
+    # Проверяем именно наличие замка в заголовке LoRA.
+    if "🔒" in text:
+        return None
+
     id_match = re.search(r"#️⃣\s*(\d+)", text)
     days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
+
     if not id_match or not days_match:
         return None
+
     lora_id, lora_days = id_match.group(1), int(days_match.group(1))
+
     if lora_days < min_days:
         return None
+
     name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text)
     lora_name = name_match.group(1).strip() if name_match else "Unknown"
-    links = [a.get_text(" ", strip=True) for a in head.find_all("a") if a.get_text(" ", strip=True)]
-    hrefs = [(a.get_text(" ", strip=True), a.get("href")) for a in head.find_all("a")]
+
+    links = [
+        a.get_text(" ", strip=True)
+        for a in head.find_all("a")
+        if a.get_text(" ", strip=True)
+    ]
+
+    hrefs = [
+        (a.get_text(" ", strip=True), a.get("href"))
+        for a in head.find_all("a")
+    ]
+
     rm = re.search(r"Requests:\s*([\d\s,]+)", text, re.IGNORECASE)
-    requests_count = int(re.sub(r"\D", "", rm.group(1)) or 0) if rm else None
+    requests_count = int(re.sub(r"\D", "", rm.group(1) or "0")) if rm else None
+
     wm = re.search(r"WORDS:\s*(.*?)(?=\s+Requests:|$)", text, re.IGNORECASE)
     words = wm.group(1).strip() if wm else ""
-    source_url = next((href for label, href in hrefs if label.upper() == "SOURCE" and href), None)
+
+    source_url = next(
+        (href for label, href in hrefs if label.upper() == "SOURCE" and href),
+        None
+    )
+
     # Теги Lynther находятся именно в <a class="tag"><span class="tag_gray">USERNAME</span></a>.
-    # Ищем username ТОЛЬКО среди этих тегов, а не во всём тексте LoRA.
     tag_elements = head.select("a.tag span.tag_gray")
-    raw_tags = [tag.get_text(" ", strip=True) for tag in tag_elements if tag.get_text(" ", strip=True)]
+    raw_tags = [
+        tag.get_text(" ", strip=True)
+        for tag in tag_elements
+        if tag.get_text(" ", strip=True)
+    ]
 
     # Если username из разрешённого списка присутствует отдельным тегом,
     # считаем его пользователем, добавившим LoRA.
     added_by = next(
-        (LORA_ADDER_USERS_LOWER[tag.lower()] for tag in raw_tags if tag.lower() in LORA_ADDER_USERS_LOWER),
+        (
+            LORA_ADDER_USERS_LOWER[tag.lower()]
+            for tag in raw_tags
+            if tag.lower() in LORA_ADDER_USERS_LOWER
+        ),
         None,
     )
 
-    return {"id": lora_id, "days": lora_days, "name": lora_name, "url": SITE_BASE + "/?p=lora_d&lora_id=" + lora_id,
-            "base_model": links[0] if links else None, "words": words,
-            "tags": raw_tags, "added_by": added_by,
-            "requests": requests_count, "source_url": source_url}
-
+    return {
+        "id": lora_id,
+        "days": lora_days,
+        "name": lora_name,
+        "url": SITE_BASE + "/?p=lora_d&lora_id=" + lora_id,
+        "base_model": links[0] if links else None,
+        "words": words,
+        "tags": raw_tags,
+        "added_by": added_by,
+        "requests": requests_count,
+        "source_url": source_url
+    }
 def parse_loras_from_html(html_text, min_days):
     if not html_text: return []
     try:
