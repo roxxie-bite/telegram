@@ -1372,48 +1372,45 @@ async def handle_ai_photo(m: Message):
 
 @dp.message(lambda m: m.from_user.id in ai_conversations and m.voice)
 async def handle_ai_voice(m: Message):
-    """Распознавание голоса в режиме AI-диалога"""
     user_id = m.from_user.id
     voice = m.voice
-
-    # Скачиваем голосовое
-    status_msg = await m.answer(f"{EMOJI['brain']} <i>Слушаю...</i>", parse_mode="HTML")
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Начинаю слушать...</i>", parse_mode="HTML")
+    
     try:
-        file = await bot.get_file(voice.file_id)
-        file_path = f"/tmp/ai_voice_{user_id}_{voice.file_unique_id}.ogg"
-        await bot.download_file(file.file_path, file_path)
-
-        # Конвертируем в mp3 если нужно (whisper принимает mp3, m4a, wav, ogg)
-        # OGG от Telegram обычно работает напрямую
-        result = await transcribe_audio(file_path)
-
-        # Удаляем временный файл
-        try:
-            os.remove(file_path)
-        except:
-            pass
-
+        async def _do_transcribe():
+            file = await bot.get_file(voice.file_id)
+            file_path = f"/tmp/ai_voice_{user_id}_{voice.file_unique_id}.ogg"
+            await bot.download_file(file.file_path, file_path)
+            result = await transcribe_audio(file_path)
+            try: os.remove(file_path)
+            except: pass
+            return result
+            
+        result = await run_with_animation(status_msg, VOICE_PHRASES, _do_transcribe())
+        
         if not result["success"]:
             await status_msg.edit_text(f"{EMOJI['error']} {result['error']}", parse_mode="HTML")
             return
-
+            
         transcribed_text = result["text"]
         await status_msg.edit_text(f"🎤 <i>{safe_html_text(transcribed_text[:200])}</i>", parse_mode="HTML")
-
-        # Отправляем распознанный текст в тот же AI-диалог
+        
         ai_conversations[user_id].append({"role": "user", "text": transcribed_text})
         if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
             ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
-
-        think_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
+            
+        think_msg = await m.answer(f"{EMOJI['brain']} <i>Начинаю думать...</i>", parse_mode="HTML")
         history = ai_conversations[user_id][:-1]
-        ai_result = await ask_ai_http(transcribed_text, history=history)
-
+        
+        async def _do_ai_text():
+            return await ask_ai_http(transcribed_text, history=history)
+            
+        ai_result = await run_with_animation(think_msg, THINKING_PHRASES, _do_ai_text())
+        
         if ai_result["success"]:
             answer_text = ai_result["text"]
             ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
             answer_html = markdown_to_html(answer_text)
-
             if len(answer_html) <= MAX_MESSAGE_LENGTH:
                 try:
                     await think_msg.edit_text(answer_html, parse_mode="HTML")
@@ -1422,25 +1419,17 @@ async def handle_ai_voice(m: Message):
                     await think_msg.delete()
                     await send_long_message(m, answer_html, parse_mode="HTML")
             else:
-                try:
-                    await think_msg.delete()
-                except Exception:
-                    pass
+                try: await think_msg.delete()
+                except Exception: pass
                 await send_long_message(m, answer_html, parse_mode="HTML")
-
             logger.info(f"🤖 AI голос [{user_id}]: '{transcribed_text[:50]}...' → ответ ({len(answer_html)} символов)")
         else:
             await think_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
             logger.warning(f"⚠️ AI голос [{user_id}] ошибка после {AI_MAX_RETRIES} попыток: {ai_result['error']}")
-
     except Exception as e:
         logger.error(f"❌ Ошибка обработки голосового: {e}")
         await status_msg.edit_text(f"{EMOJI['error']} Ошибка обработки голоса: {str(e)[:100]}", parse_mode="HTML")
-        try:
-            os.remove(file_path)
-        except:
-            pass
-
+    
 
 # 3. И только потом пересылка обычных сообщений не-владельцев
 @dp.message(F.from_user.id != OWNER_ID_INT)
@@ -1759,30 +1748,32 @@ async def cmd_ai(m: Message):
         logger.info(f"🛑 AI-диалог завершён для пользователя {user_id}")
         return
 
-    # У фото/видео сообщений m.text может быть None; для caption Telegram использует m.caption.
     command_text = m.text or ""
     prompt = command_text.split(maxsplit=1)[1] if len(command_text.split()) > 1 else ""
     if not prompt and m.caption:
         caption_text = m.caption.strip()
-        # Убираем /ai из caption, если Telegram передал команду в подписи.
         caption_parts = caption_text.split(maxsplit=1)
         if caption_parts and caption_parts[0].lower().startswith("/ai"):
             prompt = caption_parts[1].strip() if len(caption_parts) > 1 else ""
 
-    # /ai с прикреплённым фото: одноразовый vision-запрос без запуска постоянного диалога.
+    # 1. /ai с прикреплённым фото: одноразовый vision-запрос
     if m.photo:
-        status_msg = await m.answer(f"{EMOJI['brain']} <i>Смотрю изображение...</i>", parse_mode="HTML")
-        photo_result = await telegram_photo_to_data_url(m)
-        if not photo_result:
-            await status_msg.edit_text(f"{EMOJI['error']} Не удалось скачать изображение.", parse_mode="HTML")
-            return
-        image_data, image_mime = photo_result
-        prompt = prompt or (m.caption or "").strip() or "Проанализируй это изображение и опиши, что на нём изображено."
-        result = await ask_ai_http(prompt, image_data=image_data, image_mime=image_mime, allow_vision_fallback=True)
+        status_msg = await m.answer(f"{EMOJI['brain']} <i>Начинаю анализ...</i>", parse_mode="HTML")
+        
+        async def _do_vision_single():
+            photo_result = await telegram_photo_to_data_url(m)
+            if not photo_result:
+                return {"success": False, "error": "Не удалось скачать изображение."}
+            image_data, image_mime = photo_result
+            req_prompt = prompt or (m.caption or "").strip() or "Проанализируй это изображение и опиши, что на нём изображено."
+            return await ask_ai_http(req_prompt, image_data=image_data, image_mime=image_mime, allow_vision_fallback=True)
+
+        result = await run_with_animation(status_msg, VISION_PHRASES, _do_vision_single())
+        
         if result["success"]:
             answer = markdown_to_html(result["text"])
             if result.get("fallback"):
-                answer += f"\n\n<i>🖼️ Текущая модель не поддержала изображение. Использована: {safe_html_text(result.get("model_used", "vision-модель"))}</i>"
+                answer += f"\n\n<i>🖼️ Текущая модель не поддержала изображение. Использована: {safe_html_text(result.get('model_used', 'vision-модель'))}</i>"
             if len(answer) <= MAX_MESSAGE_LENGTH:
                 await status_msg.edit_text(f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
             else:
@@ -1792,10 +1783,15 @@ async def cmd_ai(m: Message):
             await status_msg.edit_text(f"{EMOJI['error']} Не удалось обработать изображение.\n\n<i>{safe_html_text(result['error'])}</i>", parse_mode="HTML")
         return
 
-    # Если есть текст — одноразовый запрос (старая логика)
+    # 2. Если есть текст — одноразовый запрос
     if prompt:
-        status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
-        result = await ask_ai_http(prompt)
+        status_msg = await m.answer(f"{EMOJI['brain']} <i>Начинаю думать...</i>", parse_mode="HTML")
+        
+        async def _do_ai_single():
+            return await ask_ai_http(prompt)
+            
+        result = await run_with_animation(status_msg, THINKING_PHRASES, _do_ai_single())
+        
         if result["success"]:
             answer = markdown_to_html(result["text"])
             if len(answer) <= MAX_MESSAGE_LENGTH:
@@ -1808,8 +1804,8 @@ async def cmd_ai(m: Message):
             await status_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
             logger.warning(f"⚠️ AI ошибка после {AI_MAX_RETRIES} попыток: {result['error']}")
         return
-    
-    # Начинаем режим диалога
+
+    # 3. Начинаем режим диалога (без промпта)
     ai_conversations[user_id] = []
     model_display = AVAILABLE_AI_MODELS.get(current_ai_model, {}).get("display", current_ai_model)
     await m.answer(
