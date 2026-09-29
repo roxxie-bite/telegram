@@ -1213,7 +1213,7 @@ async def run_with_animation(message: Message, phrases: list, coro):
             pass
         
         while not stop_event.is_set():
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(10)
             if stop_event.is_set():
                 break
             idx += 1
