@@ -1694,7 +1694,15 @@ async def cmd_ai(m: Message):
         logger.info(f"🛑 AI-диалог завершён для пользователя {user_id}")
         return
 
-    prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+    # У фото/видео сообщений m.text может быть None; для caption Telegram использует m.caption.
+    command_text = m.text or ""
+    prompt = command_text.split(maxsplit=1)[1] if len(command_text.split()) > 1 else ""
+    if not prompt and m.caption:
+        caption_text = m.caption.strip()
+        # Убираем /ai из caption, если Telegram передал команду в подписи.
+        caption_parts = caption_text.split(maxsplit=1)
+        if caption_parts and caption_parts[0].lower().startswith("/ai"):
+            prompt = caption_parts[1].strip() if len(caption_parts) > 1 else ""
 
     # /ai с прикреплённым фото: одноразовый vision-запрос без запуска постоянного диалога.
     if m.photo:
