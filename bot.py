@@ -9,6 +9,8 @@ import requests
 import time
 import json
 import html
+import base64
+import mimetypes
 from urllib.parse import quote_plus
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
@@ -335,6 +337,20 @@ if OWNER_ID:
 allowed_ai_users |= EXTRA_ALLOWED_AI_USERS
 ai_conversations = {}      # user_id -> list of {"role": "user"|"assistant", "text": str}
 MAX_AI_HISTORY = 20        # храним последние 20 сообщений (10 пар)
+# Vision fallback: порядок моделей, на которые бот переключается, если текущая не принимает изображения.
+VISION_FALLBACK_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gpt-4o",
+    "gpt-4.1",
+    "llama-4-scout",
+    "claude-sonnet-4-5",
+)
+VISION_ERROR_MARKERS = (
+    "vision", "image", "multimodal", "unsupported", "not support",
+    "does not support", "invalid content", "input type", "content type",
+    "image_url", "image input", "visual",
+)
 
 allowed_ai_users_env = os.getenv("ALLOWED_AI_USERS", "")
 if allowed_ai_users_env:
@@ -911,96 +927,180 @@ def mark_user_forwarded(user_id):
 
 # ================= FREELLM API HTTP CLIENT (расширенный) =================
 
-async def ask_ai_http(prompt: str, history: list = None, model_key: str = None) -> dict:
+async def ask_ai_http(prompt: str, history: list = None, model_key: str = None, image_data: str = None, image_mime: str = "image/jpeg", allow_vision_fallback: bool = True) -> dict:
+    """Запрос к FreeLLM. Поддерживает обычный текст и OpenAI-compatible vision.
+
+    image_data — data URL (data:image/...;base64,...). При ошибке vision автоматически
+    пробует модели из VISION_FALLBACK_MODELS, не меняя выбранную пользователем модель.
+    """
     model_key = model_key or current_ai_model
-    model_info = AVAILABLE_AI_MODELS.get(model_key, AVAILABLE_AI_MODELS[DEFAULT_AI_MODEL])
-    model_name = model_info["name"]
 
     if not freellmapi_session or not FREELLMAPI_API_KEY:
         return {"success": False, "error": "FreeLLM API не инициализирован"}
 
-    messages = []
-    memory_text = ai_memory.get(model_key, "")
-    if memory_text:
-        messages.append({"role": "system", "content": memory_text})
-    if history:
-        for msg in history:
-            role = "user" if msg.get("role") == "user" else "assistant"
-            messages.append({"role": role, "content": msg.get("text", "")})
-    messages.append({"role": "user", "content": prompt})
+    def build_messages(selected_model_key: str):
+        model_info = AVAILABLE_AI_MODELS.get(selected_model_key, AVAILABLE_AI_MODELS.get(DEFAULT_AI_MODEL, {}))
+        messages = []
+        memory_text = ai_memory.get(selected_model_key, "")
+        if memory_text:
+            messages.append({"role": "system", "content": memory_text})
+        if history:
+            for msg in history:
+                role = "user" if msg.get("role") == "user" else "assistant"
+                # Старый формат истории: {role, text}. Новый может содержать image_data/image_mime.
+                msg_image = msg.get("image_data")
+                msg_text = msg.get("text", "")
+                if role == "user" and msg_image:
+                    content = [
+                        {"type": "text", "text": msg_text or "Опиши/проанализируй это изображение."},
+                        {"type": "image_url", "image_url": {"url": msg_image}},
+                    ]
+                else:
+                    content = msg_text
+                messages.append({"role": role, "content": content})
+        if image_data:
+            user_content = [
+                {"type": "text", "text": prompt or "Проанализируй это изображение."},
+                {"type": "image_url", "image_url": {"url": image_data}},
+            ]
+        else:
+            user_content = prompt
+        messages.append({"role": "user", "content": user_content})
+        return messages, model_info
 
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "temperature": model_info.get("temp", 0.7),
-        "max_tokens": model_info.get("max_tokens", 8192),
-    }
+    def looks_like_vision_error(status_code: int, body: str) -> bool:
+        if status_code not in (400, 404, 415, 422):
+            return False
+        low = (body or "").lower()
+        return any(marker in low for marker in VISION_ERROR_MARKERS)
+
+    candidates = [model_key]
+    if image_data and allow_vision_fallback:
+        for candidate in VISION_FALLBACK_MODELS:
+            if candidate not in candidates and candidate in AVAILABLE_AI_MODELS:
+                candidates.append(candidate)
 
     last_error = "Не удалось получить ответ от AI"
 
-    for attempt in range(AI_MAX_RETRIES):
-        try:
-            def make_request():
-                return freellmapi_session.post(
-                    FREELLMAPI_CHAT_URL,
-                    json=payload,
-                    timeout=(15, 180)
+    for candidate_index, selected_model_key in enumerate(candidates):
+        model_info = AVAILABLE_AI_MODELS.get(selected_model_key, AVAILABLE_AI_MODELS.get(DEFAULT_AI_MODEL, {}))
+        model_name = model_info.get("name", selected_model_key)
+        messages, _ = build_messages(selected_model_key)
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": model_info.get("temp", 0.7),
+            "max_tokens": model_info.get("max_tokens", 8192),
+        }
+
+        for attempt in range(AI_MAX_RETRIES):
+            try:
+                def make_request():
+                    return freellmapi_session.post(
+                        FREELLMAPI_CHAT_URL,
+                        json=payload,
+                        timeout=(15, 180)
+                    )
+
+                response = await asyncio.to_thread(make_request)
+                body_text = response.text[:1000] if response is not None else ""
+
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        last_error = "Некорректный ответ от AI"
+                    else:
+                        choices = data.get("choices", [])
+                        if choices:
+                            message = choices[0].get("message", {})
+                            answer_content = message.get("content")
+                            if isinstance(answer_content, list):
+                                answer_text = "".join(
+                                    part.get("text", "") if isinstance(part, dict) else str(part)
+                                    for part in answer_content
+                                ).strip()
+                            else:
+                                answer_text = (answer_content or "").strip()
+                            if answer_text:
+                                return {
+                                    "success": True,
+                                    "text": answer_text,
+                                    "model_used": selected_model_key,
+                                    "fallback": candidate_index > 0,
+                                }
+                            reasoning = message.get("reasoning")
+                            if reasoning:
+                                return {
+                                    "success": True,
+                                    "text": reasoning.strip(),
+                                    "model_used": selected_model_key,
+                                    "fallback": candidate_index > 0,
+                                }
+                        last_error = "Пустой ответ от AI"
+
+                elif image_data and allow_vision_fallback and looks_like_vision_error(response.status_code, body_text):
+                    last_error = f"Модель {selected_model_key} не поддерживает изображения"
+                    logger.warning(f"🖼️ Vision не поддержан моделью {selected_model_key}: HTTP {response.status_code}; пробуем fallback")
+                    break
+                elif response.status_code in (401, 402, 400, 404):
+                    if response.status_code == 401:
+                        last_error = "Ошибка авторизации AI"
+                    elif response.status_code == 402:
+                        last_error = "Недостаточно кредитов AI"
+                    elif response.status_code == 404:
+                        last_error = "Выбранная AI-модель недоступна"
+                    else:
+                        last_error = "AI отклонил запрос"
+                    return {"success": False, "error": last_error}
+                elif response.status_code == 429:
+                    last_error = "AI временно ограничил количество запросов"
+                elif response.status_code >= 500:
+                    last_error = "Сервер AI временно недоступен"
+                else:
+                    last_error = f"AI вернул HTTP {response.status_code}"
+
+            except requests.exceptions.Timeout:
+                last_error = "AI не ответил в течение 180 секунд"
+            except requests.exceptions.ConnectionError:
+                last_error = "Нет соединения с AI"
+            except Exception as e:
+                logger.error(f"❌ FreeLLM API HTTP error (попытка {attempt + 1}, модель {selected_model_key}): {e}")
+                last_error = "Внутренняя ошибка AI"
+
+            if attempt < AI_MAX_RETRIES - 1:
+                logger.warning(
+                    f"⚠️ AI-запрос не удался, модель={selected_model_key}, повтор {attempt + 2}/{AI_MAX_RETRIES} "
+                    f"через {AI_RETRY_DELAYS[attempt]} сек."
                 )
+                await asyncio.sleep(AI_RETRY_DELAYS[attempt])
 
-            response = await asyncio.to_thread(make_request)
-
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                except ValueError:
-                    last_error = "Некорректный ответ от AI"
-                else:
-                    choices = data.get("choices", [])
-                    if choices:
-                        message = choices[0].get("message", {})
-                        answer_text = (message.get("content") or "").strip()
-                        if answer_text:
-                            return {"success": True, "text": answer_text}
-                        reasoning = message.get("reasoning")
-                        if reasoning:
-                            return {"success": True, "text": reasoning.strip()}
-                    last_error = "Пустой ответ от AI"
-
-            elif response.status_code in (401, 402, 400, 404):
-                # Эти ошибки повторный запрос обычно не исправит.
-                if response.status_code == 401:
-                    last_error = "Ошибка авторизации AI"
-                elif response.status_code == 402:
-                    last_error = "Недостаточно кредитов AI"
-                elif response.status_code == 404:
-                    last_error = "Выбранная AI-модель недоступна"
-                else:
-                    last_error = "AI отклонил запрос"
-                return {"success": False, "error": last_error}
-
-            elif response.status_code == 429:
-                last_error = "AI временно ограничил количество запросов"
-            elif response.status_code >= 500:
-                last_error = "Сервер AI временно недоступен"
-            else:
-                last_error = f"AI вернул HTTP {response.status_code}"
-
-        except requests.exceptions.Timeout:
-            last_error = "AI не ответил в течение 180 секунд"
-        except requests.exceptions.ConnectionError:
-            last_error = "Нет соединения с AI"
-        except Exception as e:
-            logger.error(f"❌ FreeLLM API HTTP error (попытка {attempt + 1}): {e}")
-            last_error = "Внутренняя ошибка AI"
-
-        if attempt < AI_MAX_RETRIES - 1:
-            logger.warning(
-                f"⚠️ AI-запрос не удался, повтор {attempt + 2}/{AI_MAX_RETRIES} "
-                f"через {AI_RETRY_DELAYS[attempt]} сек."
-            )
-            await asyncio.sleep(AI_RETRY_DELAYS[attempt])
+        # Следующий candidate запускается только для vision-запроса после явной ошибки поддержки.
+        if not image_data or not allow_vision_fallback:
+            break
 
     return {"success": False, "error": last_error}
+
+
+async def telegram_photo_to_data_url(message: Message) -> tuple[str, str] | None:
+    """Скачивает Telegram photo и возвращает (data_url, mime_type)."""
+    if not message.photo:
+        return None
+    try:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        import io
+        buffer = io.BytesIO()
+        await bot.download_file(file.file_path, buffer)
+        raw = buffer.getvalue()
+        if not raw:
+            return None
+        mime = "image/jpeg"
+        data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        return data_url, mime
+    except Exception as e:
+        logger.error(f"❌ Не удалось скачать изображение из Telegram: {e}")
+        return None
 
 
 async def generate_speech(text: str, model: str = "tts-1", voice: str = "alloy") -> dict:
@@ -1140,6 +1240,70 @@ async def handle_ai_conversation(m: Message):
     else:
         await status_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
         logger.warning(f"⚠️ AI диалог [{user_id}] ошибка после {AI_MAX_RETRIES} попыток: {result['error']}")
+
+@dp.message(lambda m: m.from_user.id in ai_conversations and m.photo)
+async def handle_ai_photo(m: Message):
+    """Обработка изображений в режиме /ai. Поддерживает фото с подписью и без неё."""
+    user_id = m.from_user.id
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Смотрю изображение...</i>", parse_mode="HTML")
+    try:
+        photo_result = await telegram_photo_to_data_url(m)
+        if not photo_result:
+            await status_msg.edit_text(f"{EMOJI['error']} Не удалось скачать изображение.", parse_mode="HTML")
+            return
+        image_data, image_mime = photo_result
+        prompt = (m.caption or "").strip() or "Проанализируй это изображение и опиши, что на нём изображено."
+
+        history = ai_conversations[user_id][:]
+        # Изображения в истории сохраняются только в памяти процесса; это позволяет задавать
+        # следующие вопросы по той же картинке, не ломая обычную текстовую историю.
+        result = await ask_ai_http(
+            prompt,
+            history=history,
+            image_data=image_data,
+            image_mime=image_mime,
+            allow_vision_fallback=True,
+        )
+
+        if result["success"]:
+            answer_text = result["text"]
+            ai_conversations[user_id].append({
+                "role": "user",
+                "text": prompt,
+                "image_data": image_data,
+                "image_mime": image_mime,
+            })
+            ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
+            if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
+                ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
+
+            answer_html = markdown_to_html(answer_text)
+            fallback_note = ""
+            if result.get("fallback"):
+                used = result.get("model_used", "vision-модель")
+                fallback_note = f"\n\n<i>🖼️ Текущая модель не поддержала изображение. Использована: {safe_html_text(used)}</i>"
+            answer_html += fallback_note
+
+            if len(answer_html) <= MAX_MESSAGE_LENGTH:
+                try:
+                    await status_msg.edit_text(answer_html, parse_mode="HTML")
+                except Exception:
+                    await status_msg.delete()
+                    await send_long_message(m, answer_html, parse_mode="HTML")
+            else:
+                await status_msg.delete()
+                await send_long_message(m, answer_html, parse_mode="HTML")
+            logger.info(f"🖼️ AI фото [{user_id}] → модель {result.get('model_used', current_ai_model)}")
+        else:
+            await status_msg.edit_text(f"{EMOJI['error']} Не удалось обработать изображение.\n\n<i>{safe_html_text(result['error'])}</i>", parse_mode="HTML")
+            logger.warning(f"⚠️ AI фото [{user_id}] ошибка: {result['error']}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки изображения: {e}")
+        try:
+            await status_msg.edit_text(f"{EMOJI['error']} Ошибка обработки изображения: {safe_html_text(str(e)[:200])}", parse_mode="HTML")
+        except Exception:
+            pass
+
 
 @dp.message(lambda m: m.from_user.id in ai_conversations and m.voice)
 async def handle_ai_voice(m: Message):
@@ -1531,6 +1695,29 @@ async def cmd_ai(m: Message):
         return
 
     prompt = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+
+    # /ai с прикреплённым фото: одноразовый vision-запрос без запуска постоянного диалога.
+    if m.photo:
+        status_msg = await m.answer(f"{EMOJI['brain']} <i>Смотрю изображение...</i>", parse_mode="HTML")
+        photo_result = await telegram_photo_to_data_url(m)
+        if not photo_result:
+            await status_msg.edit_text(f"{EMOJI['error']} Не удалось скачать изображение.", parse_mode="HTML")
+            return
+        image_data, image_mime = photo_result
+        prompt = prompt or (m.caption or "").strip() or "Проанализируй это изображение и опиши, что на нём изображено."
+        result = await ask_ai_http(prompt, image_data=image_data, image_mime=image_mime, allow_vision_fallback=True)
+        if result["success"]:
+            answer = markdown_to_html(result["text"])
+            if result.get("fallback"):
+                answer += f"\n\n<i>🖼️ Текущая модель не поддержала изображение. Использована: {safe_html_text(result.get("model_used", "vision-модель"))}</i>"
+            if len(answer) <= MAX_MESSAGE_LENGTH:
+                await status_msg.edit_text(f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
+            else:
+                await status_msg.delete()
+                await send_long_message(m, f"{PREMIUM_EMOJI['sparkle']} <b>AI:</b>\n\n{answer}", parse_mode="HTML")
+        else:
+            await status_msg.edit_text(f"{EMOJI['error']} Не удалось обработать изображение.\n\n<i>{safe_html_text(result['error'])}</i>", parse_mode="HTML")
+        return
 
     # Если есть текст — одноразовый запрос (старая логика)
     if prompt:
