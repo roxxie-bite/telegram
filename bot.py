@@ -1160,6 +1160,80 @@ async def transcribe_audio(file_path: str, model: str = "whisper-1") -> dict:
         logger.error(f"❌ Transcription error: {e}")
         return {"success": False, "error": f"⚠️ Ошибка: {str(e)[:200]}"}
 
+
+# ================= СТАТУСЫ И АНИМАЦИЯ =================
+THINKING_PHRASES = [
+    "🧠 <i>Перебираю нейроны...</i>",
+    "⚙️ <i>Крутю шестерёнки...</i>",
+    "🔮 <i>Заглядываю в матрицу...</i>",
+    "🐾 <i>Принюхиваюсь к данным...</i>",
+    "🚀 <i>Разгоняю токены...</i>",
+    "🍵 <i>Завариваю чайник с промптом...</i>",
+    "🎨 <i>Подбираю слова...</i>",
+    "🔋 <i>Заряжаю контекст...</i>",
+    "🌌 <i>Исследую космос ответов...</i>",
+    "🛠️ <i>Собираю ответ по кусочкам...</i>",
+]
+
+VISION_PHRASES = [
+    "👁️ <i>Всматриваюсь в пиксели...</i>",
+    "🖼️ <i>Анализирую цвета и формы...</i>",
+    "🔍 <i>Изучаю детали...</i>",
+    "👀 <i>Смотрю в оба...</i>",
+    "🎨 <i>Оцениваю композицию...</i>",
+    "🦊 <i>Нюхаю картинку...</i>",
+]
+
+VOICE_PHRASES = [
+    "👂 <i>Прислушиваюсь...</i>",
+    "🎙️ <i>Распознаю волны...</i>",
+    "🦻 <i>Улавливаю смысл...</i>",
+    "🎧 <i>Настраиваю частоты...</i>",
+]
+
+TTS_PHRASES = [
+    "🗣️ <i>Прочищаю голосовые связки...</i>",
+    "🎙️ <i>Настраиваю микрофон...</i>",
+    "🎵 <i>Подбираю интонацию...</i>",
+    "🎼 <i>Распеваюсь...</i>",
+]
+
+async def run_with_animation(message: Message, phrases: list, coro):
+    """
+    Запускает фоновую анимацию статуса (смена текста каждые 2.5 сек)
+    и основную задачу. Когда основная задача завершится, анимация остановится.
+    """
+    stop_event = asyncio.Event()
+
+    async def animator():
+        idx = 0
+        try:
+            await message.edit_text(phrases[0], parse_mode="HTML")
+        except Exception:
+            pass
+        
+        while not stop_event.is_set():
+            await asyncio.sleep(2.5)
+            if stop_event.is_set():
+                break
+            idx += 1
+            try:
+                await message.edit_text(phrases[idx % len(phrases)], parse_mode="HTML")
+            except Exception:
+                pass
+
+    task = asyncio.create_task(animator())
+    try:
+        result = await coro
+        return result
+    finally:
+        stop_event.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 # ================= ОБРАТНАЯ СВЯЗЬ =================
 
 # 1. Сначала ответы владельца на пересланные сообщения
@@ -1205,23 +1279,25 @@ async def handle_ai_conversation(m: Message):
     prompt = m.text.strip()
     if not prompt:
         return
-
+    
     ai_conversations[user_id].append({"role": "user", "text": prompt})
     if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
         ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
-
-    status_msg = await m.answer(f"{EMOJI['brain']} <i>Думаю...</i>", parse_mode="HTML")
-
+        
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Начинаю думать...</i>", parse_mode="HTML")
     history = ai_conversations[user_id][:-1]
-    result = await ask_ai_http(prompt, history=history)
-
+    
+    async def _do_ai():
+        return await ask_ai_http(prompt, history=history)
+        
+    result = await run_with_animation(status_msg, THINKING_PHRASES, _do_ai())
+    
     if result["success"]:
         answer_text = result["text"]
         ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
         answer_html = markdown_to_html(answer_text)
-
+        
         if len(answer_html) <= MAX_MESSAGE_LENGTH:
-            # Просто редактируем "Думаю..." в ответ
             try:
                 await status_msg.edit_text(answer_html, parse_mode="HTML")
             except Exception as e:
@@ -1229,13 +1305,11 @@ async def handle_ai_conversation(m: Message):
                 await status_msg.delete()
                 await send_long_message(m, answer_html, parse_mode="HTML")
         else:
-            # Ответ длинный — удаляем "Думаю..." и шлём частями
             try:
                 await status_msg.delete()
             except Exception:
                 pass
             await send_long_message(m, answer_html, parse_mode="HTML")
-
         logger.info(f"🤖 AI диалог [{user_id}]: '{prompt[:50]}...' → ответ ({len(answer_html)} символов)")
     else:
         await status_msg.edit_text(f"{EMOJI['error']} Не удалось получить ответ. Попробуй ещё раз позже.", parse_mode="HTML")
@@ -1243,47 +1317,38 @@ async def handle_ai_conversation(m: Message):
 
 @dp.message(lambda m: m.from_user.id in ai_conversations and m.photo)
 async def handle_ai_photo(m: Message):
-    """Обработка изображений в режиме /ai. Поддерживает фото с подписью и без неё."""
     user_id = m.from_user.id
-    status_msg = await m.answer(f"{EMOJI['brain']} <i>Смотрю изображение...</i>", parse_mode="HTML")
-    try:
+    status_msg = await m.answer(f"{EMOJI['brain']} <i>Начинаю анализ...</i>", parse_mode="HTML")
+    
+    async def _do_vision_full():
         photo_result = await telegram_photo_to_data_url(m)
         if not photo_result:
-            await status_msg.edit_text(f"{EMOJI['error']} Не удалось скачать изображение.", parse_mode="HTML")
-            return
+            return {"success": False, "error": "Не удалось скачать изображение."}
         image_data, image_mime = photo_result
-        prompt = (m.caption or "").strip() or "Проанализируй это изображение и опиши, что на нём изображено."
-
+        prompt_text = (m.caption or " ").strip() or "Проанализируй это изображение и опиши, что на нём изображено."
         history = ai_conversations[user_id][:]
-        # Изображения в истории сохраняются только в памяти процесса; это позволяет задавать
-        # следующие вопросы по той же картинке, не ломая обычную текстовую историю.
-        result = await ask_ai_http(
-            prompt,
-            history=history,
-            image_data=image_data,
-            image_mime=image_mime,
-            allow_vision_fallback=True,
+        return await ask_ai_http(
+            prompt_text, history=history, image_data=image_data, 
+            image_mime=image_mime, allow_vision_fallback=True,
         )
 
+    try:
+        result = await run_with_animation(status_msg, VISION_PHRASES, _do_vision_full())
+        
         if result["success"]:
             answer_text = result["text"]
-            ai_conversations[user_id].append({
-                "role": "user",
-                "text": prompt,
-                "image_data": image_data,
-                "image_mime": image_mime,
-            })
+            ai_conversations[user_id].append({"role": "user", "text": (m.caption or "").strip(), "image_data": "img", "image_mime": "img"})
             ai_conversations[user_id].append({"role": "assistant", "text": answer_text})
             if len(ai_conversations[user_id]) > MAX_AI_HISTORY:
                 ai_conversations[user_id] = ai_conversations[user_id][-MAX_AI_HISTORY:]
-
+                
             answer_html = markdown_to_html(answer_text)
             fallback_note = ""
             if result.get("fallback"):
                 used = result.get("model_used", "vision-модель")
                 fallback_note = f"\n\n<i>🖼️ Текущая модель не поддержала изображение. Использована: {safe_html_text(used)}</i>"
             answer_html += fallback_note
-
+            
             if len(answer_html) <= MAX_MESSAGE_LENGTH:
                 try:
                     await status_msg.edit_text(answer_html, parse_mode="HTML")
