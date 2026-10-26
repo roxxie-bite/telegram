@@ -610,6 +610,37 @@ _http_session = requests.Session()
 _http_session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; LoonieBot/1.0)", "Accept": "text/html,application/xhtml+xml", "Accept-Language": "ru,en;q=0.8"})
 _http_session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
 _http_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
+
+class SiteUnavailableError(RuntimeError):
+    pass
+
+
+async def ensure_site_available() -> None:
+    """
+    Быстро проверяет, доступен ли Lynther.
+    Если сайт лежит/не отвечает/возвращает ошибку — поднимаем SiteUnavailableError.
+    """
+    test_url = BASE_URL
+
+    try:
+        response = await asyncio.to_thread(
+            _http_session.get,
+            test_url,
+            timeout=(5, 15),
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+
+        # Если сайт вернул 200, но пустую/подозрительно короткую страницу.
+        if not response.text or len(response.text.strip()) < 50:
+            raise SiteUnavailableError("сайт вернул пустую страницу")
+
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        raise SiteUnavailableError(f"HTTP {status}") from e
+
+    except requests.RequestException as e:
+        raise SiteUnavailableError(str(e)) from e
 _lora_request_sem = asyncio.Semaphore(LORA_MAX_CONCURRENCY)
 
 async def fetch_with_retry(url, max_retries=5):
@@ -742,23 +773,75 @@ async def _fetch_lora_page(page, min_days, tag=None):
 
 async def _find_loras(max_pages, min_days, tag=None):
     all_results, seen_ids, pages_scanned = [], set(), 0
+    successful_pages = 0
+    failed_pages = 0
+
     for batch_start in range(1, max_pages + 1, LORA_MAX_CONCURRENCY):
-        if not bot_running: break
-        pages = range(batch_start, min(batch_start + LORA_MAX_CONCURRENCY, max_pages + 1))
-        batch = sorted(await asyncio.gather(*(_fetch_lora_page(p, min_days, tag) for p in pages)), key=lambda x: x[0])
+        if not bot_running:
+            break
+
+        pages = range(
+            batch_start,
+            min(batch_start + LORA_MAX_CONCURRENCY, max_pages + 1)
+        )
+
+        batch = sorted(
+            await asyncio.gather(*(
+                _fetch_lora_page(p, min_days, tag) for p in pages
+            )),
+            key=lambda x: x[0],
+        )
+
+        batch_success = 0
         stop = False
+
         for page, loras, has_cards, success in batch:
             pages_scanned += 1
+
             if not success:
+                failed_pages += 1
                 continue
+
+            successful_pages += 1
+            batch_success += 1
+
             if not has_cards:
                 stop = True
                 continue
+
             for lora in loras:
                 if lora["id"] not in seen_ids:
-                    seen_ids.add(lora["id"]); all_results.append(lora)
-        if stop: break
-    logger.info(f"=== {'Тег: ' + tag if tag else 'Все лоры'} готов === Лор: {len(all_results)} | Стр: {pages_scanned}")
+                    seen_ids.add(lora["id"])
+                    all_results.append(lora)
+
+        # Если整 batch не удалось загрузить — сайт скорее всего недоступен.
+        if batch_success == 0:
+            raise SiteUnavailableError(
+                "не удалось загрузить страницы поиска"
+            )
+
+        if stop:
+            break
+
+    if not bot_running:
+        return all_results, pages_scanned
+
+    if pages_scanned > 0 and successful_pages == 0:
+        raise SiteUnavailableError(
+            "не удалось загрузить ни одной страницы поиска"
+        )
+
+    if failed_pages:
+        logger.warning(
+            f"⚠️ Поиск завершился с частичными ошибками: "
+            f"успешно {successful_pages}, ошибок {failed_pages}"
+        )
+
+    logger.info(
+        f"=== {'Тег: ' + tag if tag else 'Все лоры'} готов === "
+        f"Лор: {len(all_results)} | Стр: {pages_scanned}"
+    )
+
     return all_results, pages_scanned
 
 async def find_loras_by_tag(tag, min_days):
@@ -2136,24 +2219,56 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
+    global last_search_results, last_search_meta
+
     if message.from_user.id != OWNER_ID_INT:
         return
+
     if not bot_running:
-        await message.answer(EMOJI["error"] + " Бот остановлен.", parse_mode="HTML")
+        await message.answer(
+            EMOJI["error"] + " Бот остановлен.",
+            parse_mode="HTML",
+        )
         return
+
     user_id = message.from_user.id
     settings = get_settings(user_id)
+
     if settings.get("is_checking"):
-        await message.answer(EMOJI["lock"] + " Проверка уже запущена!", parse_mode="HTML")
+        await message.answer(
+            EMOJI["lock"] + " Проверка уже запущена!",
+            parse_mode="HTML",
+        )
         return
+
     can_use, remaining = check_cooldown(user_id)
     if not can_use:
-        await message.answer(EMOJI["clock"] + f" Кулдаун! Повтори через <b>{remaining}</b> сек.", parse_mode="HTML")
+        await message.answer(
+            EMOJI["clock"] + f" Кулдаун! Повтори через <b>{remaining}</b> сек.",
+            parse_mode="HTML",
+        )
         return
+
+    # Сначала проверяем, жив ли сайт.
+    try:
+        await ensure_site_available()
+    except SiteUnavailableError as e:
+        await message.answer(
+            f"{EMOJI['error']} Сайт недоступен: {safe_html_text(str(e)[:200])}",
+            parse_mode="HTML",
+        )
+        return
+
     try:
         update_settings(user_id, is_checking=True)
-        await message.answer(EMOJI["search"] + " Поиск запущен...", parse_mode="HTML")
+
+        await message.answer(
+            EMOJI["search"] + " Поиск запущен...",
+            parse_mode="HTML",
+        )
+
         min_days, tags = settings["min_days"], settings["tags"]
+
         if tags:
             all_loras, total_pages = [], 0
             for tag in tags:
@@ -2162,28 +2277,53 @@ async def cmd_check(message: Message):
                 total_pages += pages
         else:
             all_loras, total_pages = await find_all_loras(min_days)
+
         if not all_loras:
             await message.answer(EMOJI["check"] + " Лоры не найдены.")
-            update_settings(user_id, is_checking=False, last_check=time.time())
+            update_settings(user_id, last_check=time.time())
             return
+
         all_loras.sort(key=lambda x: x["days"], reverse=True)
+
         if len(all_loras) > EXPORT_THRESHOLD:
-            await message.answer(EMOJI["file"] + f" Лор много (<b>{len(all_loras)}</b>), отправляю файлом...", parse_mode="HTML")
+            await message.answer(
+                EMOJI["file"] + f" Лор много (<b>{len(all_loras)}</b>), отправляю файлом...",
+                parse_mode="HTML",
+            )
             await send_loras_as_file(message, all_loras, total_pages, min_days, tags)
         else:
             await send_loras_to_chat(message, all_loras, total_pages)
-        global last_search_results, last_search_meta
+
         search_timestamp = datetime.now(timezone(timedelta(hours=3)))
+
         last_search_results = all_loras.copy()
-        last_search_meta = {"min_days": min_days, "tags": tags.copy(), "pages": total_pages,
-                            "timestamp": search_timestamp, "requested_by": message.from_user.id,
-                            "requested_by_username": message.from_user.username, "requested_by_name": message.from_user.full_name}
+        last_search_meta = {
+            "min_days": min_days,
+            "tags": tags.copy(),
+            "pages": total_pages,
+            "timestamp": search_timestamp,
+            "requested_by": message.from_user.id,
+            "requested_by_username": message.from_user.username,
+            "requested_by_name": message.from_user.full_name,
+        }
+
         logger.info(f"💾 Сохранено {len(all_loras)} лор в кэш для /export")
         update_settings(user_id, last_check=time.time())
         logger.info("✅ Поиск завершён: " + str(len(all_loras)) + " лор")
+
+    except SiteUnavailableError as e:
+        await message.answer(
+            f"{EMOJI['error']} Сайт недоступен во время поиска: {safe_html_text(str(e)[:200])}",
+            parse_mode="HTML",
+        )
+
     except Exception as e:
         logger.error("❌ Ошибка в /check: " + str(e), exc_info=True)
-        await message.answer(EMOJI["error"] + " Ошибка: " + str(e)[:100], parse_mode="HTML")
+        await message.answer(
+            EMOJI["error"] + " Ошибка: " + str(e)[:100],
+            parse_mode="HTML",
+        )
+
     finally:
         update_settings(user_id, is_checking=False)
 
