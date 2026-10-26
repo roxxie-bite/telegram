@@ -2208,14 +2208,68 @@ async def cmd_say(m: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    if message.from_user.id != OWNER_ID_INT: return
-    txt = f"{EMOJI['info']} <b>Справка:</b>\n\n"
-    txt += f"<b>{EMOJI['search']} Основные:</b>\n/check — Найти лоры\n/export — Повторно выгрузить последний поиск\n/status — Настройки\n/help — Справка\n\n"
-    txt += f"<b>{EMOJI['settings']} Настройки:</b>\n/setdays N — Порог дней\n/addtag &lt;тег1, тег2&gt; — Добавить несколько тегов\n/rmtag &lt;тег1, тег2&gt; — Удалить теги\n/rmtag all — Удалить все теги\n/tags — Теги\n\n"
-    txt += f"<b>{EMOJI['log']} Логи:</b>\n/loglevel &lt;уровень&gt; — info/warning/error/debug\n\n"
-    txt += f"<b>{EMOJI['users']} Пользователи:</b>\n/users — Показать всех, кто писал боту\n\n"
-    txt += f"<b>{EMOJI['stop']} Управление:</b>\n/stop &lt;пароль&gt; — Остановить\n/start — Запустить"
-    await message.answer(txt, parse_mode="HTML")
+    uid = message.from_user.id
+    owner = uid == OWNER_ID_INT
+    ai_ok = is_user_allowed(uid, allowed_ai_users)
+
+    lines = [
+        f"{EMOJI['info']} <b>Справка</b>",
+        "",
+    ]
+
+    lines.append("<b>Общие команды:</b>")
+    lines.append("/start — запустить бота / показать меню")
+    lines.append("/help — эта справка")
+
+    if ai_ok:
+        lines.append("/ai — начать или завершить диалог с AI")
+        lines.append("/ai <текст> — одноразовый запрос к AI")
+        lines.append("В режиме /ai можно отправлять фото и голосовые сообщения")
+    else:
+        lines.append("/ai — только для разрешённых пользователей")
+
+    if owner:
+        lines.extend([
+            "",
+            "<b>LoRA / Lynther:</b>",
+            "/check — запустить поиск лор на сайте",
+            "/export [en] — выгрузить последний поиск файлом",
+            "/status — показать текущие настройки и статус бота",
+            "/setdays <N> — задать минимальный порог дней без использования",
+            "/addtag <тег1, тег2> — добавить теги",
+            "/rmtag <тег1, тег2|all> — удалить теги",
+            "/tags — показать текущие теги",
+
+            "",
+            "<b>AI / FreeLLM:</b>",
+            "/model [ключ] — список AI-моделей или сменить модель",
+            "/refreshmodels — обновить список моделей из FreeLLM API",
+            "/setmemory <текст> — задать память / system prompt для текущей модели",
+            "/clearmemory — очистить память текущей модели",
+            "/memory — показать память всех моделей",
+            "/say <текст> — озвучить текст через TTS",
+            "/tts <текст> — то же, что /say",
+            "/convert — конвертировать теги e621",
+
+            "",
+            "<b>Пользователи:</b>",
+            "/users — список пользователей",
+            "/write <user_id> <текст> — написать пользователю от имени бота",
+            "/broadcast <текст> — рассылка всем пользователям",
+            "/block <user_id> — заблокировать пользователя",
+            "/unblock <user_id> — разблокировать пользователя",
+            "/blocked — список заблокированных пользователей",
+            "/allowai <user_id> — выдать доступ к /ai",
+            "/aiallowed — список пользователей с доступом к /ai",
+
+            "",
+            "<b>Служебное:</b>",
+            "/loglevel <debug|info|warning|error> — изменить уровень логов",
+            "/stop <пароль> — остановить бота",
+        ])
+
+    text = "\n".join(lines)
+    await send_long_message(message, text, parse_mode="HTML")
 
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
@@ -2490,11 +2544,6 @@ async def cmd_status(message: Message):
     txt += EMOJI["days"] + f" Порог: <b>{('все лоры' if settings['min_days']==0 else '>=' + str(settings['min_days']) + ' дней')}</b>\n"
     txt += EMOJI["tag"] + f" Теги: <b>{(', '.join(settings['tags']) if settings['tags'] else 'нет (все лоры)')}</b>\n"
     can_use, remaining = check_cooldown(message.from_user.id)
-    txt += f"⏱️ Кулдаун: <b>{'готов' if can_use else str(remaining) + ' сек'}</b>\n"
-    txt += f"\n🎨 <b>Медиа API:</b> {'✅' if freellmapi_session else '❌'}"
-    txt += f"\n   /say — текст в голос"
-    txt += f"\n   🎤 — распознавание голоса в /ai"
-    txt += f"\n🎵 <b>Yandex Music:</b> {'✅' if YANDEX_MUSIC_TOKEN else '❌'} | Группа: {YM_TARGET_CHAT_ID or '—'}"
     txt += EMOJI["check" if bot_running else "stop"] + f" Бот: <b>{'Активен' if bot_running else 'ОСТАНОВЛЕН'}</b>"
     txt += f"\n👥 Пользователей: <b>{len(known_users)}</b>"
     if log_handler: 
