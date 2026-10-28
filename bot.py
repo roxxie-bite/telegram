@@ -676,59 +676,96 @@ async def fetch_with_retry(url, max_retries=5):
     return None
 
 def _parse_lora_head(head, min_days):
-    text = head.get_text(" ", strip=True)
+    """Разбирает как старую разметку p.lora_head, так и новую карточку Lynther."""
+    text = head.get_text("\n", strip=True)
+    flat_text = head.get_text(" ", strip=True)
 
-    # 🔒 Заблокированные LoRA нельзя удалять — полностью игнорируем их.
-    # Проверяем именно наличие замка в заголовке LoRA.
-    if "🔒" in text:
+    # В новой теме «login to preview» показывается у всех карточек и не
+    # означает, что сама LoRA заблокирована. Игнорируем только явную метку.
+    if re.search(r"🔒\s*locked\b", flat_text, re.IGNORECASE):
         return None
 
-    id_match = re.search(r"#️⃣\s*(\d+)", text)
-    days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
-
+    id_match = re.search(r"(?:#(?:️⃣)?\s*)(\d+)", flat_text)
+    days_match = re.search(r"🕸️?\s*(\d+)\s*d\b", flat_text, re.IGNORECASE)
     if not id_match or not days_match:
         return None
 
     lora_id, lora_days = id_match.group(1), int(days_match.group(1))
-
     if lora_days < min_days:
         return None
 
-    name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text)
-    lora_name = name_match.group(1).strip() if name_match else "Unknown"
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    code_index = next(
+        (i for i, line in enumerate(lines) if re.search(r"<\s*lora\s*:", line, re.IGNORECASE)),
+        None,
+    )
+
+    # Старый формат: «12. Name || ...». Новый формат: имя отдельной строкой,
+    # затем строка с <lora:...:1>.
+    old_name = re.search(r"^\s*\d+\.\s*(.+?)\s*\|\|", flat_text)
+    if old_name:
+        lora_name = old_name.group(1).strip()
+    elif code_index is not None and code_index > 0:
+        lora_name = lines[code_index - 1]
+        lora_name = re.sub(r"^\d+\.\s*", "", lora_name).strip()
+    else:
+        lora_name = "Unknown"
 
     links = [
         a.get_text(" ", strip=True)
         for a in head.find_all("a")
         if a.get_text(" ", strip=True)
     ]
-
     hrefs = [
         (a.get_text(" ", strip=True), a.get("href"))
         for a in head.find_all("a")
     ]
+    # Если после строки <lora:...> сразу идут ссылки базовой модели/тегов,
+    # это не trigger words.
+    if words and words in links:
+        words = ""
 
-    rm = re.search(r"Requests:\s*([\d\s,]+)", text, re.IGNORECASE)
-    requests_count = int(re.sub(r"\D", "", rm.group(1) or "0")) if rm else None
+    rm = re.search(r"Requests:\s*([\d\s,]+)", flat_text, re.IGNORECASE)
+    if rm:
+        requests_count = int(re.sub(r"\D", "", rm.group(1) or "0"))
+    else:
+        fire_match = re.search(r"🔥\s*([\d\s,]+)", flat_text)
+        requests_count = int(re.sub(r"\D", "", fire_match.group(1))) if fire_match else None
 
-    wm = re.search(r"WORDS:\s*(.*?)(?=\s+Requests:|$)", text, re.IGNORECASE)
-    words = wm.group(1).strip() if wm else ""
+    wm = re.search(r"WORDS:\s*(.*?)(?=\s+Requests:|$)", flat_text, re.IGNORECASE)
+    if wm:
+        words = wm.group(1).strip()
+    elif code_index is not None and code_index + 1 < len(lines):
+        # Следующая строка может быть trigger words или строкой тегов.
+        words = lines[code_index + 1]
+        if re.search(r"^(?:#(?:️⃣)?\s*\d+|🕸️|🔥|📋)", words):
+            words = ""
+        if words.startswith("`") and words.endswith("`"):
+            words = ""
+    else:
+        words = ""
 
     source_url = next(
-        (href for label, href in hrefs if label.upper() == "SOURCE" and href),
-        None
+        (href for label, href in hrefs if label.strip().upper() == "SOURCE" and href),
+        None,
     )
 
-    # Теги Lynther находятся именно в <a class="tag"><span class="tag_gray">USERNAME</span></a>.
     tag_elements = head.select("a.tag span.tag_gray")
     raw_tags = [
         tag.get_text(" ", strip=True)
         for tag in tag_elements
         if tag.get_text(" ", strip=True)
     ]
+    if not raw_tags:
+        # Новая тема отображает теги обычными ссылками. Исключаем ссылки
+        # навигации и базовые модели, сохраняя оставшиеся подписи как теги.
+        ignored = {"SDXL 1.0", "SD 1.5", "XL", "Pony", "Illustrious", "SOURCE", "Copy"}
+        raw_tags = []
+        for label in links[1:]:
+            if label not in ignored and label not in raw_tags:
+                raw_tags.append(label)
 
-    # Если username из разрешённого списка присутствует отдельным тегом,
-    # считаем его пользователем, добавившим LoRA.
     added_by = next(
         (
             LORA_ADDER_USERS_LOWER[tag.lower()]
@@ -748,17 +785,55 @@ def _parse_lora_head(head, min_days):
         "tags": raw_tags,
         "added_by": added_by,
         "requests": requests_count,
-        "source_url": source_url
+        "source_url": source_url,
     }
+
+
+def _find_lora_card_nodes(soup):
+    """Находит карточки в старой и новой вёрстке, не привязываясь к CSS-классу."""
+    old_nodes = soup.select("p.lora_head")
+    if old_nodes:
+        return old_nodes
+
+    # В новой теме название, код и ID могут лежать в разных вложенных тегах.
+    # Поэтому ищем контейнеры по совокупности признаков, а не по одному текстовому узлу.
+    candidates = []
+    for node in soup.find_all(True):
+        text = node.get_text(" ", strip=True)
+        if (re.search(r"#(?:️⃣)?\s*\d+", text)
+                and re.search(r"🕸️?\s*\d+\s*d\b", text, re.IGNORECASE)
+                and re.search(r"<\s*lora\s*:", text, re.IGNORECASE)
+                and node.find_all("a")):
+            candidates.append(node)
+
+    # Оставляем самые маленькие контейнеры, содержащие полную карточку.
+    candidate_ids = {id(node) for node in candidates}
+    cards = []
+    for node in candidates:
+        has_matching_child = any(
+            id(child) in candidate_ids for child in node.find_all(True)
+        )
+        if not has_matching_child:
+            cards.append(node)
+    return cards
+
+
 def parse_loras_from_html(html_text, min_days):
-    if not html_text: return []
+    if not html_text:
+        return []
     try:
         soup = BeautifulSoup(html_text, "html.parser")
-        return [item for head in soup.select("p.lora_head") for item in [_parse_lora_head(head, min_days)] if item]
+        results = []
+        seen_ids = set()
+        for head in _find_lora_card_nodes(soup):
+            item = _parse_lora_head(head, min_days)
+            if item and item["id"] not in seen_ids:
+                seen_ids.add(item["id"])
+                results.append(item)
+        return results
     except Exception as e:
         logger.error("Ошибка парсинга страницы: " + str(e))
         return []
-
 def _page_url(page, tag=None):
     url = BASE_URL + (("&t=" + quote_plus(tag)) if tag else "")
     return url + (("&c=" + str(page)) if page > 1 else "")
@@ -768,7 +843,7 @@ async def _fetch_lora_page(page, min_days, tag=None):
     if not html_text:
         return page, [], False, False  # failed, do not treat as end of pagination
     soup = BeautifulSoup(html_text, "html.parser")
-    has_cards = bool(soup.select("p.lora_head"))
+    has_cards = bool(_find_lora_card_nodes(soup))
     return page, parse_loras_from_html(html_text, min_days), has_cards, True
 
 async def _find_loras(max_pages, min_days, tag=None):
