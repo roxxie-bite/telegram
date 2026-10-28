@@ -641,6 +641,7 @@ async def ensure_site_available() -> None:
 
     except requests.RequestException as e:
         raise SiteUnavailableError(str(e)) from e
+
 _lora_request_sem = asyncio.Semaphore(LORA_MAX_CONCURRENCY)
 
 async def fetch_with_retry(url, max_retries=5):
@@ -675,60 +676,69 @@ async def fetch_with_retry(url, max_retries=5):
             await asyncio.sleep(delay)
     return None
 
-def _parse_lora_head(head, min_days):
-    text = head.get_text(" ", strip=True)
 
-    # 🔒 Заблокированные LoRA нельзя удалять — полностью игнорируем их.
-    # Проверяем именно наличие замка в заголовке LoRA.
-    if "🔒" in text:
+def _parse_lora_card(card, min_days):
+    """Парсит карточку LoRA из нового дизайна сайта (div.lora)."""
+    
+    # Проверяем, не заблокирована ли LoRA (иконка замка)
+    lock_icon = card.select_one("img[src*='lock'], i.fa-lock, .lock-icon")
+    if lock_icon:
         return None
-
-    id_match = re.search(r"#️⃣\s*(\d+)", text)
-    days_match = re.search(r"🕸️\s*(\d+)\s*d", text, re.IGNORECASE)
-
-    if not id_match or not days_match:
+    
+    # ID LoRA из ссылки на детальную страницу
+    id_link = card.select_one('a[href*="lora_d&lora_id="]')
+    if not id_link:
         return None
-
-    lora_id, lora_days = id_match.group(1), int(days_match.group(1))
-
+    
+    href = id_link.get("href", "")
+    id_match = re.search(r"lora_id=(\d+)", href)
+    if not id_match:
+        return None
+    
+    lora_id = id_match.group(1)
+    
+    # Название LoRA
+    name_elem = card.select_one("h3, .lora-name, .name")
+    lora_name = name_elem.get_text(strip=True) if name_elem else "Unknown"
+    
+    # Количество дней без использования
+    days_elem = card.select_one(".days, .lora-days, [class*='day']")
+    lora_days = 0
+    if days_elem:
+        days_text = days_elem.get_text()
+        days_match = re.search(r"(\d+)", days_text)
+        if days_match:
+            lora_days = int(days_match.group(1))
+    
     if lora_days < min_days:
         return None
-
-    name_match = re.match(r'^\d+\.\s*(.+?)\s*\|\|', text)
-    lora_name = name_match.group(1).strip() if name_match else "Unknown"
-
-    links = [
-        a.get_text(" ", strip=True)
-        for a in head.find_all("a")
-        if a.get_text(" ", strip=True)
-    ]
-
-    hrefs = [
-        (a.get_text(" ", strip=True), a.get("href"))
-        for a in head.find_all("a")
-    ]
-
-    rm = re.search(r"Requests:\s*([\d\s,]+)", text, re.IGNORECASE)
-    requests_count = int(re.sub(r"\D", "", rm.group(1) or "0")) if rm else None
-
-    wm = re.search(r"WORDS:\s*(.*?)(?=\s+Requests:|$)", text, re.IGNORECASE)
-    words = wm.group(1).strip() if wm else ""
-
-    source_url = next(
-        (href for label, href in hrefs if label.upper() == "SOURCE" and href),
-        None
-    )
-
-    # Теги Lynther находятся именно в <a class="tag"><span class="tag_gray">USERNAME</span></a>.
-    tag_elements = head.select("a.tag span.tag_gray")
-    raw_tags = [
-        tag.get_text(" ", strip=True)
-        for tag in tag_elements
-        if tag.get_text(" ", strip=True)
-    ]
-
-    # Если username из разрешённого списка присутствует отдельным тегом,
-    # считаем его пользователем, добавившим LoRA.
+    
+    # Base model
+    base_model_elem = card.select_one(".base-model, .model, [class*='base']")
+    base_model = base_model_elem.get_text(strip=True) if base_model_elem else None
+    
+    # Words/триггеры
+    words_elem = card.select_one(".words, .triggers, [class*='word']")
+    words = words_elem.get_text(strip=True) if words_elem else ""
+    
+    # Requests count
+    requests_elem = card.select_one(".requests, [class*='request']")
+    requests_count = None
+    if requests_elem:
+        req_text = requests_elem.get_text()
+        req_match = re.search(r"([\d\s,]+)", req_text)
+        if req_match:
+            requests_count = int(re.sub(r"\D", "", req_match.group(1)) or "0")
+    
+    # Source URL
+    source_link = card.select_one('a[href*="civitai"], a[href*="source"]')
+    source_url = source_link.get("href") if source_link else None
+    
+    # Теги
+    tag_elements = card.select("a.tag, .tag, [class*='tag']")
+    raw_tags = [tag.get_text(strip=True) for tag in tag_elements if tag.get_text(strip=True)]
+    
+    # Кто добавил (проверяем по списку разрешённых пользователей)
     added_by = next(
         (
             LORA_ADDER_USERS_LOWER[tag.lower()]
@@ -737,39 +747,54 @@ def _parse_lora_head(head, min_days):
         ),
         None,
     )
-
+    
     return {
         "id": lora_id,
         "days": lora_days,
         "name": lora_name,
         "url": SITE_BASE + "/?p=lora_d&lora_id=" + lora_id,
-        "base_model": links[0] if links else None,
+        "base_model": base_model,
         "words": words,
         "tags": raw_tags,
         "added_by": added_by,
         "requests": requests_count,
         "source_url": source_url
     }
+
+
 def parse_loras_from_html(html_text, min_days):
-    if not html_text: return []
+    if not html_text: 
+        return []
     try:
         soup = BeautifulSoup(html_text, "html.parser")
-        return [item for head in soup.select("p.lora_head") for item in [_parse_lora_head(head, min_days)] if item]
+        # Новый дизайн: карточки в div с классом "lora"
+        return [
+            item 
+            for card in soup.select("div.lora") 
+            for item in [_parse_lora_card(card, min_days)] 
+            if item
+        ]
     except Exception as e:
         logger.error("Ошибка парсинга страницы: " + str(e))
         return []
+
 
 def _page_url(page, tag=None):
     url = BASE_URL + (("&t=" + quote_plus(tag)) if tag else "")
     return url + (("&c=" + str(page)) if page > 1 else "")
 
+
 async def _fetch_lora_page(page, min_days, tag=None):
     html_text = await fetch_with_retry(_page_url(page, tag))
     if not html_text:
         return page, [], False, False  # failed, do not treat as end of pagination
+    
     soup = BeautifulSoup(html_text, "html.parser")
-    has_cards = bool(soup.select("p.lora_head"))
+    # Проверяем наличие карточек LoRA
+    has_cards = bool(soup.select("div.lora"))
+    
     return page, parse_loras_from_html(html_text, min_days), has_cards, True
+
 
 async def _find_loras(max_pages, min_days, tag=None):
     all_results, seen_ids, pages_scanned = [], set(), 0
@@ -844,8 +869,10 @@ async def _find_loras(max_pages, min_days, tag=None):
 
     return all_results, pages_scanned
 
+
 async def find_loras_by_tag(tag, min_days):
     return await _find_loras(MAX_PAGES, min_days, tag)
+
 
 async def find_all_loras(min_days):
     return await _find_loras(MAX_PAGES, min_days)
