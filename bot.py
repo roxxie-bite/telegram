@@ -678,64 +678,55 @@ async def fetch_with_retry(url, max_retries=5):
 
 
 def _parse_lora_card(card, min_days):
-    """Парсит карточку LoRA из нового дизайна сайта (div.lora)."""
+    """Парсит карточку LoRA из нового дизайна (div.lora-card)."""
     
-    # Проверяем, не заблокирована ли LoRA (иконка замка)
-    lock_icon = card.select_one("img[src*='lock'], i.fa-lock, .lock-icon")
-    if lock_icon:
+    # Проверяем, не заблокирована ли LoRA (badge "🔒 locked")
+    badge = card.select_one(".lora-card__badge")
+    if badge and "locked" in badge.get_text().lower():
         return None
     
-    # ID LoRA из ссылки на детальную страницу
-    id_link = card.select_one('a[href*="lora_d&lora_id="]')
-    if not id_link:
+    # ID LoRA из data-id атрибута
+    lora_id = card.get("data-id", "")
+    if not lora_id or lora_id == "0":
         return None
     
-    href = id_link.get("href", "")
-    id_match = re.search(r"lora_id=(\d+)", href)
-    if not id_match:
-        return None
-    
-    lora_id = id_match.group(1)
-    
-    # Название LoRA
-    name_elem = card.select_one("h3, .lora-name, .name")
-    lora_name = name_elem.get_text(strip=True) if name_elem else "Unknown"
+    # Название LoRA из title атрибута или текста
+    title_elem = card.select_one(".lora-card__title")
+    lora_name = title_elem.get("title", "") if title_elem else ""
+    if not lora_name:
+        lora_name = title_elem.get_text(strip=True) if title_elem else "Unknown"
     
     # Количество дней без использования
-    days_elem = card.select_one(".days, .lora-days, [class*='day']")
+    stale_elem = card.select_one(".lora-card__stale")
     lora_days = 0
-    if days_elem:
-        days_text = days_elem.get_text()
-        days_match = re.search(r"(\d+)", days_text)
+    if stale_elem:
+        stale_text = stale_elem.get_text()
+        days_match = re.search(r"(\d+)", stale_text)
         if days_match:
             lora_days = int(days_match.group(1))
     
     if lora_days < min_days:
         return None
     
-    # Base model
-    base_model_elem = card.select_one(".base-model, .model, [class*='base']")
+    # Base model (первый тег с tag_black — это base model)
+    base_model_elem = card.select_one("a.tag span.tag_black")
     base_model = base_model_elem.get_text(strip=True) if base_model_elem else None
     
     # Words/триггеры
-    words_elem = card.select_one(".words, .triggers, [class*='word']")
+    words_elem = card.select_one(".lora-card__words")
     words = words_elem.get_text(strip=True) if words_elem else ""
     
-    # Requests count
-    requests_elem = card.select_one(".requests, [class*='request']")
+    # Requests count (uses)
+    uses_elem = card.select_one(".lora-card__uses")
     requests_count = None
-    if requests_elem:
-        req_text = requests_elem.get_text()
-        req_match = re.search(r"([\d\s,]+)", req_text)
+    if uses_elem:
+        uses_text = uses_elem.get_text()
+        req_match = re.search(r"([\d\s,]+)", uses_text)
         if req_match:
             requests_count = int(re.sub(r"\D", "", req_match.group(1)) or "0")
     
-    # Source URL
-    source_link = card.select_one('a[href*="civitai"], a[href*="source"]')
-    source_url = source_link.get("href") if source_link else None
-    
-    # Теги
-    tag_elements = card.select("a.tag, .tag, [class*='tag']")
+    # Все теги
+    tag_elements = card.select("a.tag span")
     raw_tags = [tag.get_text(strip=True) for tag in tag_elements if tag.get_text(strip=True)]
     
     # Кто добавил (проверяем по списку разрешённых пользователей)
@@ -758,7 +749,7 @@ def _parse_lora_card(card, min_days):
         "tags": raw_tags,
         "added_by": added_by,
         "requests": requests_count,
-        "source_url": source_url
+        "source_url": None  # В новом дизайне нет прямой ссылки на source в карточке
     }
 
 
@@ -767,21 +758,16 @@ def parse_loras_from_html(html_text, min_days):
         return []
     try:
         soup = BeautifulSoup(html_text, "html.parser")
-        # Новый дизайн: карточки в div с классом "lora"
+        # Новый дизайн: карточки в div с классом "lora-card"
         return [
             item 
-            for card in soup.select("div.lora") 
+            for card in soup.select("div.lora-card") 
             for item in [_parse_lora_card(card, min_days)] 
             if item
         ]
     except Exception as e:
         logger.error("Ошибка парсинга страницы: " + str(e))
         return []
-
-
-def _page_url(page, tag=None):
-    url = BASE_URL + (("&t=" + quote_plus(tag)) if tag else "")
-    return url + (("&c=" + str(page)) if page > 1 else "")
 
 
 async def _fetch_lora_page(page, min_days, tag=None):
@@ -791,10 +777,9 @@ async def _fetch_lora_page(page, min_days, tag=None):
     
     soup = BeautifulSoup(html_text, "html.parser")
     # Проверяем наличие карточек LoRA
-    has_cards = bool(soup.select("div.lora"))
+    has_cards = bool(soup.select("div.lora-card"))
     
     return page, parse_loras_from_html(html_text, min_days), has_cards, True
-
 
 async def _find_loras(max_pages, min_days, tag=None):
     all_results, seen_ids, pages_scanned = [], set(), 0
