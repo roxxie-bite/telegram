@@ -769,6 +769,10 @@ def parse_loras_from_html(html_text, min_days):
         logger.error("Ошибка парсинга страницы: " + str(e))
         return []
 
+def _page_url(page, tag=None):
+    url = BASE_URL + (("&t=" + quote_plus(tag)) if tag else "")
+    return url + (("&c=" + str(page)) if page > 1 else "")
+
 
 async def _fetch_lora_page(page, min_days, tag=None):
     html_text = await fetch_with_retry(_page_url(page, tag))
