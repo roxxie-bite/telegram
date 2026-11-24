@@ -18,9 +18,8 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
-
 from nexus_mods import router as nexus_router, init_nexus, start_nexus_watcher
-dp.include_router(nexus_router)
+
 
 
 # === РУЧНАЯ ЗАГРУЗКА .env (без python-dotenv) ===
@@ -395,6 +394,16 @@ if not BOT_TOKEN or not OWNER_ID:
 OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# === NEXUS MODS ===
+NEXUS_CMD_RE = re.compile(r"^/nexus\w*(@\w+)?(\s|$)", re.IGNORECASE)
+
+def not_nexus(m: Message) -> bool:
+    """True, если сообщение НЕ nexus-команда — для catch-all хендлеров."""
+    return not (m.text and NEXUS_CMD_RE.match(m.text))
+
+dp.include_router(nexus_router)
+init_nexus(bot, OWNER_ID_INT)
 
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
