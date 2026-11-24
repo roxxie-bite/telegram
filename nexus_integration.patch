@@ -1,0 +1,36 @@
+--- a/bot.py
++++ b/bot.py
+@@ -18,6 +18,9 @@
+ from aiogram.filters import Command
+ from aiogram.types import Message, BufferedInputFile
+ from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
++
++# Nexus Mods API integration lives in a separate module.
++from nexus_mods import router as nexus_router, start_nexus_watcher
+ 
+ 
+ # === РУЧНАЯ ЗАГРУЗКА .env (без python-dotenv) ===
+@@ -392,6 +395,7 @@
+ OWNER_ID_INT = int(OWNER_ID)
+ bot = Bot(token=BOT_TOKEN)
+ dp = Dispatcher()
++dp.include_router(nexus_router)
+ 
+ # ================= TELEGRAM LOG HANDLER =================
+ class TelegramLogHandler(logging.Handler):
+@@ -2267,6 +2271,7 @@
+             "/say <code>&lt;текст&gt;</code> — озвучить текст через TTS",
+             "/tts <code>&lt;текст&gt;</code> — то же, что /say",
+             "/convert — конвертировать теги e621",
++            "/nexushelp — команды Nexus Mods",
+ 
+             "",
+             "<b>Пользователи:</b>",
+@@ -2769,6 +2774,7 @@
+     load_memory()
+     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
+     logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time}")
++    await start_nexus_watcher(bot, OWNER_ID_INT, logger)
+     await dp.start_polling(bot)
+ 
+ if __name__ == "__main__":
