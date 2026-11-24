@@ -395,7 +395,7 @@ OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === NEXUS MODS ===
+# === NEXUS MODSs ===
 NEXUS_CMD_RE = re.compile(r"^/nexus\w*(@\w+)?(\s|$)", re.IGNORECASE)
 
 def not_nexus(m: Message) -> bool:
