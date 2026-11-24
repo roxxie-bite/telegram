@@ -14,10 +14,13 @@ import mimetypes
 from urllib.parse import quote_plus
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
+
+from nexus_mods import router as nexus_router, init_nexus, start_nexus_watcher
+dp.include_router(nexus_router)
 
 
 # === РУЧНАЯ ЗАГРУЗКА .env (без python-dotenv) ===
@@ -1531,7 +1534,9 @@ async def handle_ai_voice(m: Message):
     
 
 # 3. И только потом пересылка обычных сообщений не-владельцев
-@dp.message(F.from_user.id != OWNER_ID_INT)
+fallback_router = Router(name="fallback")
+
+@fallback_router.message(F.from_user.id != OWNER_ID_INT)
 async def handle_user_message(message: Message):
     user_id = message.from_user.id
     if user_id in known_users and known_users[user_id].get("blocked", False):
@@ -2595,7 +2600,7 @@ async def cmd_start(m: Message):
     en = "🇬🇧 If you have questions or anything like that — write, I'll respond if possible! "
     await m.answer(ru + "\n\n" + en, parse_mode="HTML")
 
-@dp.message()
+@fallback_router.message()
 async def silent_ignore(message: Message):
     if message.from_user.id != OWNER_ID_INT:
         ru = "🇷🇺 Если есть вопросы или что-то подобное — пишите, отвечу по возможности! "
@@ -2769,6 +2774,9 @@ async def main():
     load_memory()
     moscow_time = datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f"🚀 Bot started! Owner: {OWNER_ID_INT} | Users: {len(known_users)} | Time: МСК {moscow_time}")
+    dp.include_router(fallback_router)
+    init_nexus(bot, OWNER_ID_INT)
+    await start_nexus_watcher(bot, OWNER_ID_INT, logger)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
