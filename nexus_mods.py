@@ -155,6 +155,8 @@ class NexusClient:
         if not api_key:
             raise NexusConfigError("NEXUS_API_KEY не задан")
         self.api_key = api_key
+        self.app_name = app_name     
+        self.app_version = app_version   
         self.min_interval = max(0.2, float(min_interval))
         self.timeout = timeout
         self.session = requests.Session()
@@ -444,6 +446,21 @@ def env_int(name: str, default: int) -> int:
         return int(os.getenv(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def init_nexus(bot: Bot, owner_id: int) -> None:
+    """Задать владельца и bot instance без запуска watcher'а."""
+    global _bot_instance, _owner_id
+    _bot_instance = bot
+    _owner_id = int(owner_id)
+
+
+def _owner_check(m: Message) -> bool:
+    uid = _owner_id
+    if uid is None:
+        raw = os.getenv("OWNER_ID", "").strip()
+        uid = int(raw) if raw.isdigit() else None
+    return uid is not None and m.from_user is not None and m.from_user.id == uid
 
 
 def get_client() -> NexusClient:
