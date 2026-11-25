@@ -41,7 +41,7 @@ from urllib.parse import quote
 import requests
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +301,19 @@ class NexusClient:
             "GET", f"/v1/games/{quote(game_domain)}/mods/{int(mod_id)}/changelogs.json"
         )
         return data if isinstance(data, dict) else {}
+
+    async def download_link(self, game_domain: str, mod_id: int | str, file_id: int | str) -> list[dict[str, str]]:
+        """Получает прямые ссылки на скачивание для конкретного файла мода."""
+        game_domain = _game_or_raise(game_domain)
+        data = await self.request(
+            "GET", f"/v1/games/{quote(game_domain)}/mods/{int(mod_id)}/files/{int(file_id)}/download_link.json"
+        )
+        # API возвращает список словарей: [{"name": "CDN (US)", "URI": "https://..."}, ...]
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "files" in data:
+            return data["files"]
+        return []
 
 
 # =========================
@@ -637,42 +650,46 @@ def apply_snapshot(item: NexusWatchItem, result: dict[str, Any]) -> bool:
 def format_mod_info(result: dict[str, Any], include_files: bool = False) -> str:
     mod = result.get("mod", {})
     latest = result.get("latest_file") or {}
+    
     lines = [
-        f"🎮 <a href=\"{_safe(result.get('url'))}\">{_safe(mod.get('name', 'Mod'))}</a>",
+        f"🎮 <b><a href=\"{_safe(result.get('url'))}\">{_safe(mod.get('name', 'Неизвестный мод'))}</a></b>",
         f"🆔 <code>{result.get('game')} / {result.get('mod_id')}</code>",
+        "┅" * 20
     ]
+    
     if mod.get("version"):
-        lines.append(f"🏷️ Версия: <b>{_safe(mod.get('version'))}</b>")
+        lines.append(f"🏷️ <b>Версия мода:</b> {_safe(mod.get('version'))}")
+    
     if mod.get("summary"):
-        lines.append(f"📝 <i>{_safe(str(mod.get('summary'))[:250])}</i>")
+        lines.append(f"📝 <i>{_safe(str(mod.get('summary'))[:300])}</i>")
+        
     lines.extend([
-        f"🔄 Обновлён: <b>{_format_ts(mod.get('updated_timestamp'))}</b>",
-        f"⬇️ Загрузок: <b>{int(mod.get('mod_downloads', 0) or 0):,}</b> | 👍 {int(mod.get('endorsements', 0) or 0):,}",
+        "",
+        f"🔄 <b>Обновлён:</b> {_format_ts(mod.get('updated_timestamp'))}",
+        f"⬇️ <b>Загрузок:</b> {int(mod.get('mod_downloads', 0) or 0):,} | 👍 <b>Одобрений:</b> {int(mod.get('endorsements', 0) or 0):,}"
     ])
-
+    
     if result.get("update_available"):
         fields = ", ".join(result.get("changed_fields", [])) or "есть изменения"
-        lines.append(f"🔔 <b>Есть обновление!</b> Изменилось: {_safe(fields)}")
+        lines.extend(["", f"🔔 <b>Есть обновление!</b> Изменилось: {_safe(fields)}"])
     elif result.get("is_new"):
-        lines.append("🆕 <i>Мод добавлен в список наблюдения.</i>")
+        lines.extend(["", "🆕 <i>Мод добавлен в список наблюдения.</i>"])
     else:
-        lines.append("✅ Обновлений не найдено.")
-
+        lines.extend(["", "✅ Обновлений не найдено."])
+        
     if latest:
         lines.extend([
-            "─" * 20,
-            f"📦 Файл: <b>{_safe(latest.get('name', '-'))}</b>",
-            f"🗂️ Категория: {_safe(latest.get('category_name', '-'))}",
-            f"⏫ Загружен: <b>{_format_ts(latest.get('uploaded_timestamp'))}</b>",
+            "",
+            "┅" * 20,
+            f"📦 <b>Последний файл:</b> {_safe(latest.get('name', '-'))}",
+            f"🗂️ <b>Категория:</b> {_safe(latest.get('category_name', '-'))}",
+            f"⏫ <b>Загружен:</b> {_format_ts(latest.get('uploaded_timestamp'))}"
         ])
         if latest.get("version") or latest.get("mod_version"):
-            lines.append(f"🏷️ Версия файла: {_safe(latest.get('version') or latest.get('mod_version'))}")
-    elif include_files:
-        lines.append("📦 Файлы не найдены.")
-
+            lines.append(f"🏷️ <b>Версия файла:</b> {_safe(latest.get('version') or latest.get('mod_version'))}")
+            
     if include_files and result.get("files"):
-        lines.append("─" * 20)
-        lines.append("<b>Последние файлы:</b>")
+        lines.extend(["", "┅" * 20, "<b>Последние файлы:</b>"])
         files = sorted(
             result["files"],
             key=lambda f: int(f.get("uploaded_timestamp", 0) or 0),
@@ -683,7 +700,7 @@ def format_mod_info(result: dict[str, Any], include_files: bool = False) -> str:
                 f"• <code>{file_item.get('id')}</code> {_safe(file_item.get('name', '-'))} "
                 f"({_safe(file_item.get('category_name', '-'))}, {_format_ts(file_item.get('uploaded_timestamp'))})"
             )
-
+            
     return "\n".join(lines)
 
 
@@ -942,19 +959,46 @@ async def cmd_nexus_info(m: Message):
         return
     parts = m.text.split(maxsplit=1)
     if len(parts) < 2:
-        await m.answer("⚠️ Используй: <code>/nexusinfo &lt;id|ссылка&gt;</code>", parse_mode="HTML")
+        await m.answer("⚠️ Используй: <code>/nexusinfo <id|ссылка></code>", parse_mode="HTML")
         return
+        
     game, mod_id = parse_mod_reference(parts[1], default_game())
     if not mod_id:
         await m.answer("⚠️ Не смог определить ID мода.", parse_mode="HTML")
         return
+        
     try:
+        # Отправляем сообщение о загрузке
+        status = await m.answer("⏳ Запрашиваю информацию у Nexus Mods...", parse_mode="HTML")
+        
         result = await check_mod_update(game, mod_id)
         include_files = m.text.startswith("/nexusfiles")
-        await m.answer(
+        latest = result.get("latest_file")
+        
+        # Пытаемся получить прямую ссылку на скачивание для последнего файла
+        download_url = None
+        if latest and latest.get("id"):
+            try:
+                links = await get_client().download_link(game, mod_id, latest["id"])
+                if links and isinstance(links, list) and len(links) > 0:
+                    # Берем первую доступную ссылку (обычно CDN US или EU)
+                    download_url = links[0].get("URI")
+            except Exception as e:
+                logger.warning("Не удалось получить ссылку на скачивание: %s", e)
+        
+        # Формируем инлайн-клавиатуру, если ссылка есть
+        keyboard = None
+        if download_url:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📥 Скачать последнюю версию", url=download_url)]
+            ])
+            
+        # Редактируем исходное сообщение с красивым форматированием и кнопкой
+        await status.edit_text(
             format_mod_info(result, include_files=include_files),
             parse_mode="HTML",
             disable_web_page_preview=True,
+            reply_markup=keyboard
         )
     except Exception as exc:
         await _reply_env_error(m, exc)
