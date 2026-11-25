@@ -716,6 +716,42 @@ def format_watch_item(item: NexusWatchItem) -> str:
     ]
     return "\n".join(lines)
 
+def _build_mod_keyboard(result: dict[str, Any], download_url: Optional[str] = None) -> InlineKeyboardMarkup:
+    """Строит инлайн-клавиатуру для сообщения о моде.
+    Если есть прямая ссылка на скачивание (Premium) — добавляет её первой кнопкой.
+    Всегда добавляет кнопки на страницу мода и вкладку файлов.
+    """
+    game = result.get("game", "")
+    mod_id = result.get("mod_id")
+    mod_url = result.get("url") or _mod_url(game, mod_id)
+    files_url = f"{mod_url}?tab=files"
+    
+    rows: list[list[InlineKeyboardButton]] = []
+    
+    # Прямая ссылка на скачивание (работает только с Premium)
+    if download_url:
+        rows.append([InlineKeyboardButton(text="📥 Скачать последнюю версию", url=download_url)])
+    
+    # Всегда работающие кнопки
+    rows.append([
+        InlineKeyboardButton(text="🌐 Страница мода", url=mod_url),
+        InlineKeyboardButton(text="📦 Все файлы", url=files_url),
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _try_get_download_url(game: str, mod_id: int, latest_file: Optional[dict[str, Any]]) -> Optional[str]:
+    """Пытается получить прямую CDN-ссылку. Возвращает None, если не удалось (например, нет Premium)."""
+    if not latest_file or not latest_file.get("id"):
+        return None
+    try:
+        links = await get_client().download_link(game, mod_id, latest_file["id"])
+        if links and isinstance(links, list) and len(links) > 0:
+            return links[0].get("URI")
+    except Exception as e:
+        logger.debug("Прямая ссылка недоступна: %s", e)
+    return None
 
 # =========================
 # Bot commands
@@ -906,18 +942,31 @@ async def cmd_nexus_check(m: Message):
     arg = parts[1].strip() if len(parts) > 1 else "all"
     store = get_store()
 
+    # Одиночная проверка конкретного мода
     if arg.lower() != "all":
         game, mod_id = parse_mod_reference(arg, default_game())
         if not mod_id:
-            await m.answer("⚠️ Используй: <code>/nexuscheck all</code> или <code>/nexuscheck &lt;id|ссылка&gt;</code>", parse_mode="HTML")
+            await m.answer(
+                "⚠️ Используй: <code>/nexuscheck all</code> или <code>/nexuscheck &lt;id|ссылка&gt;</code>",
+                parse_mode="HTML",
+            )
             return
         try:
             result, _ = await _check_one(game, mod_id)
-            await m.answer(format_mod_info(result), parse_mode="HTML", disable_web_page_preview=True)
+            latest = result.get("latest_file")
+            download_url = await _try_get_download_url(game, mod_id, latest)
+            keyboard = _build_mod_keyboard(result, download_url=download_url)
+            await m.answer(
+                format_mod_info(result),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
         except Exception as exc:
             await _reply_env_error(m, exc)
         return
 
+    # Массовая проверка всего watchlist
     items = store.list(default_game()) if default_game() else store.list()
     if not items:
         await m.answer("ℹ️ Watchlist пуст.", parse_mode="HTML")
@@ -937,6 +986,7 @@ async def cmd_nexus_check(m: Message):
             errors.append(f"{item.game}/{item.mod_id}: {exc}")
 
     get_store().save()
+
     lines = [f"✅ Проверка завершена. Модов: <b>{len(items)}</b>."]
     if updated:
         lines.append(f"🔔 Обновилось: <b>{len(updated)}</b>.")
@@ -945,8 +995,17 @@ async def cmd_nexus_check(m: Message):
     lines.append(rate_limit_text())
     await status.edit_text("\n".join(lines), parse_mode="HTML")
 
+    # Отправляем каждое обновление с кнопками
     for result in updated:
-        await m.answer("🔔 <b>Обновление Nexus Mods</b>\n\n" + format_mod_info(result), parse_mode="HTML", disable_web_page_preview=True)
+        latest = result.get("latest_file")
+        download_url = await _try_get_download_url(result["game"], result["mod_id"], latest)
+        keyboard = _build_mod_keyboard(result, download_url=download_url)
+        await m.answer(
+            "🔔 <b>Обновление Nexus Mods</b>\n\n" + format_mod_info(result),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
 
     if errors:
         preview = "\n".join(errors[:5])
@@ -968,37 +1027,23 @@ async def cmd_nexus_info(m: Message):
         return
         
     try:
-        # Отправляем сообщение о загрузке
         status = await m.answer("⏳ Запрашиваю информацию у Nexus Mods...", parse_mode="HTML")
-        
         result = await check_mod_update(game, mod_id)
         include_files = m.text.startswith("/nexusfiles")
         latest = result.get("latest_file")
         
-        # Пытаемся получить прямую ссылку на скачивание для последнего файла
-        download_url = None
-        if latest and latest.get("id"):
-            try:
-                links = await get_client().download_link(game, mod_id, latest["id"])
-                if links and isinstance(links, list) and len(links) > 0:
-                    # Берем первую доступную ссылку (обычно CDN US или EU)
-                    download_url = links[0].get("URI")
-            except Exception as e:
-                logger.warning("Не удалось получить ссылку на скачивание: %s", e)
+        # Пытаемся получить прямую ссылку (работает только с Premium)
+        download_url = await _try_get_download_url(game, mod_id, latest)
         
-        # Формируем инлайн-клавиатуру, если ссылка есть
-        keyboard = None
-        if download_url:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📥 Скачать последнюю версию", url=download_url)]
-            ])
-            
-        # Редактируем исходное сообщение с красивым форматированием и кнопкой
+        # Строим клавиатуру: всегда есть кнопки на страницу и файлы,
+        # а если Premium — сверху кнопка прямого скачивания
+        keyboard = _build_mod_keyboard(result, download_url=download_url)
+        
         await status.edit_text(
             format_mod_info(result, include_files=include_files),
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
     except Exception as exc:
         await _reply_env_error(m, exc)
@@ -1085,16 +1130,22 @@ async def _watcher_loop() -> None:
                 try:
                     result, _ = await _check_one(item.game, item.mod_id)
                     if result.get("update_available") and not item.muted:
+                        # Пытаемся получить прямую ссылку (работает только с Premium)
+                        latest = result.get("latest_file")
+                        download_url = await _try_get_download_url(item.game, item.mod_id, latest)
+                        # Строим клавиатуру: всегда есть кнопки на страницу и файлы,
+                        # а если Premium — сверху кнопка прямого скачивания
+                        keyboard = _build_mod_keyboard(result, download_url=download_url)
                         await _bot_instance.send_message(
                             _owner_id,
                             "🔔 <b>Nexus Mods: найдено обновление</b>\n\n" + format_mod_info(result),
                             parse_mode="HTML",
                             disable_web_page_preview=True,
+                            reply_markup=keyboard,
                         )
                         await asyncio.sleep(0.5)
                 except Exception as exc:
                     logger.warning("⚠️ Nexus watcher failed for %s/%s: %s", item.game, item.mod_id, exc)
-
             get_store().meta["last_auto_check"] = int(time.time())
             get_store().save()
             logger.info("✅ Nexus watcher check finished: %s mods", len(items))
@@ -1102,12 +1153,10 @@ async def _watcher_loop() -> None:
             raise
         except Exception as exc:
             logger.error("❌ Nexus watcher error: %s", exc)
-
         try:
             await asyncio.wait_for(_watcher_stop.wait(), timeout=max(60, auto_interval_minutes() * 60))
         except asyncio.TimeoutError:
             pass
-
     logger.info("⏹️ Nexus watcher stopped")
 
 
