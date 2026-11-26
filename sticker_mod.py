@@ -41,11 +41,73 @@ import tempfile
 from typing import Optional
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, Message
 
 logger = logging.getLogger(__name__)
 router = Router(name="sticker")
+
+# ================= PARSE_MODE (HTML) =================
+# В aiogram 3.x Router не умеет задавать parse_mode, поэтому оборачиваем методы Message/Bot:
+# если parse_mode явно не передан, подставляем HTML. Так <b>, <code> и т.д. перестают
+# печататься как текст. Если у бота уже задан DefaultBotProperties(parse_mode=HTML),
+# эти обёртки просто ничего не меняют.
+
+from aiogram import Bot  # noqa: E402
+
+_PATCHED_TARGETS = (Message, Bot)
+_PATCHED_ATTRS = (
+    "answer",
+    "reply",
+    "forward",
+    "copy_to_chat",
+    "edit_text",
+    "edit_caption",
+    "answer_photo",
+    "answer_video",
+    "answer_animation",
+    "answer_document",
+    "send_message",
+    "send_photo",
+    "send_video",
+    "send_animation",
+    "send_document",
+)
+
+
+def _wrap_with_html(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        if kwargs.get("parse_mode") is None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        return await func(*args, **kwargs)
+
+    return wrapper
+
+
+def _patch_parse_mode() -> None:
+    for cls in _PATCHED_TARGETS:
+        for name in _PATCHED_ATTRS:
+            orig = getattr(cls, name, None)
+            if orig is None or getattr(orig, "_sticker_html_patched", False):
+                continue
+            patched = _wrap_with_html(orig)
+            patched._sticker_html_patched = True
+            setattr(cls, name, patched)
+
+
+_patch_parse_mode()
+
+
+def _safe_html(text: str) -> str:
+    """Экранирует текст, чтобы вставки (ошибки ffmpeg и т.п.) не ломали HTML-разметку."""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 # ================= НАСТРОЙКИ ФОРМАТА СТИКЕРОВ TELEGRAM =================
 STICKER_MAX_SIDE = 512          # px, максимальная сторона
@@ -274,7 +336,7 @@ async def cmd_sticker(message: Message, command: CommandObject) -> None:
         webm = await convert_to_telegram_sticker(bytes(data), suffix=_guess_suffix(target), start=start)
     except Exception as e:
         logger.exception("sticker conversion failed")
-        await wait.edit_text(f"❌ Не удалось сконвертировать: {e}")
+        await wait.edit_text(f"❌ Не удалось сконвертировать: <code>{_safe_html(e)}</code>")
         return
 
     filename = "sticker.webm"
@@ -324,6 +386,6 @@ async def auto_convert(message: Message) -> None:
     except Exception as e:
         logger.exception("auto sticker conversion failed")
         try:
-            await message.answer(f"❌ Ошибка конвертации: {e}")
+            await message.answer(f"❌ Ошибка конвертации: <code>{_safe_html(e)}</code>")
         except Exception:
             pass
