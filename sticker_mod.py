@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import logging
 import os
 import re
@@ -273,8 +274,9 @@ async def cmd_sticker(message: Message, state: FSMContext) -> None:
 async def on_sticker_file(message: Message, state: FSMContext) -> None:
     file_ref = message.animation or message.video or message.video_note
     tg_file = await message.bot.get_file(file_ref.file_id)
-    data = await tg_file.download_as_bytearray()
-
+    buffer = io.BytesIO()
+    await message.bot.download_file(tg_file.file_path, buffer)
+    data = buffer.getvalue()
     wait = await message.answer("🔄 Конвертирую в формат стикера (WebM/VP9, 512px, ≤3с)...")
     try:
         webm = await convert_to_telegram_sticker(
@@ -311,7 +313,9 @@ async def on_sticker_document(message: Message, state: FSMContext) -> None:
 
     doc = message.document
     tg_file = await message.bot.get_file(doc.file_id)
-    data = await tg_file.download_as_bytearray()
+    buffer = io.BytesIO()
+    await message.bot.download_file(tg_file.file_path, buffer)
+    data = buffer.getvalue()
 
     wait = await message.answer("🔄 Конвертирую в формат стикера (WebM/VP9, 512px, ≤3с)...")
     try:
