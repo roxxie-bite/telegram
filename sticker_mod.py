@@ -32,14 +32,13 @@ sticker_mods.py — модуль для бота (aiogram 3.x): превраще
 """
 
 from __future__ import annotations
-
 import asyncio
+import functools
 import logging
 import os
 import shutil
 import tempfile
 from typing import Optional
-
 from aiogram import F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
