@@ -19,6 +19,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChosenInlineResult
 from nexus_mods import router as nexus_router, init_nexus, start_nexus_watcher
+from sticker_mod import router as sticker_router
 
 
 
@@ -404,6 +405,7 @@ def not_nexus(m: Message) -> bool:
 
 dp.include_router(nexus_router)
 init_nexus(bot, OWNER_ID_INT)
+dp.include_router(sticker_router)
 
 # ================= TELEGRAM LOG HANDLER =================
 class TelegramLogHandler(logging.Handler):
