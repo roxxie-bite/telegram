@@ -30,8 +30,6 @@ class StickerStates(StatesGroup):
 
 
 # ================= PARSE_MODE (HTML) =================
-# В aiogram 3.x Router не умеет задавать parse_mode, поэтому оборачиваем методы
-# Message/Bot: если parse_mode явно не передан — подставляем HTML.
 _PATCHED_TARGETS = (Message, Bot)
 _PATCHED_ATTRS = (
     "answer", "reply", "forward", "copy_to_chat",
@@ -84,7 +82,7 @@ FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 HELP_TEXT = (
     "🎨 <b>Конвертер в формат стикеров Telegram</b>\n\n"
     "Отправь команду /sticker — я перейду в режим ожидания,\n"
-    "а затем пришли мне видео или GIF (файлом).\n\n"
+    "а затем пришли мне видео или GIF (файлом или как видео).\n\n"
     "Результат будет в формате анимированного стикера:\n"
     "WebM • VP9 • 512px • до 3 секунд • без звука • до 256 КБ.\n\n"
     "💡 Готовый файл можно добавить в набор через @Stickers.\n"
@@ -230,7 +228,25 @@ async def convert_to_telegram_sticker(
 
 
 # ================= ХЭНДЛЕРЫ =================
+def _is_video_document(msg: Message) -> bool:
+    """Проверяет, является ли документ видеофайлом по MIME-типу или расширению."""
+    if not msg.document:
+        return False
+    mime = msg.document.mime_type or ""
+    if mime.startswith("video/"):
+        return True
+    if msg.document.file_name:
+        ext = os.path.splitext(msg.document.file_name)[1].lower()
+        if ext in {".mp4", ".webm", ".mkv", ".mov", ".avi", ".gif"}:
+            return True
+    return False
+
+
 def _guess_suffix_from_message(msg: Message) -> str:
+    if msg.document and msg.document.file_name:
+        ext = os.path.splitext(msg.document.file_name)[1]
+        if ext:
+            return ext
     if msg.animation and msg.animation.file_name:
         return os.path.splitext(msg.animation.file_name)[1] or ".gif"
     if msg.video and msg.video.file_name:
@@ -259,7 +275,7 @@ async def cmd_sticker(message: Message, state: FSMContext) -> None:
 
     await state.set_state(StickerStates.waiting_file)
     await message.answer(
-        "📥 Жду видео или GIF (файлом).\n"
+        "📥 Жду видео или GIF (файлом или как видео).\n"
         "Пришли его следующим сообщением — я сконвертирую в формат стикера.\n\n"
         "Чтобы отменить — отправь /cancel."
     )
@@ -297,10 +313,49 @@ async def on_sticker_file(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(StickerStates.waiting_file, F.document)
+async def on_sticker_document(message: Message, state: FSMContext) -> None:
+    """Получили документ — проверяем, видео ли это."""
+    if not _is_video_document(message):
+        await message.answer(
+            "🤔 Этот документ не похож на видео.\n"
+            "Пришли видеофайл (mp4, webm, mkv, mov, avi) или GIF, либо отмени ожидание командой /cancel."
+        )
+        return
+
+    doc = message.document
+    tg_file = await message.bot.get_file(doc.file_id)
+    data = await tg_file.download_as_bytearray()
+
+    wait = await message.answer("🔄 Конвертирую в формат стикера (WebM/VP9, 512px, ≤3с)...")
+    try:
+        webm = await convert_to_telegram_sticker(
+            bytes(data), suffix=_guess_suffix_from_message(message)
+        )
+    except Exception as e:
+        logger.exception("sticker conversion failed")
+        await wait.edit_text(f"❌ Не удалось сконвертировать: <code>{_safe_html(e)}</code>")
+        await state.clear()
+        return
+
+    await wait.delete()
+    await state.clear()
+
+    await message.answer_document(
+        BufferedInputFile(webm, filename="sticker.webm"),
+        caption=(
+            f"✅ Формат анимированного стикера Telegram\n"
+            f"WebM • VP9 • ≤{STICKER_MAX_SIDE}px • ≤{STICKER_DURATION:.0f}с • "
+            f"{len(webm) // 1024} КБ из {STICKER_MAX_BYTES // 1024}\n\n"
+            f"Отправь этот файл боту @Stickers, чтобы создать стикер."
+        ),
+    )
+
+
 @router.message(StickerStates.waiting_file)
 async def on_sticker_wrong_type(message: Message) -> None:
     """Если в режиме ожидания прислали не видео — напоминаем."""
     await message.answer(
         "🤔 Это не похоже на видео или GIF.\n"
-        "Пришли именно видео или GIF (файлом), либо отмени ожидание командой /cancel."
+        "Пришли именно видео или GIF (файлом или как видео), либо отмени ожидание командой /cancel."
     )
