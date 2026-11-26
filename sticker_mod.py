@@ -24,12 +24,10 @@ logger = logging.getLogger(__name__)
 router = Router(name="sticker")
 
 
-# ================= FSM: состояния ожидания файла =================
 class StickerStates(StatesGroup):
-    waiting_file = State()   # ждём видео/GIF после команды /sticker
+    waiting_file = State()
 
 
-# ================= PARSE_MODE (HTML) =================
 _PATCHED_TARGETS = (Message, Bot)
 _PATCHED_ATTRS = (
     "answer", "reply", "forward", "copy_to_chat",
@@ -63,7 +61,6 @@ _patch_parse_mode()
 
 
 def _safe_html(text: str) -> str:
-    """Экранирует текст, чтобы вставки (ошибки ffmpeg и т.п.) не ломали HTML."""
     return (
         str(text)
         .replace("&", "&amp;")
@@ -72,7 +69,6 @@ def _safe_html(text: str) -> str:
     )
 
 
-# ================= НАСТРОЙКИ ФОРМАТА СТИКЕРОВ =================
 STICKER_MAX_SIDE = 512
 STICKER_DURATION = 3.0
 STICKER_MAX_BYTES = 256 * 1024
@@ -90,13 +86,11 @@ HELP_TEXT = (
 )
 
 
-# ================= УТИЛИТЫ FFMPEG =================
 def ffmpeg_available() -> bool:
     return shutil.which(FFMPEG_BIN) is not None
 
 
 async def _run_ffmpeg(args: list[str], timeout: float = 120.0) -> tuple[int, str, str]:
-    """Запускает ffmpeg асинхронно, возвращает (returncode, stdout, stderr)."""
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -111,7 +105,6 @@ async def _run_ffmpeg(args: list[str], timeout: float = 120.0) -> tuple[int, str
 
 
 async def get_media_info(path: str) -> dict:
-    """Возвращает {'duration', 'width', 'height'} через ffprobe."""
     ffprobe = os.getenv("FFPROBE_BIN", "ffprobe")
     if shutil.which(ffprobe) is None:
         return {"duration": None, "width": None, "height": None}
@@ -184,7 +177,6 @@ async def convert_to_telegram_sticker(
     suffix: str = ".bin",
     start: Optional[float] = None,
 ) -> bytes:
-    """Конвертирует байты видео/GIF в формат анимированного стикера Telegram."""
     if not ffmpeg_available():
         raise RuntimeError("ffmpeg не найден в системе (установите его или задайте FFMPEG_BIN)")
 
@@ -227,9 +219,7 @@ async def convert_to_telegram_sticker(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# ================= ХЭНДЛЕРЫ =================
 def _is_video_document(msg: Message) -> bool:
-    """Проверяет, является ли документ видеофайлом по MIME-типу или расширению."""
     if not msg.document:
         return False
     mime = msg.document.mime_type or ""
@@ -261,14 +251,12 @@ async def cmd_stickers_help(message: Message) -> None:
 
 @router.message(Command("cancel"), StateFilter(StickerStates.waiting_file))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
-    """Отмена ожидания файла."""
     await state.clear()
     await message.answer("❌ Ожидание отменено.")
 
 
 @router.message(Command("sticker"))
 async def cmd_sticker(message: Message, state: FSMContext) -> None:
-    """Переводим пользователя в режим ожидания видео/GIF."""
     if not ffmpeg_available():
         await message.answer("⚠️ На сервере не установлен ffmpeg — конвертация невозможна.")
         return
@@ -283,7 +271,6 @@ async def cmd_sticker(message: Message, state: FSMContext) -> None:
 
 @router.message(StickerStates.waiting_file, F.video | F.animation | F.video_note)
 async def on_sticker_file(message: Message, state: FSMContext) -> None:
-    """Получили видео/GIF в режиме ожидания — конвертируем."""
     file_ref = message.animation or message.video or message.video_note
     tg_file = await message.bot.get_file(file_ref.file_id)
     data = await tg_file.download_as_bytearray()
@@ -315,7 +302,6 @@ async def on_sticker_file(message: Message, state: FSMContext) -> None:
 
 @router.message(StickerStates.waiting_file, F.document)
 async def on_sticker_document(message: Message, state: FSMContext) -> None:
-    """Получили документ — проверяем, видео ли это."""
     if not _is_video_document(message):
         await message.answer(
             "🤔 Этот документ не похож на видео.\n"
@@ -354,7 +340,6 @@ async def on_sticker_document(message: Message, state: FSMContext) -> None:
 
 @router.message(StickerStates.waiting_file)
 async def on_sticker_wrong_type(message: Message) -> None:
-    """Если в режиме ожидания прислали не видео — напоминаем."""
     await message.answer(
         "🤔 Это не похоже на видео или GIF.\n"
         "Пришли именно видео или GIF (файлом или как видео), либо отмени ожидание командой /cancel."

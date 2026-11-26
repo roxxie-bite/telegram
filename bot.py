@@ -394,7 +394,9 @@ if not BOT_TOKEN or not OWNER_ID:
 
 OWNER_ID_INT = int(OWNER_ID)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+
+from aiogram.fsm.storage.memory import MemoryStorage
+dp = Dispatcher(storage=MemoryStorage())
 
 # === NEXUS MODSs ===
 NEXUS_CMD_RE = re.compile(r"^/nexus\w*(@\w+)?(\s|$)", re.IGNORECASE)
