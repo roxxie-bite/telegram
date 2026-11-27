@@ -632,7 +632,7 @@ def format_mod_info(result: dict[str, Any], include_files: bool = False) -> str:
     
     lines = [
         f"🎮 <b><a href=\"{_safe(result.get('url'))}\">{_safe(mod.get('name', 'Неизвестный мод'))}</a></b>",
-        "══════════════════════",
+        " ═══════════════",
         "",
         f"🆔 <code>{result.get('game')} / {result.get('mod_id')}</code>",
         "",
@@ -705,7 +705,7 @@ def format_watch_item(item: NexusWatchItem) -> str:
     title = item.name or f"Mod {item.mod_id}"
     lines = [
         f"🎮 <a href=\"{_safe(item.url or _mod_url(item.game, item.mod_id))}\">{_safe(title)}</a>",
-        "══════════════════════",
+        " ═══════════════",
         "",
         f"🆔 <code>{item.game} / {item.mod_id}</code>",
         f"🏷️ <b>Версия:</b> {_safe(item.version or '-')}",
@@ -727,7 +727,7 @@ def format_new_mod(mod: dict[str, Any], game: str) -> str:
     
     lines = [
         f"🆕 <b>Новый мод!</b>",
-        "══════════════════════",
+        " ═══════════════",
         "",
         f"🎮 <b><a href=\"{url}\">{_safe(name)}</a></b>",
         f"🆔 <code>{game} / {mod_id}</code>",
@@ -812,7 +812,7 @@ async def cmd_nexus_help(m: Message):
         return
     text = """
 🎮 <b>Nexus Mods команды</b>
-══════════════════════
+ ═══════════════
 
 <b>Основные:</b>
 <code>/nexusauth</code> — проверить API-ключ
@@ -857,7 +857,7 @@ async def cmd_nexus_auth(m: Message):
         is_premium = data.get("is_premium")
         lines = [
             "✅ <b>API-ключ действителен</b>",
-            "══════════════════════",
+            " ═══════════════",
             "",
             f"👤 <b>Пользователь:</b> {_safe(username)}",
         ]
@@ -951,7 +951,7 @@ async def cmd_nexus_list(m: Message):
         await m.answer("ℹ️ <b>Watchlist пуст</b>\nДобавь мод: <code>/nexusadd &lt;id или ссылка&gt;</code>", parse_mode="HTML")
         return
     chunks: list[str] = []
-    current = f" 🎮 <b>Nexus watchlist ({len(items)})</b>\══════════════════════\n\n"
+    current = f" 🎮 <b>Nexus watchlist ({len(items)})</b>\ ═══════════════\n\n"
     for item in items:
         block = format_watch_item(item) + "\n\n"
         if len(current) + len(block) > 3800:
@@ -1025,7 +1025,7 @@ async def cmd_nexus_check(m: Message):
     get_store().save()
     lines = [
         "✅ <b>Проверка завершена</b>",
-        "══════════════════════",
+        " ═══════════════",
         "",
         f"📊 <b>Статистика:</b>",
         f"• Модов проверено: <b>{len(items)}</b>",
@@ -1086,7 +1086,7 @@ async def _send_mod_list(m: Message, title: str, game: str, mods: list[dict[str,
     lines = [
         f"🎮 <b>{title}</b>",
         f"<code>{_safe(game)}</code>",
-        "══════════════════════",
+        " ═══════════════",
         "",
     ]
     for mod in mods[:10]:
@@ -1161,7 +1161,7 @@ async def cmd_nexus_new(m: Message):
             return
         lines = [
             "🆕 <b>Отслеживание новых модов</b>",
-            "══════════════════════",
+            " ═══════════════",
             "",
         ]
         for game, data in tracked.items():
@@ -1217,7 +1217,7 @@ async def cmd_nexus_new_list(m: Message):
         return
     lines = [
         "  🆕 <b>Отслеживаемые игры</b>",
-        "══════════════════════",
+        " ═══════════════",
         "",
     ]
     for game, data in tracked.items():
