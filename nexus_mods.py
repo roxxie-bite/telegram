@@ -785,15 +785,32 @@ async def _get_mod_images(game: str, mod_id: int, max_images: int = 3) -> list[s
     """Получает URL изображений мода."""
     try:
         images = await get_client().mod_images(game, mod_id)
+        logger.info("📸 Nexus API вернул %d изображений для %s/%d", len(images), game, mod_id)
+        
         urls = []
         for img in images[:max_images]:
-            url = img.get("url") or img.get("URI")
+            # API может возвращать разные структуры
+            url = (
+                img.get("url") or 
+                img.get("URI") or 
+                img.get("image_url") or
+                img.get("src")
+            )
+            
+            # Если URL относительный — делаем абсолютным
+            if url and not url.startswith("http"):
+                url = f"https://www.nexusmods.com{url}"
+            
             if url:
                 urls.append(url)
+                logger.debug("📸 Найдено изображение: %s", url)
+        
+        logger.info("📸 Удалось получить %d URL изображений", len(urls))
         return urls
     except Exception as e:
-        logger.debug("Не удалось получить изображения: %s", e)
+        logger.warning("⚠️ Не удалось получить изображения для %s/%d: %s", game, mod_id, e)
         return []
+
 
 # =========================
 # Bot commands
@@ -951,7 +968,7 @@ async def cmd_nexus_list(m: Message):
         await m.answer("ℹ️ <b>Watchlist пуст</b>\nДобавь мод: <code>/nexusadd &lt;id или ссылка&gt;</code>", parse_mode="HTML")
         return
     chunks: list[str] = []
-    current = f" 🎮 <b>Nexus watchlist ({len(items)})</b>\ ═══════════════\n\n"
+    current = f"🎮 <b>Nexus watchlist ({len(items)})</b>\═══════════════\n\n"
     for item in items:
         block = format_watch_item(item) + "\n\n"
         if len(current) + len(block) > 3800:
@@ -1251,6 +1268,7 @@ async def check_new_mods_for_game(game: str) -> list[dict[str, Any]]:
     
     return new_mods
 
+
 async def send_new_mod_notification(bot: Bot, owner_id: int, game: str, mod: dict[str, Any]) -> None:
     """Отправляет уведомление о новом моде с фотографиями."""
     mod_id = mod.get("mod_id") or mod.get("id")
@@ -1269,6 +1287,8 @@ async def send_new_mod_notification(bot: Bot, owner_id: int, game: str, mod: dic
     ])
     
     if images:
+        logger.info("📸 Отправляю %d изображений для мода %s/%d", len(images), game, mod_id)
+        
         # Отправляем медиа-группу с фото
         from aiogram.types import InputMediaPhoto
         media = []
@@ -1282,11 +1302,14 @@ async def send_new_mod_notification(bot: Bot, owner_id: int, game: str, mod: dic
             await bot.send_media_group(owner_id, media)
             # Отправляем кнопку отдельным сообщением
             await bot.send_message(owner_id, "👆 Нажми кнопку чтобы открыть мод", reply_markup=keyboard)
+            logger.info("✅ Медиа-группа успешно отправлена")
         except Exception as e:
-            logger.warning("Не удалось отправить медиа-группу: %s", e)
+            logger.warning("⚠️ Не удалось отправить медиа-группу: %s", e)
+            logger.warning("⚠️ Попытка отправить только текст")
             # Fallback: отправляем только текст
             await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
     else:
+        logger.info("ℹ️ Изображений нет, отправляю только текст для %s/%d", game, mod_id)
         # Нет изображений — отправляем только текст
         await bot.send_message(owner_id, text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
