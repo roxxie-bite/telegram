@@ -289,7 +289,6 @@ async def on_sticker_file(message: Message, state: FSMContext) -> None:
         return
 
     await wait.delete()
-    await state.clear()
 
     await message.answer_document(
         BufferedInputFile(webm, filename="sticker.webm"),
@@ -325,11 +324,9 @@ async def on_sticker_document(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.exception("sticker conversion failed")
         await wait.edit_text(f"❌ Не удалось сконвертировать: <code>{_safe_html(e)}</code>")
-        await state.clear()
         return
 
     await wait.delete()
-    await state.clear()
 
     await message.answer_document(
         BufferedInputFile(webm, filename="sticker.webm"),
